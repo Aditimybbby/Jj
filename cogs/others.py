@@ -20,7 +20,6 @@ LazyFarmers - https://github.com/routo-loop/neura-self
 import asyncio
 import time
 import re
-import json
 import random
 import core.state as state
 from discord.ext import commands
@@ -34,24 +33,46 @@ NO_TEAM_PHRASES = (
     "you do not have a team",
 )
 
+# a zoo row looks like:  common   🐝¹⁰  🐛⁰⁵  ❓⁰⁰ ...
+# the superscript is how many you own, and ❓⁰⁰ is a slot you have never caught
+ZOO_TOKEN_RE = re.compile(
+    r'(?P<emoji><a?:\w+:\d+>|[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF][\uFE0F\u200D\U0001F000-\U0001FAFF]*)'
+    r'(?P<count>[\u2070\u00b9\u00b2\u00b3\u2074-\u2079]*)'
+)
+SUPERSCRIPTS = {'\u2070': '0', '\u00b9': '1', '\u00b2': '2', '\u00b3': '3', '\u2074': '4',
+                '\u2075': '5', '\u2076': '6', '\u2077': '7', '\u2078': '8', '\u2079': '9'}
+# rarest first so "uncommon" is never matched as "common"
+RARITY_RANK = (
+    ("distorted", 8), ("hidden", 7), ("fabled", 6), ("legendary", 5),
+    ("mythical", 4), ("mythic", 4), ("epic", 3), ("uncommon", 1), ("rare", 2), ("common", 0),
+)
+UNOWNED = ("\u2753", "\u2754", "question")
+
 
 class Others(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.zoo = False
-        self.emoji_dict = {}
         self._team_setup_at = 0
 
-        try:
-            with open("utils/emojis.json", 'r', encoding="utf-8") as file:
-                self.emoji_dict = json.load(file)
-        except:
-            pass
-
-    def get_emoji_names(self, text):
-        pattern = re.compile(r"<a:[a-zA-Z0-9_]+:[0-9]+>|:[a-zA-Z0-9_]+:|[\U0001F300-\U0001F6FF\U0001F700-\U0001F77F]")
-        emojis = pattern.findall(text)
-        return [self.emoji_dict[char]["name"] for char in emojis if char in self.emoji_dict]
+    def parse_zoo(self, raw):
+        """Animals you actually own, rarest first, from an owo zoo message."""
+        found = []
+        for line in raw.splitlines():
+            head = line.replace('*', '').strip().lower()[:20]
+            rank = next((rank for word, rank in RARITY_RANK if word in head), None)
+            if rank is None:
+                continue
+            for match in ZOO_TOKEN_RE.finditer(line):
+                emoji = match.group('emoji')
+                digits = ''.join(SUPERSCRIPTS[c] for c in match.group('count'))
+                if digits and int(digits) == 0:
+                    continue
+                if any(marker in emoji for marker in UNOWNED):
+                    continue
+                found.append((rank, emoji))
+        found.sort(key=lambda item: -item[0])
+        return [emoji for _rank, emoji in found]
 
     async def _auto_accept_rules(self, message):
         all_channels = [str(c) for c in self.bot.channels]
@@ -125,20 +146,19 @@ class Others(commands.Cog):
             await self.bot.neura_enqueue("zoo", priority=2)
             self.bot.log("SYS", "No battle team - reading the zoo to build one")
 
-        elif "'s zoo! **" in content and self.zoo:
+        elif "'s zoo!" in content and self.zoo:
             if not self.bot.is_message_for_me(message, role="header"):
                 return
-            animals = self.get_emoji_names(message.content)
-            animals.reverse()
             self.zoo = False
+            animals = self.parse_zoo(message.content)
 
             if not animals:
-                self.bot.log("WARN", "Zoo has no animals we recognise - team not built")
+                self.bot.log("WARN", "Zoo has no animals we can read - team not built")
                 return
 
-            for i in range(min(len(animals), 3)):
-                await self.bot.neura_enqueue(f"team add {animals[i]}", priority=2)
-                self.bot.log("CMD", f"Added animal: {animals[i]}")
+            for animal in animals[:3]:
+                await self.bot.neura_enqueue(f"team add {animal}", priority=2)
+                self.bot.log("CMD", f"Team: adding {animal}")
 
     async def register_actions(self):
         cfg = self.bot.config.get('utilities', {}).get('stats_sync', {})
