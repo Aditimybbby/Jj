@@ -262,6 +262,12 @@
                 500,
                 650
             ]
+        },
+        "stats_sync": {
+            "balance": true,
+            "balance_interval_s": 900,
+            "level": true,
+            "level_interval_s": 3600
         }
     },
     "gambling": {

@@ -181,6 +181,7 @@ def account_list():
             'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
             'paused': bot.paused,
             'cash': st.get('current_cash', 0),
+            'level': st.get('level'),
             'session_total': session_total,
             'gems_used': st.get('gems_used', 0)
         })

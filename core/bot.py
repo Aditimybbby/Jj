@@ -431,11 +431,11 @@ class NeuraBot(commands.Bot):
             "level_grind": "LevelQuotes",
         }
         top_to_cog = {
-            "reactionBot": "ReactionBot",
-            "security": "Security",
-            "boss": "Boss",
-            "utilities": "ChannelSwitch",
-            "level_grind": "LevelQuotes",
+            "reactionBot": ["ReactionBot"],
+            "security": ["Security"],
+            "boss": ["Boss"],
+            "utilities": ["ChannelSwitch", "Others"],
+            "level_grind": ["LevelQuotes"],
         }
         for path in changed_paths:
             if path == "commands" or path.startswith("commands."):
@@ -445,7 +445,7 @@ class NeuraBot(commands.Bot):
                 else:
                     cog_names.update(cmd_to_cog.values())
             elif path.split(".")[0] in top_to_cog:
-                cog_names.add(top_to_cog[path.split(".")[0]])
+                cog_names.update(top_to_cog[path.split(".")[0]])
         return cog_names
 
     def _prune_disabled_scheduler_cmds(self):
@@ -472,6 +472,8 @@ class NeuraBot(commands.Bot):
             ("shop_cash_sync", enabled("shop")),
             ("level_quotes", self.config.get("level_grind", {}).get("enabled", False)),
             ("channelswitch", self.config.get("utilities", {}).get("autochannel", {}).get("enabled", False)),
+            ("cash_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("balance", True)),
+            ("level_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("level", True)),
         ]
         for cmd_id, is_on in rules:
             if not is_on and cmd_id in self.cmd_states:

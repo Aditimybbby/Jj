@@ -70,6 +70,9 @@ class Owner(commands.Cog):
                 target_channel_id=message.channel.id
             )
             self.bot.log("SYS", "Owner command 'pay': praying for the owner.")
+        elif action.startswith('showbal') or action.startswith('bal'):
+            await self.bot.neura_enqueue("owo cash", priority=2, target_channel_id=message.channel.id)
+            self.bot.log("SYS", "Owner command 'showbal': posting balance.")
         elif action.startswith('send'):
             self._cash_requested_at = time.time()
             self._transfer_channel_id = message.channel.id
@@ -110,6 +113,16 @@ class Owner(commands.Cog):
             self.bot.log("INFO", f"Owner command 'send': sending {amount} cowoncy (owo per-transfer cap), {balance - amount} left over.")
         else:
             self.bot.log("SUCCESS", f"Owner command 'send': sending {amount} cowoncy to the owner.")
+
+
+    async def register_actions(self):
+        cfg = self._config()
+        owner_id = self._owner_id()
+        trigger = str(cfg.get('trigger', 'farmers')).lower().strip()
+        if owner_id:
+            self.bot.log("SYS", f"Owner commands active for {owner_id} - '{trigger} pay | {trigger} send | {trigger} showbal'")
+        elif cfg.get('enabled', False):
+            self.bot.log("WARN", f"Owner commands enabled but owner.user_id is not a Discord ID: {cfg.get('user_id')!r}")
 
 
 async def setup(bot):

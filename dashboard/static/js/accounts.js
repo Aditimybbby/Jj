@@ -98,6 +98,11 @@ function renderAccountGrid() {
                         <div class="account-stat-lbl">Balance</div>
                     </div>
                     <div class="account-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/chart-column.svg');"></span>
+                        <div class="account-stat-val">${acc.level ?? '—'}</div>
+                        <div class="account-stat-lbl">OwO Level</div>
+                    </div>
+                    <div class="account-stat">
                         <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/terminal.svg');"></span>
                         <div class="account-stat-val">${acc.session_total || 0}</div>
                         <div class="account-stat-lbl">Session Cmds</div>

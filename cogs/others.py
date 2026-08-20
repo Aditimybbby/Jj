@@ -25,12 +25,23 @@ import random
 import core.state as state
 from discord.ext import commands
 
+LEVEL_RE = re.compile(r'(?:you are|leveled up to|is now)\s*\**\s*level\s*\**\s*(\d+)')
+NO_TEAM_PHRASES = (
+    "do not have an active battle team",
+    "don't have an active battle team",
+    "do not have a battle team",
+    "don't have a battle team",
+    "you do not have a team",
+)
+
+
 class Others(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.zoo = False
         self.emoji_dict = {}
-        
+        self._team_setup_at = 0
+
         try:
             with open("utils/emojis.json", 'r', encoding="utf-8") as file:
                 self.emoji_dict = json.load(file)
@@ -76,13 +87,13 @@ class Others(commands.Cog):
         if str(message.channel.id) not in all_channels:
             return
 
-        content = message.content.lower()
-        
+        content = self.bot.get_full_content(message)
+
         if "you currently have" in content and "cowoncy" in content:
             if not self.bot.is_message_for_me(message, role="header"):
                 return
             try:
-                cash_match = re.search(r'you currently have[^\d]*(\d{1,3}(?:,\d{3})*)', message.content.lower())
+                cash_match = re.search(r'you currently have[^\d]*([\d,]+)', content)
                 if cash_match:
                     cash_str = cash_match.group(1).replace(',', '')
                     is_initial = self.bot.stats['current_cash'] is None
@@ -96,13 +107,23 @@ class Others(commands.Cog):
             except:
                 pass
 
+        elif LEVEL_RE.search(content):
+            if not self.bot.is_message_for_me(message, role="header"):
+                return
+            level = int(LEVEL_RE.search(content).group(1))
+            if self.bot.stats.get('level') != level:
+                self.bot.stats['level'] = level
+                self.bot.log("INFO", f"OwO level synced: {level}")
 
-        elif "you do not have an active battle team" in content:
+        elif any(phrase in content for phrase in NO_TEAM_PHRASES):
             if not self.bot.is_message_for_me(message):
                 return
+            if time.time() - self._team_setup_at < 60:
+                return
+            self._team_setup_at = time.time()
             self.zoo = True
             await self.bot.neura_enqueue("zoo", priority=2)
-            self.bot.log("SYS", "Zoo triggered")
+            self.bot.log("SYS", "No battle team - reading the zoo to build one")
 
         elif "'s zoo! **" in content and self.zoo:
             if not self.bot.is_message_for_me(message, role="header"):
@@ -110,13 +131,34 @@ class Others(commands.Cog):
             animals = self.get_emoji_names(message.content)
             animals.reverse()
             self.zoo = False
-            
+
+            if not animals:
+                self.bot.log("WARN", "Zoo has no animals we recognise - team not built")
+                return
+
             for i in range(min(len(animals), 3)):
                 await self.bot.neura_enqueue(f"team add {animals[i]}", priority=2)
                 self.bot.log("CMD", f"Added animal: {animals[i]}")
 
     async def register_actions(self):
-        pass
+        cfg = self.bot.config.get('utilities', {}).get('stats_sync', {})
+
+        if cfg.get('balance', True):
+            await self.bot.neura_register_command(
+                "cash_sync",
+                "owo cash",
+                priority=self.bot.get_cmd_priority("cash_sync", 4),
+                delay=max(300, int(cfg.get('balance_interval_s', 900))),
+                initial_offset=25,
+            )
+        if cfg.get('level', True):
+            await self.bot.neura_register_command(
+                "level_sync",
+                "owo level",
+                priority=self.bot.get_cmd_priority("level_sync", 4),
+                delay=max(600, int(cfg.get('level_interval_s', 3600))),
+                initial_offset=45,
+            )
 
 async def setup(bot):
     cog = Others(bot)

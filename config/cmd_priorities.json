@@ -15,5 +15,7 @@
     "shop_buy": 3,
     "shop_cash_sync": 3,
     "sell": 4,
-    "sacrifice": 4
+    "sacrifice": 4,
+    "cash_sync": 4,
+    "level_sync": 4
 }
