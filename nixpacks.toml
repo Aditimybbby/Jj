@@ -1,0 +1,6 @@
+# git: discord.py-self installs from a pinned commit
+# libgomp1: onnxruntime needs it at runtime
+# "..." keeps the packages Nixpacks picks by itself
+[phases.setup]
+nixPkgs = ["...", "git"]
+aptPkgs = ["...", "libgomp1"]
