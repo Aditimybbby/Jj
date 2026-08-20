@@ -1,1 +1,1 @@
-web: python neura.py
+web: python -u neura.py
