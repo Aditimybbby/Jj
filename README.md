@@ -59,7 +59,7 @@ Instead of sending just gambling commands, it has strategies (martingale ,flat) 
 
 - **Advanced AutoGems**: Automatically equip gems.
 
-- **Owner Commands**: Type `farmers pay` in the channel and every farm account prays for you; type `farmers send` and they each transfer their cowoncy to you. Enable it under the `owner` section in the config (set `user_id` to your Discord ID; `trigger` renames the `farmers` keyword).
+- **Owner Commands**: From your own account, type `farmers pay` and every farm account prays for you, `farmers send` and they each transfer their cowoncy to you, `farmers showbal` and they post their balance. Anything else is forwarded straight to OwO, so `farmers team add bee2` makes every account run `owo team add bee2`, `farmers zoo` runs `owo zoo`, and so on. Enable it under the `owner` section in the config (set `user_id` to your Discord ID; `trigger` renames the `farmers` keyword).
 
 - **Easy to setup** : Setup files make it very easy to download and configure.
 

@@ -58,26 +58,42 @@ class Owner(commands.Cog):
             return
 
         trigger = str(self._config().get('trigger', 'farmers')).lower().strip()
-        content = (message.content or "").lower().strip()
-        if not trigger or not content.startswith(trigger):
+        raw = (message.content or "").strip()
+        if not trigger or not raw.lower().startswith(trigger):
             return
 
-        action = content[len(trigger):].strip()
-        if action.startswith('pay'):
+        action = raw[len(trigger):].strip()
+        lowered = action.lower()
+        if not action:
+            return
+
+        if lowered.startswith('pay'):
             await self.bot.neura_enqueue(
                 f"owo pray <@{owner_id}>",
                 priority=2,
                 target_channel_id=message.channel.id
             )
             self.bot.log("SYS", "Owner command 'pay': praying for the owner.")
-        elif action.startswith('showbal') or action.startswith('bal'):
+        elif lowered.startswith('showbal') or lowered.startswith('bal'):
             await self.bot.neura_enqueue("owo cash", priority=2, target_channel_id=message.channel.id)
             self.bot.log("SYS", "Owner command 'showbal': posting balance.")
-        elif action.startswith('send'):
+        elif lowered.startswith('send'):
             self._cash_requested_at = time.time()
             self._transfer_channel_id = message.channel.id
             await self.bot.neura_enqueue("owo cash", priority=2, target_channel_id=message.channel.id)
             self.bot.log("SYS", "Owner command 'send': checking balance before transferring.")
+        else:
+            # anything else is forwarded as-is, so "farmers team add bee2" runs "owo team add bee2"
+            prefix = self.bot.prefix.strip().lower()
+            command = action[len(prefix):].strip() if lowered.startswith(prefix + ' ') else action
+            if not command:
+                return
+            await self.bot.neura_enqueue(
+                f"{self.bot.prefix}{command}",
+                priority=2,
+                target_channel_id=message.channel.id
+            )
+            self.bot.log("SYS", f"Owner command: running '{self.bot.prefix}{command}'")
 
     async def _handle_cash_reply(self, message, owner_id):
         if not self._cash_requested_at:
@@ -120,7 +136,7 @@ class Owner(commands.Cog):
         owner_id = self._owner_id()
         trigger = str(cfg.get('trigger', 'farmers')).lower().strip()
         if owner_id:
-            self.bot.log("SYS", f"Owner commands active for {owner_id} - '{trigger} pay | {trigger} send | {trigger} showbal'")
+            self.bot.log("SYS", f"Owner commands active for {owner_id} - '{trigger} pay | {trigger} send | {trigger} showbal | {trigger} <any owo command>'")
         elif cfg.get('enabled', False):
             self.bot.log("WARN", f"Owner commands enabled but owner.user_id is not a Discord ID: {cfg.get('user_id')!r}")
 
