@@ -72,21 +72,27 @@ class Others(commands.Cog):
         """Animals you actually own, rarest first, named the way owo team add wants them."""
         found = []
         for line in raw.splitlines():
-            head = line.replace('*', '').strip().lower()[:20]
+            head = line.replace('*', '').strip().lower()[:24]
             match = next(((word, rank) for word, rank in RARITY_RANK if word in head), None)
             if match is None:
                 continue
             tier, rank = match
             tier_names = ZOO_TIERS.get(tier, ())
 
-            for slot, token in enumerate(ZOO_TOKEN_RE.finditer(line)):
-                emoji = token.group('emoji')
-                digits = ''.join(SUPERSCRIPTS[c] for c in token.group('count'))
-                if digits and int(digits) == 0:
-                    continue
-                if any(marker in emoji for marker in UNOWNED):
-                    continue
+            # every animal carries a superscript count; the tier icon in front of the
+            # row does not, and counting it would shift every slot by one
+            slots = [
+                (token.group('emoji'), ''.join(SUPERSCRIPTS[c] for c in token.group('count')))
+                for token in ZOO_TOKEN_RE.finditer(line)
+                if token.group('count')
+            ]
+            if tier_names and len(slots) != len(tier_names):
+                self.bot.log("DEBUG", f"Zoo row '{tier}' has {len(slots)} slots, expected {len(tier_names)} - skipped")
+                continue
 
+            for slot, (emoji, digits) in enumerate(slots):
+                if int(digits) == 0 or any(marker in emoji for marker in UNOWNED):
+                    continue
                 if slot < len(tier_names):
                     animal = tier_names[slot]
                 else:
