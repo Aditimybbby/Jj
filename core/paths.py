@@ -23,13 +23,18 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLED_CONFIG_DIR = os.path.join(BASE_DIR, 'config')
 
 # hosts with ephemeral disks (Railway, docker) point this at a mounted volume so
-# tokens, dashboard credentials and stats survive a redeploy
-DATA_ROOT = os.environ.get('LAZYFARMERS_DATA_ROOT') or BASE_DIR
+# tokens, dashboard credentials and stats survive a redeploy. Railway sets
+# RAILWAY_VOLUME_MOUNT_PATH by itself as soon as a volume is attached.
+DATA_ROOT = os.environ.get('LAZYFARMERS_DATA_ROOT') or os.environ.get('RAILWAY_VOLUME_MOUNT_PATH') or BASE_DIR
 CONFIG_DIR = os.path.join(DATA_ROOT, 'config')
 DATA_DIR = os.path.join(DATA_ROOT, 'data')
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
+
+if DATA_ROOT == BASE_DIR and any(key.startswith('RAILWAY_') for key in os.environ):
+    print("[!] No volume attached - accounts, tokens and stats will be wiped on the next deploy. "
+          "Add a volume in Railway (any mount path) or set LAZYFARMERS_DATA_ROOT.", flush=True)
 
 if CONFIG_DIR != BUNDLED_CONFIG_DIR and os.path.isdir(BUNDLED_CONFIG_DIR):
     for name in os.listdir(BUNDLED_CONFIG_DIR):

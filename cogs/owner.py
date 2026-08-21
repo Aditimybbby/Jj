@@ -53,6 +53,19 @@ class Owner(commands.Cog):
         elif str(message.author.id) == owner_id:
             await self._handle_trigger(message, owner_id)
 
+    def _known_account_names(self):
+        return {str(a.get('name', '')).lower() for a in getattr(self.bot, 'accounts', []) if a.get('name')}
+
+    def _selector_targets_me(self, token):
+        """'farmers acc2 bal' / 'farmers <user id> bal' - only that account reacts."""
+        token = token.lower()
+        if token.isdigit():
+            return token == str(self.bot.user.id)
+        return token == str(getattr(self.bot, 'account_name', '')).lower()
+
+    def _is_selector(self, token):
+        return token.isdigit() or token.lower() in self._known_account_names()
+
     async def _handle_trigger(self, message, owner_id):
         if str(self.bot.user.id) == owner_id:
             return
@@ -63,9 +76,18 @@ class Owner(commands.Cog):
             return
 
         action = raw[len(trigger):].strip()
-        lowered = action.lower()
         if not action:
             return
+
+        parts = action.split(None, 1)
+        if len(parts) == 2 and self._is_selector(parts[0]):
+            if not self._selector_targets_me(parts[0]):
+                return
+            action = parts[1].strip()
+            if not action:
+                return
+
+        lowered = action.lower()
 
         if lowered.startswith('pay'):
             await self.bot.neura_enqueue(

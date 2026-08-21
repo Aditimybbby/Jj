@@ -576,6 +576,31 @@ def account_verify():
     return jsonify({'success': True, 'results': results})
 
 
+@app.route('/api/accounts/export')
+@login_required
+def account_export():
+    from utils import proxy_manager
+    only_problem = request.args.get('only') == 'problem'
+    accounts = proxy_manager.load_accounts()
+    if only_problem:
+        accounts = [a for a in accounts if a.get('status', 'ok') != 'ok']
+
+    lines = []
+    for account in accounts:
+        parts = [str(account.get('name', 'unnamed')), str(account.get('token', ''))]
+        if account.get('status', 'ok') != 'ok':
+            parts.append(f"{account.get('status')} - {account.get('status_reason') or ''}".strip())
+        lines.append(':'.join(parts))
+
+    body = '\n'.join(lines) + ('\n' if lines else '')
+    name = 'problem-accounts.txt' if only_problem else 'accounts.txt'
+    return app.response_class(
+        body,
+        mimetype='text/plain',
+        headers={'Content-Disposition': f'attachment; filename={name}'},
+    )
+
+
 @app.route('/api/accounts/bulk', methods=['POST'])
 @login_required
 def account_bulk_import():

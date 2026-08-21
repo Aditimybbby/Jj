@@ -243,6 +243,7 @@ class NeuraBot(commands.Bot):
         
         self.is_ready = True
         self._already_ready = True
+        self.flag_account("ok", None)
         
         if self.session is None:
             self.session = aiohttp.ClientSession()
@@ -322,7 +323,13 @@ class NeuraBot(commands.Bot):
                 self.log("CMD", f"Sent: {short_cmd}{typing_str}")
                 return True
             except Exception as e:
-                self.log("ERROR", f"Send failed: {str(e)}")
+                detail = f"{type(e).__name__}: {e}"
+                lowered = detail.lower()
+                if isinstance(e, discord.Forbidden):
+                    self.flag_account("cannot_send", detail[:200])
+                elif "captcha" in lowered or "verify" in lowered or getattr(e, 'code', None) == 40002:
+                    self.flag_account("needs_verification", detail[:200])
+                self.log("ERROR", f"Send failed: {detail}")
                 return False
     
     def _fix_command(self, command):
@@ -388,6 +395,17 @@ class NeuraBot(commands.Bot):
 
     def log(self, log_type, message):
         neura_logger.log(self, log_type, message)
+
+    def flag_account(self, status, reason=None):
+        """Record token/permission problems against the account in accounts.json."""
+        name = getattr(self, 'account_name', None)
+        if not name:
+            return
+        try:
+            from utils import proxy_manager
+            proxy_manager.set_account_status(name, status, reason)
+        except Exception as e:
+            _log.warning("could not record account status: %s", e)
 
     async def _load_cogs(self):
         cogs_dir = os.path.join(self.base_dir, 'cogs')
@@ -663,10 +681,12 @@ class NeuraBot(commands.Bot):
                 await self.start(self.token)
             except discord.LoginFailure as e:
                 self.log("ERROR", f"Login failed: {e}. Update the token in the dashboard.")
+                self.flag_account("invalid_token", str(e)[:200])
                 return
             except discord.ConnectionClosed as e:
                 if e.code == 4004:
                     self.log("ERROR", "Token rejected by Discord (4004). Update the token in the dashboard.")
+                    self.flag_account("invalid_token", "gateway rejected the token (4004)")
                     return
                 # discord.py re-raises every close code except 1000, which kills the account
                 # until we start a new session ourselves

@@ -192,3 +192,12 @@
 }
 .acct-state.running { color: #00ff88; border: 1px solid rgba(0, 255, 136, 0.4); }
 .acct-state.stopped { color: var(--text-muted); border: 1px solid var(--border); }
+.acct-state.problem { color: #ff5c5c; border: 1px solid rgba(255, 92, 92, 0.5); }
+.account-problem-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 22px;
+    flex-wrap: wrap;
+}

@@ -33,6 +33,19 @@ NO_TEAM_PHRASES = (
     "you do not have a team",
 )
 
+# every zoo row lists the whole tier in a fixed order, with a question mark holding
+# the slot of an animal you have never caught - so the slot index gives us the name
+# owo expects in "owo team add <name>" (names from the owo wiki)
+ZOO_TIERS = {
+    "common": ("bee", "bug", "snail", "beetle", "butterfly"),
+    "uncommon": ("chick", "mouse", "chicken", "rabbit", "chipmunk"),
+    "rare": ("sheep", "pig", "cow", "dog", "cat"),
+    "epic": ("crocodile", "tiger", "penguin", "elephant", "whale"),
+    "mythic": ("dragon", "unicorn", "snowman", "ghost", "dove"),
+    "mythical": ("dragon", "unicorn", "snowman", "ghost", "dove"),
+}
+CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):\d+>')
+
 # a zoo row looks like:  common   🐝¹⁰  🐛⁰⁵  ❓⁰⁰ ...
 # the superscript is how many you own, and ❓⁰⁰ is a slot you have never caught
 ZOO_TOKEN_RE = re.compile(
@@ -56,23 +69,32 @@ class Others(commands.Cog):
         self._team_setup_at = 0
 
     def parse_zoo(self, raw):
-        """Animals you actually own, rarest first, from an owo zoo message."""
+        """Animals you actually own, rarest first, named the way owo team add wants them."""
         found = []
         for line in raw.splitlines():
             head = line.replace('*', '').strip().lower()[:20]
-            rank = next((rank for word, rank in RARITY_RANK if word in head), None)
-            if rank is None:
+            match = next(((word, rank) for word, rank in RARITY_RANK if word in head), None)
+            if match is None:
                 continue
-            for match in ZOO_TOKEN_RE.finditer(line):
-                emoji = match.group('emoji')
-                digits = ''.join(SUPERSCRIPTS[c] for c in match.group('count'))
+            tier, rank = match
+            tier_names = ZOO_TIERS.get(tier, ())
+
+            for slot, token in enumerate(ZOO_TOKEN_RE.finditer(line)):
+                emoji = token.group('emoji')
+                digits = ''.join(SUPERSCRIPTS[c] for c in token.group('count'))
                 if digits and int(digits) == 0:
                     continue
                 if any(marker in emoji for marker in UNOWNED):
                     continue
-                found.append((rank, emoji))
+
+                if slot < len(tier_names):
+                    animal = tier_names[slot]
+                else:
+                    custom = CUSTOM_EMOJI_RE.fullmatch(emoji)
+                    animal = custom.group(1) if custom else emoji
+                found.append((rank, animal))
         found.sort(key=lambda item: -item[0])
-        return [emoji for _rank, emoji in found]
+        return [animal for _rank, animal in found]
 
     async def _auto_accept_rules(self, message):
         all_channels = [str(c) for c in self.bot.channels]
@@ -112,6 +134,7 @@ class Others(commands.Cog):
 
         if "you currently have" in content and "cowoncy" in content:
             if not self.bot.is_message_for_me(message, role="header"):
+                self.bot.log("DEBUG", f"Balance reply ignored, not recognised as mine: {content.splitlines()[0][:80]}")
                 return
             try:
                 cash_match = re.search(r'you currently have[^\d]*([\d,]+)', content)
@@ -130,6 +153,7 @@ class Others(commands.Cog):
 
         elif LEVEL_RE.search(content):
             if not self.bot.is_message_for_me(message, role="header"):
+                self.bot.log("DEBUG", f"Level reply ignored, not recognised as mine: {content.splitlines()[0][:80]}")
                 return
             level = int(LEVEL_RE.search(content).group(1))
             if self.bot.stats.get('level') != level:

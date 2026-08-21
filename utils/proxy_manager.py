@@ -84,6 +84,25 @@ def save_accounts(accounts):
         json.dump({"accounts": accounts}, f, indent=4)
 
 
+def set_account_status(name, status, reason=None):
+    """Record why an account is unusable so the dashboard can group it separately."""
+    if not name:
+        return
+    accounts = load_accounts()
+    changed = False
+    for account in accounts:
+        if str(account.get("name")) != str(name):
+            continue
+        if account.get("status", "ok") == status and account.get("status_reason") == reason:
+            return
+        account["status"] = status
+        account["status_reason"] = reason
+        account["status_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        changed = True
+    if changed:
+        save_accounts(accounts)
+
+
 def _normalize_type(proxy_type):
     proxy_type = (proxy_type or DEFAULT_PROXY_TYPE).lower().strip()
     if proxy_type not in SUPPORTED_TYPES:

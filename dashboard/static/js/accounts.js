@@ -129,6 +129,48 @@ window.fetchAccountConfig = async function() {
     }
 };
 
+const ACCOUNT_STATUS_LABELS = {
+    invalid_token: 'TOKEN DEAD',
+    needs_verification: 'NEEDS VERIFICATION',
+    cannot_send: "CAN'T SEND",
+};
+
+function accountConfigCard(acc) {
+    const i = accountConfigList.indexOf(acc);
+    const token = acc.token_masked || '••••••';
+    const proxy = acc.proxy_id ? `Proxy: ${acc.proxy_id}` : 'Direct';
+    const status = acc.enabled !== false ? 'Enabled' : 'Disabled';
+    const channels = (acc.channels || []).join(' ') || 'no channel id';
+    const name = acc.name || 'Unnamed';
+    const health = acc.status || 'ok';
+    const runState = acc.running
+        ? '<span class="acct-state running">RUNNING</span>'
+        : '<span class="acct-state stopped">STOPPED</span>';
+    const healthState = health === 'ok' ? '' :
+        `<span class="acct-state problem">${ACCOUNT_STATUS_LABELS[health] || health.toUpperCase()}</span>`;
+    const reason = health === 'ok' || !acc.status_reason ? '' :
+        `<span class="dim">${acc.status_reason}</span>`;
+    const runBtn = acc.running
+        ? `<button class="btn-proxy-sm danger" onclick="stopAccount('${encodeURIComponent(name)}')">Stop</button>`
+        : `<button class="btn-proxy-sm" onclick="launchAccount('${encodeURIComponent(name)}')">Start</button>`;
+    return `
+        <div class="account-config-card">
+            <div class="account-config-info">
+                <strong>${name} ${runState}${healthState}</strong>
+                <span class="mono">${token}</span>
+                <span class="dim">${proxy} · ${status} · Channels: ${channels}</span>
+                ${reason}
+            </div>
+            <div class="account-config-actions">
+                ${runBtn}
+                <button class="btn-proxy-sm" onclick="verifyAccounts(['${encodeURIComponent(name)}'])">Verify</button>
+                <button class="btn-proxy-sm" onclick="editAccountConfig(${i})">Edit</button>
+                <button class="btn-proxy-sm danger" onclick="deleteAccountConfig(${i})">Del</button>
+            </div>
+        </div>
+    `;
+}
+
 function renderAccountConfigList() {
     const el = document.getElementById('account-config-list');
     if (!el) return;
@@ -136,35 +178,25 @@ function renderAccountConfigList() {
         el.innerHTML = '<div class="no-data">No accounts configured. Click Add Account.</div>';
         return;
     }
-    el.innerHTML = accountConfigList.map((acc, i) => {
-        const token = acc.token_masked || '••••••';
-        const proxy = acc.proxy_id ? `Proxy: ${acc.proxy_id}` : 'Direct';
-        const status = acc.enabled !== false ? 'Enabled' : 'Disabled';
-        const channels = (acc.channels || []).join(' ') || 'no channel id';
-        const name = acc.name || 'Unnamed';
-        const runState = acc.running
-            ? '<span class="acct-state running">RUNNING</span>'
-            : '<span class="acct-state stopped">STOPPED</span>';
-        const runBtn = acc.running
-            ? `<button class="btn-proxy-sm danger" onclick="stopAccount('${encodeURIComponent(name)}')">Stop</button>`
-            : `<button class="btn-proxy-sm" onclick="launchAccount('${encodeURIComponent(name)}')">Start</button>`;
-        return `
-            <div class="account-config-card">
-                <div class="account-config-info">
-                    <strong>${name} ${runState}</strong>
-                    <span class="mono">${token}</span>
-                    <span class="dim">${proxy} · ${status} · Channels: ${channels}</span>
-                </div>
-                <div class="account-config-actions">
-                    ${runBtn}
-                    <button class="btn-proxy-sm" onclick="verifyAccounts(['${encodeURIComponent(name)}'])">Verify</button>
-                    <button class="btn-proxy-sm" onclick="editAccountConfig(${i})">Edit</button>
-                    <button class="btn-proxy-sm danger" onclick="deleteAccountConfig(${i})">Del</button>
-                </div>
+    const problem = accountConfigList.filter(a => (a.status || 'ok') !== 'ok');
+    const healthy = accountConfigList.filter(a => (a.status || 'ok') === 'ok');
+
+    let html = healthy.map(accountConfigCard).join('');
+    if (problem.length) {
+        html += `
+            <div class="account-problem-header">
+                <h3 class="section-subtitle">Needs attention (${problem.length})</h3>
+                <button class="btn-proxy-sm" onclick="downloadAccounts('problem')">Download these tokens</button>
             </div>
+            ${problem.map(accountConfigCard).join('')}
         `;
-    }).join('');
+    }
+    el.innerHTML = html;
 }
+
+window.downloadAccounts = function(only) {
+    window.location = only === 'problem' ? '/api/accounts/export?only=problem' : '/api/accounts/export';
+};
 
 async function accountAction(url, body, successMsg) {
     try {
