@@ -323,13 +323,7 @@ class NeuraBot(commands.Bot):
                 self.log("CMD", f"Sent: {short_cmd}{typing_str}")
                 return True
             except Exception as e:
-                detail = f"{type(e).__name__}: {e}"
-                lowered = detail.lower()
-                if isinstance(e, discord.Forbidden):
-                    self.flag_account("cannot_send", detail[:200])
-                elif "captcha" in lowered or "verify" in lowered or getattr(e, 'code', None) == 40002:
-                    self.flag_account("needs_verification", detail[:200])
-                self.log("ERROR", f"Send failed: {detail}")
+                self.note_send_failure(e)
                 return False
     
     def _fix_command(self, command):
@@ -406,6 +400,26 @@ class NeuraBot(commands.Bot):
             proxy_manager.set_account_status(name, status, reason)
         except Exception as e:
             _log.warning("could not record account status: %s", e)
+
+    def note_send_failure(self, exc):
+        """Classify a failed send, flag the account and stop hammering Discord."""
+        detail = f"{type(exc).__name__}: {exc}"
+        lowered = detail.lower()
+
+        if "verify your account" in lowered or getattr(exc, 'code', None) == 40002 or "captcha" in lowered:
+            self.log("ERROR", f"Send failed - account needs verification: {exc}")
+            self.flag_account("needs_verification", detail[:200])
+            if not self.paused:
+                self.paused = True
+                self.log("SECURITY", "Paused: Discord wants this account verified. Verify it, then resume the account from the dashboard.")
+        elif isinstance(exc, discord.Forbidden):
+            self.log("ERROR", f"Send failed - no permission: {exc}")
+            self.flag_account("cannot_send", detail[:200])
+            if not self.paused:
+                self.paused = True
+                self.log("SECURITY", "Paused: this account cannot post in its channel.")
+        else:
+            self.log("ERROR", f"Send failed: {detail}")
 
     async def _load_cogs(self):
         cogs_dir = os.path.join(self.base_dir, 'cogs')

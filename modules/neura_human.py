@@ -181,7 +181,7 @@ class NeuraHuman:
                 await channel.send(content)
                 return True
             except Exception as final_e:
-                bot.log("ERROR", f"Critical send failure: {final_e}")
+                bot.note_send_failure(final_e)
                 return False
 
     @staticmethod

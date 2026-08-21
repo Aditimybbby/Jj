@@ -134,9 +134,11 @@ class Giveaway(commands.Cog):
                         continue
                 
                 if channel:
-                    permissions = channel.permissions_for(channel.guild.me)
-                    if not permissions.read_messages or not permissions.read_message_history:
-                        continue
+                    me = channel.guild.me if getattr(channel, 'guild', None) else None
+                    if me is not None:
+                        permissions = channel.permissions_for(me)
+                        if not permissions.read_messages or not permissions.read_message_history:
+                            continue
 
                     try:
                         async for msg in channel.history(limit=20):
