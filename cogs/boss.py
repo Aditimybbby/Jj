@@ -23,7 +23,8 @@ import asyncio
 import time
 import random
 
-from component_v2_neura import parse_v2_message, get_boss_battle_id
+from component_v2_neura import parse_v2_message, collect_text, find_button, get_boss_battle_id
+import core.state as state
 import json
 import os
 import re
@@ -31,7 +32,7 @@ import re
 class Boss(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.state_file = "data/boss_state.json"
+        self.state_file = os.path.join(state.DATA_DIR, "boss_state.json")
         self._load_state()
         self.enabled = self.bot.config.get("boss", {}).get("enabled", True)
         self.join_chance = self.bot.config.get("boss", {}).get("join_chance", 100)
@@ -74,13 +75,15 @@ class Boss(commands.Cog):
 
     def _save_state(self):
         try:
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
             with open(self.state_file, "w") as f:
                 json.dump({
                     "tickets": self.tickets,
                     "last_reset": self.last_reset,
-                    "joined_ids": list(self.joined_ids)
+                    "joined_ids": list(self.joined_ids)[-200:]
                 }, f)
-        except: pass
+        except Exception as e:
+            self.bot.log("ERROR", f"Failed to save boss state: {e}")
 
     def _check_reset(self):
         now = time.time()
@@ -127,14 +130,18 @@ class Boss(commands.Cog):
 
         try:
             raw_data = json.loads(msg)
-        except:
+        except Exception:
             return
 
-        if raw_data.get("t") != "MESSAGE_CREATE":
+        if raw_data.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             return
 
-        data = raw_data.get("d", {})
-        if str(data.get("author", {}).get("id")) != self.bot.owo_bot_id:
+        data = raw_data.get("d") or {}
+        if str((data.get("author") or {}).get("id")) != self.bot.owo_bot_id:
+            return
+
+        raw_channel_id = data.get("channel_id")
+        if not raw_channel_id:
             return
 
         components = parse_v2_message(data)
@@ -142,21 +149,17 @@ class Boss(commands.Cog):
             return
 
         content = (data.get("content") or "").lower()
-        v2_text = " ".join([c.content for c in components if c.name == "text_display"]).lower()
+        v2_text = collect_text(components).lower()
         full_text = f"{content} {v2_text}"
-        
+
         is_spawn = "runs away" in full_text or "guild boss" in full_text
-        fight_btn = next((c for c in components if c.custom_id == "guildboss_fight"), None)
-        
+        fight_btn = find_button(components, custom_id="guildboss_fight") or find_button(components, contains="guildboss")
+
         if not is_spawn and not fight_btn:
-            if "already joined" in v2_text:
-                pass 
             return
 
-        channel_id = int(data.get("channel_id"))
+        channel_id = int(raw_channel_id)
         guild_id = str(data.get("guild_id") or "")
-
-
         if guild_id in [str(g) for g in self.ignore_guilds]:
             return
         can_join = False
@@ -177,10 +180,9 @@ class Boss(commands.Cog):
             return
 
         battle_id = get_boss_battle_id(components)
-        if battle_id and battle_id in self.joined_ids:
-            return
-
         tracking_id = battle_id or f"msg_{data.get('id')}"
+        if tracking_id in self.joined_ids:
+            return
 
         self._check_reset()
         if self.tickets <= 0:
@@ -198,14 +200,12 @@ class Boss(commands.Cog):
         if self.bot.paused:
             return
 
-        guild_id = data.get("guild_id")
-        
         success = await self.bot.interactions.click_button_raw(
             custom_id=fight_btn.custom_id,
             message_id=data.get("id"),
             channel_id=channel_id,
-            author_id=data.get("author", {}).get("id"),
-            guild_id=guild_id,
+            author_id=(data.get("author") or {}).get("id"),
+            guild_id=data.get("guild_id"),
             flags=data.get("flags", 0)
         )
 

@@ -15,6 +15,7 @@
 -->
 
 <!DOCTYPE html>
+<html lang="en">
 
 <head>
     <meta charset="UTF-8">
@@ -26,16 +27,17 @@
         rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
-    <link rel="stylesheet" href="/static/css/base.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/layout.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/components.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/accounts.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/dashboard.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/config.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/proxies.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/security.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/pages/history.css?v=2.4.0.1">
-    <link rel="stylesheet" href="/static/css/responsive.css?v=2.4.0.1">
+    <link rel="stylesheet" href="/static/css/base.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/layout.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/components.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/accounts.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/dashboard.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/config.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/proxies.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/security.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/history.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/pages/users.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/responsive.css?v=2.4.1.0">
 </head>
 
 <body>
@@ -43,7 +45,8 @@
         <div class="save-bar-text">Careful — you have unsaved changes!</div>
         <div class="save-bar-btns">
             <button class="btn-discard-floating" onclick="discardChanges()">Reset</button>
-            <button class="btn-save-all-floating" onclick="saveToAllConfigs()">Save to All Accounts</button>
+            <button class="btn-save-all-floating" onclick="saveToAllConfigs()" data-admin-only>Save to All
+                Accounts</button>
             <button class="btn-save-floating" onclick="saveAllConfigs()">Save Changes</button>
         </div>
     </div>
@@ -96,7 +99,7 @@
                         style="--icon: url('/static/assets/neura_icons/chart-pie.svg');"></span> Dashboard</a>
                 <a class="nav-item" onclick="nav('config', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/sliders.svg');"></span> Configuration</a>
-                <a class="nav-item" onclick="nav('proxies', this)"><span class="icon-svg"
+                <a class="nav-item" onclick="nav('proxies', this)" data-admin-only><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/layers.svg');"></span> Proxies</a>
                 <a class="nav-item" onclick="nav('security', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/shield-halved.svg');"></span> Security</a>
@@ -104,6 +107,8 @@
                         style="--icon: url('/static/assets/neura_icons/clock-rotate-left.svg');"></span> History</a>
                 <a class="nav-item" onclick="nav('logs', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/terminal.svg');"></span> Terminal</a>
+                <a class="nav-item" onclick="nav('users', this)" data-admin-only><span class="icon-svg"
+                        style="--icon: url('/static/assets/neura_icons/key.svg');"></span> Users</a>
                 <a class="nav-item" onclick="location.href='/logout'" style="color: #ff4444 !important;"><span
                         class="icon-svg" style="--icon: url('/static/assets/neura_icons/logout.svg');"></span>
                     Logout</a>
@@ -135,6 +140,7 @@
                 <div id="accounts-grid" class="accounts-picker-grid">
                     <div class="no-data">Loading accounts…</div>
                 </div>
+                <div data-admin-only>
                 <h3 class="section-subtitle" style="margin-top: 32px;">Manage Accounts</h3>
                 <p class="accounts-page-hint">Every account needs a name, a token and at least one channel ID. Proxy is
                     optional — leave as direct if not needed. Start, stop and verify accounts right here, no restart
@@ -196,6 +202,7 @@
                             <button class="btn-control green" onclick="saveAccountForm()">Save</button>
                         </div>
                     </div>
+                </div>
                 </div>
             </div>
 
@@ -325,6 +332,16 @@
                                     session)</span></p>
                         </div>
                     </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon"><span class="icon-svg"
+                                style="--icon: url('/static/assets/neura_icons/chart-column.svg');"></span></div>
+                        <div class="kpi-data" style="cursor:pointer" onclick="sendQuickCommand('owo level')"
+                            title="Click to re-check level">
+                            <h3>OwO Level</h3>
+                            <p id="owoLevel">— <span style="font-size:0.45em; color:var(--text-muted);"
+                                    id="owoXp"></span></p>
+                        </div>
+                    </div>
                 </div>
                 <div class="charts-row-top" style="padding: 0;">
                     <div class="chart-box" style="flex:2;">
@@ -354,6 +371,31 @@
                     </div>
                     <div id="questList"
                         style="display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:15px;">
+                    </div>
+                </div>
+                <div id="custom-cmd-section"
+                    style="margin-top:20px; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:20px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+                        <h2 style="font-size:1.2rem; color:var(--primary); margin:0;"><span class="icon-svg"
+                                style="--icon: url('/static/assets/neura_icons/terminal.svg');"></span> Run a Command
+                        </h2>
+                        <label class="custom-cmd-toggle">
+                            <input type="checkbox" id="customCmdEnabled" onchange="saveCustomCommands()">
+                            <span>Run saved commands on their timers</span>
+                        </label>
+                    </div>
+                    <div class="custom-cmd-row">
+                        <input type="text" id="customCmdInput" class="custom-cmd-input"
+                            placeholder="cash   (the owo prefix is added for you)"
+                            onkeydown="if(event.key==='Enter') runCustomCommand(false)">
+                        <input type="number" id="customCmdInterval" class="custom-cmd-interval" min="0" step="5"
+                            placeholder="every N s (0 = off)">
+                        <button class="btn-control green" onclick="runCustomCommand(false)">SEND</button>
+                        <button class="btn-control gold" onclick="runCustomCommand(true)">SEND TO ALL</button>
+                        <button class="btn-control" onclick="addCustomCommand()">SAVE</button>
+                    </div>
+                    <div id="customCmdList" class="custom-cmd-list">
+                        <div class="no-data">No saved commands yet.</div>
                     </div>
                 </div>
                 <div class="top-controls" style="display:flex; gap:10px; margin-top:20px; justify-content:flex-end;">
@@ -544,6 +586,43 @@
                         class="btn-text">RELOAD LOGS</span></button>
                 <div id="term" class="terminal-window"></div>
             </div>
+
+            <!-- Users Tab (admin only) -->
+            <div id="users" class="view">
+                <p class="accounts-page-hint">Generate an activation link, hand it to someone, and they create their own
+                    dashboard login with it. One key, one account, expires after the days you set.</p>
+
+                <h3 class="section-subtitle">New Activation Key</h3>
+                <div class="users-genbar">
+                    <label class="users-field">
+                        <span>Days of access</span>
+                        <input type="number" id="key-days" class="cfg-input" value="30" min="1">
+                    </label>
+                    <label class="users-field">
+                        <span>How many keys</span>
+                        <input type="number" id="key-count" class="cfg-input" value="1" min="1" max="50">
+                    </label>
+                    <label class="users-field wide">
+                        <span>Note (optional)</span>
+                        <input type="text" id="key-note" class="cfg-input" placeholder="who is this for?">
+                    </label>
+                    <button class="btn-control green" onclick="generateKeys()"><span class="icon-svg"
+                            style="--icon: url('/static/assets/neura_icons/key.svg');"></span> <span
+                            class="btn-text">GENERATE</span></button>
+                </div>
+
+                <h3 class="section-subtitle" style="margin-top: 28px;">Activation Keys</h3>
+                <div id="keys-list" class="users-list">
+                    <div class="no-data">Loading keys…</div>
+                </div>
+
+                <h3 class="section-subtitle" style="margin-top: 32px;">Users</h3>
+                <p class="accounts-page-hint">Their email, their password and how long they have left. Revoke to lock
+                    them out immediately, delete to remove the account entirely.</p>
+                <div id="users-list" class="users-list">
+                    <div class="no-data">Loading users…</div>
+                </div>
+            </div>
         </main>
     </div>
 
@@ -566,6 +645,8 @@
     <script src="/static/js/security.js"></script>
     <script src="/static/js/config.js"></script>
     <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/custom_commands.js"></script>
+    <script src="/static/js/users.js"></script>
     <script src="/static/js/history.js"></script>
     <script src="/static/js/init.js"></script>
 </body>

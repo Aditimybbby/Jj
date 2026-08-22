@@ -384,6 +384,106 @@ window.cancelManualSolve = function() {
     }
 };
 
-window.cancelEmbeddedCaptcha = window.cancelManualSolve;
+// ---------------------------------------------------------------------------
+// Embedded hCaptcha panel (index.html #captcha-solver-section).
+// dashboard.js update() calls openEmbeddedCaptcha() whenever an account is
+// paused with a captcha message, so these must exist even if the hCaptcha
+// script is blocked.
+// ---------------------------------------------------------------------------
+const OWO_HCAPTCHA_SITEKEY = 'a6a1d5ce-612d-472d-8e37-7601408fbc09';
+let _embeddedCaptcha = { accountId: null, accountName: null, widgetId: null };
+
+function _captchaFallbackHtml(accountId) {
+    return `
+        <div class="no-data" style="text-align:center;">
+            hCaptcha widget unavailable here.<br>
+            <button class="btn-control gold" style="margin-top:10px;"
+                onclick="triggerManualSolve('${accountId}')">Open solve page</button>
+        </div>
+    `;
+}
+
+function _renderEmbeddedHcaptcha() {
+    const container = document.getElementById('hcaptcha-container');
+    if (!container) return;
+    const accountId = _embeddedCaptcha.accountId;
+
+    if (typeof hcaptcha === 'undefined' || typeof hcaptcha.render !== 'function') {
+        container.innerHTML = _captchaFallbackHtml(accountId);
+        return;
+    }
+
+    container.innerHTML = '<div id="hcaptcha-widget"></div>';
+    try {
+        _embeddedCaptcha.widgetId = hcaptcha.render('hcaptcha-widget', {
+            sitekey: OWO_HCAPTCHA_SITEKEY,
+            theme: 'dark',
+            callback: 'submitEmbeddedCaptcha',
+            'expired-callback': 'reloadEmbeddedCaptcha',
+            'error-callback': 'reloadEmbeddedCaptcha'
+        });
+    } catch (e) {
+        console.error('hCaptcha render failed:', e);
+        _embeddedCaptcha.widgetId = null;
+        container.innerHTML = _captchaFallbackHtml(accountId);
+    }
+}
+
+window.openEmbeddedCaptcha = function(accountId, accountName) {
+    const section = document.getElementById('captcha-solver-section');
+    if (!section) return;
+    _embeddedCaptcha.accountId = accountId;
+    _embeddedCaptcha.accountName = accountName || accountId;
+    section.style.display = 'block';
+    const title = section.querySelector('.module-header h3');
+    if (title) title.setAttribute('title', `Solving for ${_embeddedCaptcha.accountName}`);
+    _renderEmbeddedHcaptcha();
+};
+
+window.reloadEmbeddedCaptcha = function() {
+    if (!_embeddedCaptcha.accountId) return;
+    if (_embeddedCaptcha.widgetId !== null && typeof hcaptcha !== 'undefined') {
+        try { hcaptcha.reset(_embeddedCaptcha.widgetId); return; } catch (e) {}
+    }
+    _renderEmbeddedHcaptcha();
+};
+
+window.closeEmbeddedCaptcha = function() {
+    const section = document.getElementById('captcha-solver-section');
+    if (section) section.style.display = 'none';
+    if (_embeddedCaptcha.widgetId !== null && typeof hcaptcha !== 'undefined') {
+        try { hcaptcha.reset(_embeddedCaptcha.widgetId); } catch (e) {}
+    }
+    _embeddedCaptcha = { accountId: null, accountName: null, widgetId: null };
+};
+
+window.submitEmbeddedCaptcha = async function(token) {
+    const accountId = _embeddedCaptcha.accountId;
+    if (!accountId || !token) return;
+    try {
+        const res = await fetch('/api/captcha_solve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_id: accountId, token: token })
+        });
+        const d = await res.json();
+        if (d.success) {
+            showToast('Captcha verified', 'success');
+            dismissCaptchaCard(accountId);
+            closeEmbeddedCaptcha();
+        } else {
+            showToast(d.error || 'Captcha rejected', 'error');
+            reloadEmbeddedCaptcha();
+        }
+    } catch (e) {
+        showToast('Failed to submit captcha', 'error');
+        reloadEmbeddedCaptcha();
+    }
+};
+
+window.cancelEmbeddedCaptcha = function() {
+    cancelManualSolve();
+    closeEmbeddedCaptcha();
+};
 
 startPendingTimer();

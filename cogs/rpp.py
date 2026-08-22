@@ -59,35 +59,37 @@ class RPP(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        monitor_id = str(self.bot.config.get('monitor_bot_id', '408785106942164992'))
+        monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
         if str(message.author.id) != monitor_id:
             return
         if self.bot.owo_user is None:
             self.bot.owo_user = message.author
-        if message.channel.id != self.bot.channel_id:
+        if str(message.channel.id) not in [str(c) for c in self.bot.channels]:
             return
-        
+
         content = message.content.lower()
         full_text = self.bot.get_full_content(message)
-        
+
+        # these are direct replies, so they must be ours before we mark a command spent
+        # for the rest of the day
+        if not self.bot.is_message_for_me(message):
+            return
+
         if "too tired to run" in full_text:
             self.command_availability["run"] = time.time() + 86400
             self.bot.log("COOLDOWN", "RPP: run exhausted. Next available tomorrow....")
             return
-        
+
         if "garden is out of carrots" in full_text:
             self.command_availability["piku"] = time.time() + 86400
             self.bot.log("COOLDOWN", "RPP: piku exhausted (no carrots). Next available tomorrow..")
             return
- 
+
         if "no puppies" in full_text:
             self.command_availability["pup"] = time.time() + 86400
             self.bot.log("COOLDOWN", "RPP: pup exhausted (no puppies). Next available tomorrow...")
             return
 
-        if not self.bot.is_message_for_me(message):
-            return
-        
         for cmd in ["run", "pup", "piku"]:
             if f":9{cmd}" in content or f"o {cmd}" in content:
                  if "tomorrow" in content or "too many" in content:

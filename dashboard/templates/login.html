@@ -291,11 +291,30 @@
             background: rgba(255, 255, 255, 0.06);
         }
 
+        .alt-link {
+            margin-top: 22px;
+            text-align: center;
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            letter-spacing: 1px;
+        }
+
+        .alt-link a {
+            color: rgba(255, 80, 80, 0.7);
+            text-decoration: none;
+            border-bottom: 1px dashed rgba(255, 0, 0, 0.35);
+            padding-bottom: 2px;
+            transition: color 0.2s ease;
+        }
+
+        .alt-link a:hover {
+            color: var(--red);
+        }
+
         .card.success {
             border-color: #00ff88;
             box-shadow: 0 0 40px rgba(0, 255, 136, 0.2), inset 0 0 30px rgba(0, 255, 136, 0.04);
         }
-
         .card.success .card__title {
             color: #00ff88;
             text-shadow: 0 0 12px rgba(0, 255, 136, 0.8);
@@ -384,7 +403,7 @@
             <form id="loginForm">
                 <div class="field">
                     <input type="text" id="username" placeholder=" " required autocomplete="username">
-                    <label for="username">Username</label>
+                    <label for="username">Username or Email</label>
                 </div>
                 <div class="field">
                     <input type="password" id="password" placeholder=" " required autocomplete="current-password">
@@ -392,6 +411,7 @@
                 </div>
                 <button type="submit" id="loginBtn">Authenticate</button>
             </form>
+            <p class="alt-link"><a href="/activate">Have an activation key?</a></p>
         </div>
     </div>
 

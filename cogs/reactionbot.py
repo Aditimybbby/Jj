@@ -69,21 +69,18 @@ class ReactionBot(commands.Cog):
         # forcerun logic
         if "**OwO**" in content and owo:
             self.bot.loop.call_later(trigger_delay, force_run, "owo")
-            
+
         elif "**hunt/battle**" in content and hunt_battle:
             self.bot.loop.call_later(trigger_delay, force_run, "hunt")
             self.bot.loop.call_later(trigger_delay + 1, force_run, "battle")
-            
+
         elif "**pray/curse**" in content and pray_curse:
             pray_cfg = self.bot.config.get("commands", {}).get("pray", {})
             curse_cfg = self.bot.config.get("commands", {}).get("curse", {})
-            
-            cmds = []
-            if pray_cfg.get("enabled", False): cmds.append("pray")
-            if curse_cfg.get("enabled", False): cmds.append("curse")
-            
-            if cmds:
-                self.bot.loop.call_later(trigger_delay, force_run, random.choice(cmds))
+
+            # pray and curse share one scheduler slot called "cursepray"
+            if pray_cfg.get("enabled", False) or curse_cfg.get("enabled", False):
+                self.bot.loop.call_later(trigger_delay, force_run, "cursepray")
 
 async def setup(bot):
     await bot.add_cog(ReactionBot(bot))

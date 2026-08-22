@@ -287,3 +287,74 @@
     transform: translateY(-2px);
     border-color: rgba(255,255,255,0.3);
 }
+/* --- Run a Command panel (dashboard tab) --- */
+.custom-cmd-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 15px;
+}
+.custom-cmd-input {
+    flex: 1 1 260px;
+    min-width: 180px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid #333;
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+}
+.custom-cmd-interval {
+    width: 170px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid #333;
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+}
+.custom-cmd-input:focus,
+.custom-cmd-interval:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+.custom-cmd-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.custom-cmd-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.custom-cmd-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.custom-cmd-item.off {
+    opacity: 0.45;
+}
+.custom-cmd-name {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: #fff;
+    word-break: break-all;
+}
+.custom-cmd-timer {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}

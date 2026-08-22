@@ -25,10 +25,14 @@ import re
 import json
 import os
 
+import core.state as state
+
 class NeuraCursePray(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.state_file = "data/cp_state.json"
+        # one file per account on the volume - a relative "data/" path lands in the
+        # ephemeral repo copy and every account would overwrite the same key
+        self.state_file = os.path.join(state.DATA_DIR, f"cp_state_{bot.user_id or 'default'}.json")
         self.last_run = self._load_last_run()
 
     def _load_last_run(self):
@@ -37,7 +41,7 @@ class NeuraCursePray(commands.Cog):
                 with open(self.state_file, "r") as f:
                     data = json.load(f)
                     return data.get("cp_last_run", 0)
-            except:
+            except Exception:
                 pass
         return 0
 
@@ -47,12 +51,19 @@ class NeuraCursePray(commands.Cog):
             try:
                 with open(self.state_file, "r") as f:
                     data = json.load(f)
-            except:
+            except Exception:
                 pass
-        with open(self.state_file, "w") as f:
-            json.dump(data, f)
+        data["cp_last_run"] = self.last_run
+        try:
+            os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
+            with open(self.state_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            self.bot.log("ERROR", f"Could not save curse/pray state: {e}")
 
     def trigger_action(self):
+        if 'cursepray' not in self.bot.cmd_states:
+            return
         cmds_cfg = self.bot.config.get("commands", {})
         curse_cfg = cmds_cfg.get("curse", {})
         pray_cfg = cmds_cfg.get("pray", {})
@@ -100,7 +111,7 @@ class NeuraCursePray(commands.Cog):
         monitor_id = str(core_config.get("monitor_bot_id", "408785106942164992"))
         if str(message.author.id) != monitor_id:
             return
-        if message.channel.id != self.bot.channel_id:
+        if str(message.channel.id) not in [str(c) for c in self.bot.channels]:
             return
             
         full_content = self.bot.get_full_content(message)

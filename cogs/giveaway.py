@@ -24,13 +24,16 @@ import os
 import discord
 from discord.ext import commands
 
+import core.state as state
+
 class Giveaway(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db_path = os.path.join(bot.base_dir, 'config', 'giveaway_db.json')
+        # renamed to a per-account file in _safe_scan once the username is known
+        self.db_path = os.path.join(state.DATA_DIR, 'giveaway_db.json')
         self.joined_ids = []
         self._load_state()
-        
+
     def _load_state(self):
         try:
             if os.path.exists(self.db_path):
@@ -39,11 +42,12 @@ class Giveaway(commands.Cog):
                     self.joined_ids = data.get('joined_ids', [])
         except Exception:
             self.joined_ids = []
-            
+
     def _save_state(self):
         if len(self.joined_ids) > 100:
             self.joined_ids = self.joined_ids[-100:]
         try:
+            os.makedirs(os.path.dirname(self.db_path) or '.', exist_ok=True)
             with open(self.db_path, 'w') as f:
                 json.dump({'joined_ids': self.joined_ids}, f)
         except Exception as e:
@@ -108,7 +112,7 @@ class Giveaway(commands.Cog):
         await asyncio.sleep(5)
         
         sanitized_name = "".join(x for x in self.bot.username if x.isalnum())
-        self.db_path = os.path.join(self.bot.base_dir, 'data', f'giveaway_db_{sanitized_name}.json')
+        self.db_path = os.path.join(state.DATA_DIR, f'giveaway_db_{sanitized_name}.json')
         self._load_state()
         
         cfg = self.bot.config.get('commands', {}).get('giveaway', {})
@@ -158,7 +162,8 @@ class Giveaway(commands.Cog):
         monitor_id = str(core_config.get('monitor_bot_id', '408785106942164992'))
         if str(message.author.id) != monitor_id: return
         
-        if not self.bot.is_ready(): return
+        # NeuraBot replaces Bot.is_ready() with a plain flag - calling it raises TypeError
+        if not self.bot.is_ready: return
         
         if self.bot.owo_user is None:
             self.bot.owo_user = message.author

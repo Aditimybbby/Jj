@@ -36,17 +36,27 @@ function updateMobileControls() {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     console.log("DOM Content Loaded - Initializing...");
+    // work out admin vs activated user first - the account/proxy endpoints answer
+    // 403 for a plain user, so there is no point polling them
+    let isAdmin = true;
+    if (typeof applySessionRole === 'function') {
+        await applySessionRole();
+        isAdmin = !!(window.sessionInfo && window.sessionInfo.is_admin);
+    }
     initDashCharts();
     window.fetchAccounts();
-    if (typeof fetchProxies === 'function') fetchProxies();
-    fetchAccountConfig();
+    if (isAdmin) {
+        if (typeof fetchProxies === 'function') fetchProxies();
+        fetchAccountConfig();
+        setInterval(fetchAccountConfig, 5000);
+    }
     loadConfig();
+    if (typeof loadCustomCommands === 'function') loadCustomCommands();
     initDynamicTilt();
     initConfigSearch();
     setInterval(window.fetchAccounts, 5000);
-    setInterval(fetchAccountConfig, 5000);
     setInterval(update, 1000);
     setInterval(window.pollForCaptchas, 2000);
     updateMobileControls();

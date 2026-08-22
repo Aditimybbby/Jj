@@ -31,6 +31,9 @@ import core.state as state
 import utils.utils as utils
 import asyncio
 from datetime import datetime, timedelta
+from urllib.parse import quote
+
+from dashboard import users as dash_users
 
 
 import socket
@@ -91,11 +94,47 @@ if auth_cfg:
 else:
     app.secret_key = 'temporary_secret_key'
 
+def _current_user():
+    """The activated (non-admin) user behind this session, or None for the admin."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return None
+    return dash_users.get_user(user_id)
+
+
+def _session_valid():
+    if 'logged_in' not in session:
+        return False
+    if session.get('is_admin'):
+        return True
+    # a user's access dies the moment the key duration runs out or the admin
+    # revokes it, so re-check on every request instead of trusting the cookie
+    return dash_users.is_active(_current_user())
+
+
+def _reject_session():
+    session.clear()
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'Session expired'}), 401
+    return redirect(url_for('login'))
+
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
-            return redirect(url_for('login'))
+        if not _session_valid():
+            return _reject_session()
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not _session_valid():
+            return _reject_session()
+        if not session.get('is_admin'):
+            return jsonify({'success': False, 'error': 'Admin only'}), 403
         return f(*args, **kwargs)
     return decorated_function
 
@@ -139,30 +178,92 @@ def login():
     if request.method == 'POST':
         ip = request.remote_addr
         allowed, wait_time = check_rate_limit(ip)
-        
+
         if not allowed:
              return jsonify({'success': False, 'error': f'Too many failed attempts. Try again in {wait_time}s'})
 
-        data = request.json
+        data = request.json or {}
+        identifier = data.get('username') or data.get('email') or ''
+        password = data.get('password') or ''
         cfg = load_auth_config()
-        
-        if not cfg:
-             return jsonify({'success': False, 'error': 'Auth config missing'})
-             
-        if data.get('username') == cfg.get('username') and data.get('password') == cfg.get('password'):
+
+        if cfg and identifier == cfg.get('username') and password == cfg.get('password'):
+            session.clear()
             session['logged_in'] = True
+            session['is_admin'] = True
             session.permanent = True
             if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
-            return jsonify({'success': True})
-        else:
-            fail_login(ip)
-            return jsonify({'success': False, 'error': 'Invalid Credentials'})
-            
+            return jsonify({'success': True, 'is_admin': True})
+
+        # not the admin - try an activated user account
+        user, error = dash_users.authenticate(identifier, password)
+        if user:
+            session.clear()
+            session['logged_in'] = True
+            session['is_admin'] = False
+            session['user_id'] = user['id']
+            session.permanent = True
+            if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
+            return jsonify({'success': True, 'is_admin': False, 'days_left': user.get('days_left')})
+
+        fail_login(ip)
+        if not cfg and not dash_users.list_users():
+            return jsonify({'success': False, 'error': 'Auth config missing'})
+        return jsonify({'success': False, 'error': error or 'Invalid Credentials'})
+
     return render_template('login.html')
+
+
+@app.route('/activate', methods=['GET', 'POST'])
+def activate():
+    """Redeem a one-time activation key and pick an email + password."""
+    if request.method == 'GET':
+        return render_template('activate.html')
+
+    data = request.json or {}
+    ip = request.remote_addr
+    allowed, wait_time = check_rate_limit(ip)
+    if not allowed:
+        return jsonify({'success': False, 'error': f'Too many attempts. Try again in {wait_time}s'})
+
+    key = data.get('key')
+    email = data.get('email')
+    password = data.get('password')
+    confirm = data.get('confirm')
+
+    if confirm is not None and confirm != password:
+        return jsonify({'success': False, 'error': 'Passwords do not match'})
+
+    user, error = dash_users.redeem_key(key, email, password)
+    if error:
+        fail_login(ip)
+        return jsonify({'success': False, 'error': error})
+
+    if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
+    session.clear()
+    session['logged_in'] = True
+    session['is_admin'] = False
+    session['user_id'] = user['id']
+    session.permanent = True
+    state.log_command("SYS", f"Activation key redeemed by {user['email']} ({user['days']} days)", "success")
+    return jsonify({'success': True, 'days_left': user.get('days_left')})
+
+
+@app.route('/api/session')
+@login_required
+def session_info():
+    user = _current_user()
+    return jsonify({
+        'is_admin': bool(session.get('is_admin')),
+        'email': user.get('email') if user else None,
+        'days_left': user.get('days_left') if user else None,
+        'expires_at': user.get('expires_at') if user else None,
+    })
+
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect(url_for('login'))
 
 @app.route('/api/accounts/list')
@@ -182,18 +283,25 @@ def account_list():
             'paused': bot.paused,
             'cash': st.get('current_cash', 0),
             'level': st.get('level'),
+            'xp': st.get('xp'),
+            'xp_needed': st.get('xp_needed'),
             'session_total': session_total,
             'gems_used': st.get('gems_used', 0)
         })
     return jsonify(accounts)
 
 def get_bot(account_id):
+    """Resolve an account id to a live bot.
+
+    An explicit id that is not running returns None - falling back to the first
+    instance would silently send commands to the wrong account.
+    """
     if not account_id:
         return state.bot_instances[0] if state.bot_instances else None
     for bot in state.bot_instances:
         if bot.user and str(bot.user.id) == str(account_id):
             return bot
-    return state.bot_instances[0] if state.bot_instances else None
+    return None
 
 
 @app.route('/api/stats')
@@ -242,6 +350,10 @@ def stats():
     response_data = {
         'uptime': utils.format_seconds(elapsed),
         'cash': st.get('current_cash', 0),
+        'level': st.get('level'),
+        'xp': st.get('xp'),
+        'xp_needed': st.get('xp_needed'),
+        'last_level_update': st.get('last_level_update'),
         'logs': [l for l in state.command_logs if str(l.get('bot_id')) == uid][:200],
         'status': current_status,
         'security': {
@@ -287,7 +399,7 @@ def stats():
     return jsonify(response_data)
 
 @app.route('/api/debug')
-@login_required
+@admin_required
 def debug():
     return jsonify({
         'account_stats': state.account_stats,
@@ -297,6 +409,7 @@ def debug():
     })
 
 @app.route('/api/debug_status')
+@admin_required
 def debug_status():
     res = []
     for bot in state.bot_instances:
@@ -344,7 +457,12 @@ def settings():
         new_config = request.json
         try:
             save_to_all = request.args.get('all_accounts') == 'true' or request.args.get('all') == 'true'
-            
+
+            # writing the global defaults, or every account at once, is an admin
+            # action - an activated user may only touch one running account
+            if (save_to_all or not account_id) and not session.get('is_admin'):
+                return jsonify({"status": "error", "message": "Admin only"}), 403
+
             if save_to_all:
                 global_path = os.path.join(state.CONFIG_DIR, 'settings.json')
                 with open(global_path, 'w') as f:
@@ -391,7 +509,7 @@ def settings():
             return jsonify({})
 
 @app.route('/api/accounts/config', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def accounts_config_api():
     accounts_path = os.path.join(state.CONFIG_DIR, 'accounts.json')
     if request.method == 'POST':
@@ -456,7 +574,7 @@ def _find_account(accounts, name):
 
 
 @app.route('/api/accounts/launch', methods=['POST'])
-@login_required
+@admin_required
 def account_launch():
     from utils import proxy_manager
     from core import supervisor
@@ -474,7 +592,7 @@ def account_launch():
 
 
 @app.route('/api/accounts/stop', methods=['POST'])
-@login_required
+@admin_required
 def account_stop():
     from core import supervisor
     name = (request.json or {}).get('name')
@@ -487,7 +605,7 @@ def account_stop():
 
 
 @app.route('/api/accounts/launch_all', methods=['POST'])
-@login_required
+@admin_required
 def account_launch_all():
     from utils import proxy_manager
     from core import supervisor
@@ -506,7 +624,7 @@ def account_launch_all():
 
 
 @app.route('/api/accounts/stop_all', methods=['POST'])
-@login_required
+@admin_required
 def account_stop_all():
     from core import supervisor
     names = supervisor.running_names()
@@ -553,7 +671,7 @@ async def _verify_accounts(accounts, targets):
 
 
 @app.route('/api/accounts/verify', methods=['POST'])
-@login_required
+@admin_required
 def account_verify():
     from utils import proxy_manager
     payload = request.json or {}
@@ -577,7 +695,7 @@ def account_verify():
 
 
 @app.route('/api/accounts/export')
-@login_required
+@admin_required
 def account_export():
     from utils import proxy_manager
     only_problem = request.args.get('only') == 'problem'
@@ -602,7 +720,7 @@ def account_export():
 
 
 @app.route('/api/accounts/bulk', methods=['POST'])
-@login_required
+@admin_required
 def account_bulk_import():
     from utils import proxy_manager
     payload = request.json or {}
@@ -637,7 +755,7 @@ def account_bulk_import():
 
 
 @app.route('/api/accounts', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def accounts_api():
     if request.method == 'POST':
         new_accounts = request.json
@@ -663,7 +781,7 @@ def accounts_api():
 
 
 @app.route('/api/proxies', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def proxies_api():
     from utils import proxy_manager
     if request.method == 'POST':
@@ -677,7 +795,7 @@ def proxies_api():
 
 
 @app.route('/api/proxies/bulk', methods=['POST'])
-@login_required
+@admin_required
 def proxies_bulk():
     from utils import proxy_manager
     text = (request.json or {}).get('text', '')
@@ -692,7 +810,7 @@ def proxies_bulk():
 
 
 @app.route('/api/proxies/test', methods=['POST'])
-@login_required
+@admin_required
 def proxies_test():
     from utils import proxy_manager
     payload = request.json or {}
@@ -719,7 +837,7 @@ def proxies_test():
 
 
 @app.route('/api/proxies/assign', methods=['POST'])
-@login_required
+@admin_required
 def proxies_assign():
     from utils import proxy_manager
     assigned = proxy_manager.auto_assign()
@@ -728,7 +846,7 @@ def proxies_assign():
 
 
 @app.route('/api/proxies/<proxy_id>', methods=['DELETE'])
-@login_required
+@admin_required
 def proxies_delete(proxy_id):
     from utils import proxy_manager
     proxy_manager.remove_proxy(proxy_id)
@@ -737,7 +855,7 @@ def proxies_delete(proxy_id):
 
 
 @app.route('/api/proxies/all', methods=['DELETE'])
-@login_required
+@admin_required
 def proxies_delete_all():
     from utils import proxy_manager
     proxy_manager.remove_all_proxies()
@@ -746,7 +864,7 @@ def proxies_delete_all():
 
 
 @app.route('/api/proxies/failed', methods=['DELETE'])
-@login_required
+@admin_required
 def proxies_delete_failed():
     from utils import proxy_manager
     count = proxy_manager.remove_failed_proxies()
@@ -774,29 +892,34 @@ def test_security():
 @app.route('/api/control', methods=['POST'])
 @login_required
 def control():
-    data = request.json
-    action = data.get('action')
+    data = request.json or {}
+    action = (data.get('action') or '').lower()
     account_id = data.get('id')
     bot = get_bot(account_id)
-    
+
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
-    
-    if action == 'stop':
+
+    # the mobile action bar sends pause/resume/checkcash, the desktop one
+    # stop/start/cash - both mean the same thing
+    if action in ('stop', 'pause'):
         bot.paused = True
         bot.log("SYS", "Bot STOPPED via Dashboard")
-            
-    elif action == 'start':
+
+    elif action in ('start', 'resume'):
         bot.paused = False
         bot.throttle_until = 0
         bot.log("SYS", "Bot RESUMED via Dashboard")
-            
-    elif action == 'cash':
+
+    elif action in ('cash', 'checkcash'):
         asyncio.run_coroutine_threadsafe(
             bot.send_message(f"{bot.prefix}cash", skip_typing=True, priority=True),
             bot.loop
         )
         state.log_command("CMD", "Manual Cash Check Sent", "info", bot_name=bot.username)
-        
+
+    else:
+        return jsonify({'success': False, 'error': f'Unknown action: {action}'}), 400
+
     return jsonify({'success': True})
 
 @app.route('/api/security', methods=['POST'])
@@ -948,22 +1071,141 @@ def captcha_stats():
 @app.route('/api/bot/command', methods=['POST'])
 @login_required
 def bot_command():
-    data = request.json
-    command = data.get('command', '').strip()
+    data = request.json or {}
+    command = (data.get('command') or '').strip()
     account_id = data.get('id')
-    bot = get_bot(account_id)
-    
-    if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
-    
+    send_to_all = bool(data.get('all'))
+
     if not command:
         return jsonify({'success': False, 'error': 'No command provided'})
-    
-    asyncio.run_coroutine_threadsafe(
-        bot.send_message(command, skip_typing=True, priority=True), 
-        bot.loop
-    )
+
+    def _dispatch(bot):
+        # go through the cog when it is loaded so the "owo " prefix rule lives
+        # in exactly one place; fall back to a raw send if it is not
+        cog = bot.get_cog('CustomCommands')
+        coro = cog.run_now(command) if cog else bot.send_message(
+            command, skip_typing=True, priority=True)
+        asyncio.run_coroutine_threadsafe(coro, bot.loop)
+
+    if send_to_all:
+        targets = [b for b in state.bot_instances if b.user and b.is_ready]
+        if not targets:
+            return jsonify({'success': False, 'error': 'No accounts are running'})
+        for bot in targets:
+            _dispatch(bot)
+            state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username)
+        return jsonify({
+            'success': True,
+            'message': f'Sent "{command}" on {len(targets)} accounts',
+            'count': len(targets),
+        })
+
+    bot = get_bot(account_id)
+    if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
+
+    _dispatch(bot)
     state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username)
     return jsonify({'success': True, 'message': f'Command sent: {command}'})
+
+
+def _settings_path_for(account_id):
+    if account_id:
+        return os.path.join(state.CONFIG_DIR, f'settings_{account_id}.json')
+    return os.path.join(state.CONFIG_DIR, 'settings.json')
+
+
+def _read_settings_for(account_id):
+    path = _settings_path_for(account_id)
+    if account_id and not os.path.exists(path):
+        path = os.path.join(state.CONFIG_DIR, 'settings.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _normalise_custom_commands(raw):
+    """Accept a textarea, a list of strings, or a list of dicts."""
+    if isinstance(raw, str):
+        raw = [line for line in raw.splitlines() if line.strip()]
+    cleaned = []
+    for item in raw or []:
+        if isinstance(item, str):
+            item = {'command': item}
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get('command', '')).strip()
+        if not command:
+            continue
+        try:
+            interval = float(item.get('interval_s') or 0)
+        except (TypeError, ValueError):
+            interval = 0.0
+        cleaned.append({
+            'command': command,
+            'interval_s': max(0.0, interval),
+            'enabled': item.get('enabled', True) is not False,
+        })
+    return cleaned
+
+
+@app.route('/api/bot/custom_commands', methods=['GET', 'POST'])
+@login_required
+def custom_commands_api():
+    """The saved per-bot command list (commands.custom in the settings file)."""
+    account_id = request.args.get('id')
+
+    if request.method == 'GET':
+        custom = _read_settings_for(account_id).get('commands', {}).get('custom', {})
+        return jsonify({
+            'enabled': custom.get('enabled', False),
+            'commands': _normalise_custom_commands(custom.get('commands')),
+        })
+
+    payload = request.json or {}
+    commands_list = _normalise_custom_commands(payload.get('commands'))
+    block = {'enabled': bool(payload.get('enabled', True)), 'commands': commands_list}
+    save_to_all = bool(payload.get('all'))
+
+    # same rule as /api/settings: touching the global defaults or every account
+    # at once is the admin's job, an activated user gets one account
+    if (save_to_all or not account_id) and not session.get('is_admin'):
+        return jsonify({'success': False, 'error': 'Admin only'}), 403
+
+    try:
+        if save_to_all:
+            paths = [os.path.join(state.CONFIG_DIR, 'settings.json')]
+            paths += [
+                os.path.join(state.CONFIG_DIR, f)
+                for f in os.listdir(state.CONFIG_DIR)
+                if f.startswith('settings_') and f.endswith('.json')
+            ]
+        else:
+            paths = [_settings_path_for(account_id)]
+
+        for path in paths:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = _read_settings_for(account_id)
+            cfg.setdefault('commands', {})['custom'] = block
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=4)
+
+        for bot in state.bot_instances:
+            if save_to_all or (not account_id) or (bot.user and str(bot.user.id) == str(account_id)):
+                asyncio.run_coroutine_threadsafe(
+                    bot.sync_settings({'commands': {'custom': block}}), bot.loop
+                )
+
+        state.log_command("SYS", f"Custom commands saved ({len(commands_list)} entries)", "success")
+        return jsonify({'success': True, 'commands': commands_list, 'enabled': block['enabled']})
+    except Exception as e:
+        state.log_command("ERROR", f"Failed to save custom commands: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 _pending_captchas = {}
 
@@ -1040,20 +1282,19 @@ def submit_captcha_solution():
 @app.route('/api/captcha/oauth_url', methods=['POST'])
 @login_required
 def captcha_oauth_url():
-    data = request.get_json()
+    data = request.get_json() or {}
     account_id = data.get('account_id')
     if not account_id:
         return jsonify({'success': False, 'error': 'Missing account_id'})
-    
+
     bot = get_bot(account_id)
     if not bot:
         return jsonify({'success': False, 'error': 'Bot not found'})
-    
+
     import aiohttp
-    import asyncio
-    
+
     auth_url = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
-    
+
     async def get_redirect_url():
         headers = {
             "Authorization": bot.token,
@@ -1070,17 +1311,18 @@ def captcha_oauth_url():
             async with session.post(auth_url, json=auth_payload) as resp:
                 if resp.status != 200:
                     return None
-                data = await resp.json()
-                return data.get("location")
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    redirect_url = loop.run_until_complete(get_redirect_url())
-    loop.close()
-    
+                payload = await resp.json()
+                return payload.get("location")
+
+    # must run on the bot loop - a fresh loop on the Flask thread leaks and
+    # cannot see the bot's connector/proxy
+    redirect_url, error = _bot_loop_call(get_redirect_url(), timeout=30)
+    if error:
+        return jsonify({'success': False, 'error': error}), 503
+
     if not redirect_url:
         return jsonify({'success': False, 'error': 'Failed to get OAuth URL'})
-    
+
     return jsonify({'success': True, 'url': redirect_url})
 
 @app.route('/api/captcha/pending', methods=['GET'])
@@ -1107,3 +1349,95 @@ def clear_captcha_challenge(account_id):
     if account_id in _pending_captchas:
         _pending_captchas.pop(account_id, None)
         state.log_command("SEC", f"Captcha challenge cleared for account {account_id}", "info")
+
+
+# --------------------------------------------------------------------------
+# users - activation keys and the accounts they create (admin only)
+# --------------------------------------------------------------------------
+
+@app.route('/api/users/keys', methods=['GET', 'POST'])
+@admin_required
+def user_keys_api():
+    if request.method == 'GET':
+        keys = dash_users.list_keys()
+        keys.sort(key=lambda k: k.get('created_at') or 0, reverse=True)
+        return jsonify({'success': True, 'keys': keys})
+
+    data = request.json or {}
+    created, error = dash_users.generate_keys(
+        data.get('days'),
+        data.get('count', 1),
+        data.get('note', ''),
+    )
+    if error:
+        return jsonify({'success': False, 'error': error}), 400
+
+    base = request.host_url.rstrip('/')
+    for entry in created:
+        entry['link'] = f"{base}/activate?key={quote(entry['key'])}"
+    state.log_command("USERS", f"Generated {len(created)} activation key(s) for {created[0]['days']} days", "success")
+    return jsonify({'success': True, 'keys': created})
+
+
+@app.route('/api/users/keys/<key>', methods=['DELETE'])
+@admin_required
+def user_key_delete(key):
+    if dash_users.delete_key(key):
+        state.log_command("USERS", f"Activation key {key} deleted", "info")
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': 'No such key'}), 404
+
+
+@app.route('/api/users', methods=['GET'])
+@admin_required
+def users_api():
+    users = dash_users.list_users()
+    users.sort(key=lambda u: u.get('created_at') or 0, reverse=True)
+    return jsonify({'success': True, 'users': users})
+
+
+@app.route('/api/users/<user_id>', methods=['PATCH', 'DELETE'])
+@admin_required
+def user_detail_api(user_id):
+    if request.method == 'DELETE':
+        if dash_users.delete_user(user_id):
+            state.log_command("USERS", f"Dashboard user {user_id} deleted", "info")
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'No such user'}), 404
+
+    data = request.json or {}
+    action = (data.get('action') or '').lower()
+
+    if action == 'revoke':
+        user, error = dash_users.set_revoked(user_id, True)
+    elif action == 'restore':
+        user, error = dash_users.set_revoked(user_id, False)
+    elif action == 'extend':
+        user, error = dash_users.extend_user(user_id, data.get('days'))
+    elif action == 'password':
+        user, error = dash_users.set_password(user_id, data.get('password'))
+    else:
+        return jsonify({'success': False, 'error': f'Unknown action: {action or "(none)"}'}), 400
+
+    if error:
+        return jsonify({'success': False, 'error': error}), 400
+    state.log_command("USERS", f"Dashboard user {user['email']}: {action}", "info")
+    return jsonify({'success': True, 'user': user})
+
+
+@app.route('/api/users/key_status', methods=['POST'])
+def user_key_status():
+    """Open on purpose - the activate page checks a key before asking for a password."""
+    ip = request.remote_addr
+    allowed, wait_time = check_rate_limit(ip)
+    if not allowed:
+        return jsonify({'success': False, 'error': f'Too many attempts. Try again in {wait_time}s'})
+
+    data = request.json or {}
+    entry, error = dash_users.key_status(data.get('key'))
+    if error:
+        # rate limited like a login so the endpoint cannot be used to brute-force keys
+        fail_login(ip)
+        return jsonify({'success': False, 'error': error})
+    return jsonify({'success': True, 'days': entry.get('days')})
+

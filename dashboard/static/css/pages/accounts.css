@@ -143,6 +143,28 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
+.account-xp {
+    margin-top: 14px;
+}
+.account-xp-track {
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+}
+.account-xp-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--primary), #a855f7);
+    transition: width 0.4s ease;
+}
+.account-xp-label {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    text-align: right;
+}
 .account-avatar-fallback {
     display: flex !important;
     align-items: center;

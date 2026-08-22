@@ -24,7 +24,11 @@ import json
 import core.state as state
 from discord.ext import commands
 from neura_engines.quest_engine import NeuraQuestEngine
-from component_v2_neura import parse_v2_message
+from component_v2_neura import parse_v2_message, collect_text, buttons
+
+QUEST_TITLE_RE = re.compile(r'^\W{0,4}(\d{1,2})\s*[.)\-]\s*(.+)$')
+PROGRESS_RE = re.compile(r'\b(\d+)\s*/\s*(\d+)\b')
+CLAIM_SLOT_RE = re.compile(r'(\d+)')
 
 class Quest(commands.Cog):
     def __init__(self, bot):
@@ -60,104 +64,104 @@ class Quest(commands.Cog):
 
         try:
             raw_data = json.loads(msg)
-        except:
+        except Exception:
             return
 
         if raw_data.get("t") not in ["MESSAGE_CREATE", "MESSAGE_UPDATE"]:
             return
 
-        data = raw_data.get("d", {})
-        if str(data.get("author", {}).get("id")) != self.bot.owo_bot_id:
+        data = raw_data.get("d") or {}
+        if str((data.get("author") or {}).get("id")) != self.bot.owo_bot_id:
+            return
+
+        if str(data.get("channel_id")) not in [str(c) for c in self.bot.channels]:
             return
 
         components = parse_v2_message(data)
         if not components:
             return
 
-        v2_text = " ".join([c.content for c in components if c.name in ["text_display", "section"]]).lower()
-        content = (data.get("content") or "").lower()
-        full_text = f"{content} {v2_text}"
+        v2_text = collect_text(components)
+        content = data.get("content") or ""
+        full_text = f"{content}\n{v2_text}".lower()
 
         if "quest log" in full_text or "checklist" in full_text:
-            idents = [self.bot.user.name.lower(), self.bot.display_name.lower()] + [i.lower() for i in getattr(self.bot, 'identifiers', [])]
-            is_for_me = False
-            for ident in idents:
-                clean_ident = ident.replace("<@", "").replace(">", "").replace("!", "")
-                if clean_ident in full_text:
-                    is_for_me = True
-                    break
-
-            if not is_for_me:
+            if not self._v2_text_is_mine(full_text):
                 return
 
-            self._parse_quests_v2(components, data)
+            self._parse_quests_v2(components, data, v2_text)
 
-    def _parse_quests_v2(self, components, message_data):
-        text_lines = []
-        for comp in components:
-            if comp.name in ["text_display", "section"] and comp.content:
-                text_lines.extend([line.strip().lower() for line in comp.content.split('\n') if line.strip()])
+    def _v2_text_is_mine(self, full_text):
+        """components v2 messages are invisible to discord.py-self, so match by name."""
+        if f"<@{self.bot.user.id}>" in full_text or f"<@!{self.bot.user.id}>" in full_text:
+            return True
+        idents = {self.bot.user.name.lower(), (self.bot.display_name or "").lower()}
+        for ident in getattr(self.bot, 'identifiers', []):
+            idents.add(ident.replace("<@", "").replace("!", "").replace(">", "").lower())
+        return any(ident and len(ident) >= 2 and ident in full_text for ident in idents)
+
+    def _parse_quests_v2(self, components, message_data, v2_text=None):
+        text = v2_text if v2_text is not None else collect_text(components)
+        text = text.replace('*', '').replace('`', '')
+        text_lines = [line.strip().lower() for line in text.split('\n') if line.strip()]
+
+        claim_buttons = {}
+        loose_claims = []
+        for comp in buttons(components):
+            cid = comp.custom_id.lower()
+            if "claim" not in cid and "claim" not in (comp.label or "").lower():
+                continue
+            slots = CLAIM_SLOT_RE.findall(cid)
+            if slots:
+                # owo numbers the claim buttons from 0, the quest list from 1
+                slot = int(slots[-1])
+                claim_buttons.setdefault(slot, comp.custom_id)
+                claim_buttons.setdefault(slot + 1, comp.custom_id)
+            else:
+                loose_claims.append(comp.custom_id)
 
         quests = []
         current_quest = None
-        claim_buttons = {}
-        for comp in components:
-            if comp.name == "button" and comp.custom_id:
-                cid = comp.custom_id.lower()
-                
-                match = re.search(r'claim.*?(\d+)', cid)
-                if match:
-                    slot_num = int(match.group(1))
-                    claim_buttons[slot_num] = comp.custom_id
-                elif "claim" in cid:
-                    pass
-
-        for i, line in enumerate(text_lines):
-            title_match = re.search(r'\b(\d+)\.\s*(.*)', line)
+        for line in text_lines:
+            title_match = QUEST_TITLE_RE.match(line)
             if title_match:
-                slot = int(title_match.group(1))
-                title = title_match.group(2)
-                desc = ""
-                if i + 1 < len(text_lines):
-                    desc = text_lines[i+1]
-
+                title = title_match.group(2).strip()
                 current_quest = {
-                    'slot': slot,
-                    'description': desc,
+                    'slot': int(title_match.group(1)),
+                    'description': title,
                     'title': title,
                     'current': 0,
                     'total': 1,
-                    'completed': False
+                    'completed': False,
                 }
                 quests.append(current_quest)
+                self._apply_progress(current_quest, title)
+                continue
 
-            elif "/" in line and current_quest:
-                progress_match = re.search(r'\b(\d+)/(\d+)\b', line)
-                if progress_match:
-                    current_quest['current'] = int(progress_match.group(1))
-                    current_quest['total'] = int(progress_match.group(2))
-                    current_quest['completed'] = current_quest['current'] >= current_quest['total']
-                    current_quest = None
+            if current_quest is not None and self._apply_progress(current_quest, line):
+                current_quest = None
 
         st = self.bot.stats
         old_quests = st.get('quest_data', [])
-        
+
         cleaned_quests = []
         for q in quests:
             desc_text = q['description']
-            # description mapping
             cleaned_quests.append({
                 'description': desc_text,
                 'current': q['current'],
                 'total': q['total'],
-                'completed': q['completed']
+                'completed': q['completed'],
             })
 
             if q['completed']:
-                was_completed = any(oq.get('description', '').lower() == desc_text.lower() and oq.get('completed') for oq in old_quests)
+                was_completed = any(
+                    oq.get('description', '').lower() == desc_text.lower() and oq.get('completed')
+                    for oq in old_quests
+                )
                 if not was_completed:
                     self.bot.log("SUCCESS", f"QUEST COMPLETED: {desc_text}")
-        
+
         if cleaned_quests:
             st['quest_data'] = cleaned_quests
             self.bot.log("SYS", f"Dashboard synced: {len(cleaned_quests)} V2 quests tracked.")
@@ -171,22 +175,42 @@ class Quest(commands.Cog):
                 break
 
         cfg = self.bot.config.get('commands', {}).get('quest', {})
-        if cfg.get('auto_claim', True):
-            channel_id = int(message_data.get("channel_id"))
-            for q in quests:
-                if q['completed']:
-                    slot = q['slot']
-                    if slot in claim_buttons:
-                        custom_id = claim_buttons[slot]
-                        self.bot.log("SUCCESS", f"Quest Engine: Auto-claiming completed quest slot {slot}...")
-                        asyncio.create_task(self.bot.interactions.click_button_raw(
-                            custom_id=custom_id,
-                            message_id=message_data.get("id"),
-                            channel_id=channel_id,
-                            author_id=message_data.get("author", {}).get("id"),
-                            guild_id=message_data.get("guild_id"),
-                            flags=message_data.get("flags", 0)
-                        ))
+        if not cfg.get('auto_claim', True):
+            return
+
+        channel_id = message_data.get("channel_id")
+        if not channel_id:
+            return
+
+        done = [q for q in quests if q['completed']]
+        for q in done:
+            custom_id = claim_buttons.get(q['slot'])
+            if not custom_id and len(loose_claims) == 1 and len(done) == 1:
+                custom_id = loose_claims[0]
+            if not custom_id:
+                continue
+            self.bot.log("SUCCESS", f"Quest Engine: Auto-claiming completed quest slot {q['slot']}...")
+            asyncio.create_task(self.bot.interactions.click_button_raw(
+                custom_id=custom_id,
+                message_id=message_data.get("id"),
+                channel_id=int(channel_id),
+                author_id=(message_data.get("author") or {}).get("id"),
+                guild_id=message_data.get("guild_id"),
+                flags=message_data.get("flags", 0)
+            ))
+
+    @staticmethod
+    def _apply_progress(quest, line):
+        progress_match = PROGRESS_RE.search(line)
+        if not progress_match:
+            return False
+        current, total = int(progress_match.group(1)), int(progress_match.group(2))
+        if total <= 0:
+            return False
+        quest['current'] = current
+        quest['total'] = total
+        quest['completed'] = current >= total
+        return True
 
     @commands.Cog.listener()
     async def on_message(self, message):

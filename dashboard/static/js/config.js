@@ -227,7 +227,7 @@ function renderCategoryFlat(obj, path, categoryName, depth = 0, parentEnabled = 
         } else if (path === 'security' && key === 'captcha_solver') {
             const solverEnabled = val.enabled !== false;
             h += `
-                <div class="cfg-section cfg-section-nested ${solverEnabled ? '' : 'cfg-section-disabled'}" id="captcha-solver-section">
+                <div class="cfg-section cfg-section-nested ${solverEnabled ? '' : 'cfg-section-disabled'}" id="captcha-solver-config">
                     <div class="cfg-section-head">Captcha Solver</div>
                     <div class="cfg-section-rows">${renderCaptchaSolverWidget(val, fullPath, selfEnabled)}</div>
                 </div>
@@ -598,11 +598,17 @@ function saveAllConfigs() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(currentConfig)
-    }).then(() => {
+    }).then(res => res.json()).then(data => {
+        // the server rejects a global save from a non-admin session, so don't
+        // claim success before reading the response
+        if (data.status !== "success") {
+            showToast(`Error: ${data.message || "Failed to save"}`, "error");
+            return;
+        }
         originalConfig = JSON.parse(JSON.stringify(currentConfig));
         checkDirty();
         showToast(`Settings Saved for Account: ${currentAccountId}`);
-    });
+    }).catch(() => showToast('Failed to save settings', 'error'));
 }
 
 function saveToAllConfigs() {

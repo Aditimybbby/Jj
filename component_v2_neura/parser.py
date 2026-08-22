@@ -16,6 +16,8 @@ LazyFarmers - https://github.com/routo-loop/neura-self
 """
 
 
+import os
+import re
 
 COMP_TYPES = {
     1: "action_row",
@@ -33,36 +35,79 @@ COMP_TYPES = {
     13: "file",
     14: "separator",
     17: "container",
-    18: "label"
+    18: "label",
 }
 
+SELECT_TYPES = ("select_menu", "user_select", "role_select", "mentionable_select", "channel_select")
+TEXT_TYPES = ("text_display", "section", "label", "container", "button")
+
+# owo hides the animal/weapon name in the custom emoji it renders
+CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
+
+
 class V2Component:
-    def __init__(self, data):
+    def __init__(self, data, parent=None):
         self.raw = data
         self.type = data.get("type")
         self.name = COMP_TYPES.get(self.type, "unknown")
         self.id = data.get("id")
+        self.parent = parent
         self.custom_id = data.get("custom_id")
-        self.content = data.get("content", "")
-        self.label = data.get("label", "")
+        self.content = data.get("content") or ""
+        self.label = data.get("label") or ""
+        self.description = data.get("description") or ""
+        self.placeholder = data.get("placeholder") or ""
         self.url = data.get("url")
-        self.disabled = data.get("disabled", False)
-        
-        self.emoji = data.get("emoji")
-        
-        self.media = []
-        if self.name == "media_gallery":
-            for item in data.get("items", []):
-                media_data = item.get("media", {})
-                self.media.append({
-                    "url": media_data.get("url"),
-                    "proxy_url": media_data.get("proxy_url"),
-                    "placeholder": media_data.get("placeholder")
-                })
+        self.style = data.get("style")
+        self.disabled = bool(data.get("disabled", False))
 
-def walker(components_data):
+        self.emoji = data.get("emoji")
+        self.emoji_name = (self.emoji or {}).get("name") if isinstance(self.emoji, dict) else None
+
+        # string selects carry their choices inline; the click payload needs the values
+        self.options = []
+        for option in data.get("options", []) or []:
+            self.options.append({
+                "label": option.get("label", ""),
+                "value": option.get("value", ""),
+                "description": option.get("description", ""),
+                "default": bool(option.get("default", False)),
+                "emoji": option.get("emoji"),
+            })
+
+        # media lives under a different key for every media-ish component
+        self.media = []
+        for item in data.get("items", []) or []:
+            self.media.append(self._media_entry(item.get("media", {}), item.get("description")))
+        if isinstance(data.get("media"), dict):
+            self.media.append(self._media_entry(data["media"], self.description))
+        if isinstance(data.get("file"), dict):
+            self.media.append(self._media_entry(data["file"], data.get("name")))
+
+    @staticmethod
+    def _media_entry(media, description=None):
+        return {
+            "url": media.get("url"),
+            "proxy_url": media.get("proxy_url"),
+            "placeholder": media.get("placeholder"),
+            "description": description,
+        }
+
+    @property
+    def text(self):
+        """Everything a human would read off this component."""
+        parts = [self.content, self.label, self.description, self.placeholder]
+        parts.extend(option["label"] for option in self.options)
+        return " ".join(p for p in parts if p)
+
+    def __repr__(self):
+        return f"<V2Component {self.name} id={self.custom_id or self.id!r}>"
+
+
+def walker(components_data, parent=None):
+    """Flatten a components v2 tree in document order."""
     flat_list = []
-    
+
     if not components_data:
         return flat_list
 
@@ -70,28 +115,81 @@ def walker(components_data):
         components_data = [components_data]
 
     for data in components_data:
-        comp = V2Component(data)
+        if not isinstance(data, dict):
+            continue
+        comp = V2Component(data, parent=parent)
         flat_list.append(comp)
 
-        if "components" in data:
-            flat_list.extend(walker(data["components"]))
-
-        if "accessory" in data:
-            flat_list.extend(walker(data["accessory"]))
+        # containers/action rows/sections nest a list, labels nest exactly one child
+        # under the singular key, and sections hang a button or thumbnail off "accessory"
+        flat_list.extend(walker(data.get("components"), parent=comp))
+        flat_list.extend(walker(data.get("component"), parent=comp))
+        flat_list.extend(walker(data.get("accessory"), parent=comp))
 
     return flat_list
 
-def parse_v2_message(msg_data):
 
-    if not msg_data or "components" not in msg_data:
+def parse_v2_message(msg_data):
+    """Flat component list for a raw MESSAGE_CREATE / MESSAGE_UPDATE payload."""
+    if not msg_data:
         return []
-    
-    return walker(msg_data["components"])
+    return walker(msg_data.get("components"))
+
+
+def collect_text(components, types=TEXT_TYPES):
+    """Readable text of a v2 message, newline separated, in document order."""
+    lines = []
+    for comp in components:
+        if types and comp.name not in types:
+            continue
+        chunk = comp.text
+        if chunk:
+            lines.append(chunk)
+    return "\n".join(lines)
+
+
+def message_text(msg_data, components=None):
+    """content + v2 text, lowercased - the string every cog matches against."""
+    if components is None:
+        components = parse_v2_message(msg_data)
+    content = (msg_data or {}).get("content") or ""
+    return f"{content}\n{collect_text(components)}".lower()
+
+
+def buttons(components, include_disabled=False):
+    return [
+        comp for comp in components
+        if comp.name == "button" and comp.custom_id and (include_disabled or not comp.disabled)
+    ]
+
+
+def find_button(components, custom_id=None, contains=None, label_contains=None):
+    """First clickable button matching an exact id, an id substring or a label."""
+    for comp in buttons(components):
+        cid = comp.custom_id.lower()
+        if custom_id and cid == str(custom_id).lower():
+            return comp
+        if contains and str(contains).lower() in cid:
+            return comp
+        if label_contains and str(label_contains).lower() in (comp.label or "").lower():
+            return comp
+    return None
+
+
+def emoji_names(text):
+    """Names of the custom emojis in a string - owo animals and weapons ride in these."""
+    return [match.group(1).lower() for match in CUSTOM_EMOJI_RE.finditer(text or "")]
+
 
 def get_boss_battle_id(components):
+    """A stable id for one boss spawn so two accounts never double-join the same fight."""
     for comp in components:
-        if comp.name == "media_gallery" and comp.media:
-            placeholder = comp.media[0].get("placeholder")
-            if placeholder and "reward" in (comp.media[0].get("url") or ""):
-                return placeholder
+        if comp.name not in ("media_gallery", "thumbnail", "file") or not comp.media:
+            continue
+        for entry in comp.media:
+            if entry.get("placeholder"):
+                return entry["placeholder"]
+            url = entry.get("url") or entry.get("proxy_url")
+            if url:
+                return os.path.basename(url.split("?")[0])
     return None
