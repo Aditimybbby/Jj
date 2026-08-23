@@ -62,7 +62,10 @@ const CONFIG_CMD_HINTS = {
     open: 'Open crates / boxes',
     quest: 'Quest tracking',
     rpp: 'RPP command',
-    shop: 'Shop and ring purchases'
+    shop: 'Shop and ring purchases',
+    team: 'Auto zoo team - swaps in rarer animals',
+    weapon: 'Auto weapon equipping',
+    custom: 'Your own commands on a timer'
 };
 
 

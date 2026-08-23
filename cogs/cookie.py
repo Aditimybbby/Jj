@@ -25,11 +25,14 @@ import random
 import os
 import re
 
+import core.state as state
+
 class Cookie(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.active = True
-        self.stats_file = 'data/stats_cookie.json'
+        # DATA_DIR is the volume; a relative 'data/' path is lost on every redeploy
+        self.stats_file = os.path.join(state.DATA_DIR, 'stats_cookie.json')
         self.last_run = self._load_last_run()
         self.last_cookie_sent = 0
 
@@ -39,7 +42,7 @@ class Cookie(commands.Cog):
                 with open(self.stats_file, 'r') as f:
                     data = json.load(f)
                     return data.get(str(self.bot.user_id), 0)
-            except:
+            except Exception:
                 return 0
         return 0
 
@@ -49,16 +52,19 @@ class Cookie(commands.Cog):
             try:
                 with open(self.stats_file, 'r') as f:
                     data = json.load(f)
-            except:
+            except Exception:
                 pass
         data[str(self.bot.user_id)] = timestamp
         try:
+            os.makedirs(os.path.dirname(self.stats_file) or '.', exist_ok=True)
             with open(self.stats_file, 'w') as f:
                 json.dump(data, f, indent=4)
-        except:
+        except Exception:
             pass
 
     def trigger_action(self):
+        if 'cookie' not in self.bot.cmd_states:
+            return
         cfg = self.bot.config.get('commands', {}).get('cookie', {})
         user_to_cookie = cfg.get('id')
         if user_to_cookie:

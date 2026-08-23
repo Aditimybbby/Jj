@@ -17,5 +17,10 @@
     "sell": 4,
     "sacrifice": 4,
     "cash_sync": 4,
-    "level_sync": 4
+    "level_sync": 4,
+    "team_scan": 5,
+    "team": 5,
+    "weapon_scan": 5,
+    "weapon": 5,
+    "custom": 5
 }

@@ -69,6 +69,9 @@ def get_empty_stats():
         'other_count': 0,
         'username': 'Unknown',
         'level': None,
+        'xp': None,
+        'xp_needed': None,
+        'last_level_update': None,
         'quest_data': [],
         'next_quest_timer': None,
         'session_hunt_count': 0,
@@ -104,6 +107,9 @@ def save_account_stats():
                 'gems_used': st.get('gems_used', 0),
                 'username': st.get('username', 'Unknown'),
                 'level': st.get('level'),
+                'xp': st.get('xp'),
+                'xp_needed': st.get('xp_needed'),
+                'last_level_update': st.get('last_level_update'),
                 'quest_data': st.get('quest_data', []),
                 'next_quest_timer': st.get('next_quest_timer'),
                 'current_cash': st.get('current_cash', 0),
@@ -114,7 +120,8 @@ def save_account_stats():
                 })
             }
         
-        os.makedirs('config', exist_ok=True)
+        # STATS_FILE lives under DATA_DIR (the volume), not a relative ./config
+        os.makedirs(os.path.dirname(STATS_FILE) or '.', exist_ok=True)
         with open(STATS_FILE, 'w') as f:
             json.dump(serializable_stats, f, indent=4)
     except Exception as e:
@@ -238,12 +245,12 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None):
 def record_snapshot(user_id):
     if user_id not in account_stats: return
     st = account_stats[user_id]
-    
-    if st['current_cash'] is None: return
+
+    if st.get('current_cash') is None: return
     now = time.time()
-    if st['start_cash'] == 0:
+    if not st.get('start_cash'):
         st['start_cash'] = st['current_cash']
-    st['cowoncy_history'].append((now, st['current_cash']))
+    st.setdefault('cowoncy_history', []).append((now, st['current_cash']))
     
     history = ht.load_history()
     ht.track_cash(history, st['current_cash'])

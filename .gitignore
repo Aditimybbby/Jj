@@ -35,6 +35,12 @@ wheels/
 tokens.txt
 *.local
 
+# dashboard logins (holds emails and plaintext passwords) and per-account settings
+config/dashboard_users.json
+config/dashboard_users.json.tmp
+config/settings_*.json
+sc_stdout.txt
+
 # ===============================
 # Virtual environments
 # ===============================

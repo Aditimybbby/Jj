@@ -30,14 +30,18 @@ class NeuraLogs:
 
     def _load_config(self):
         try:
-            config_path = os.path.join(os.getcwd(), 'config', 'logmisc.json')
+            # logmisc.json lives on the volume, not in the (ephemeral) repo copy
+            from core.paths import CONFIG_DIR
+            config_path = os.path.join(CONFIG_DIR, 'logmisc.json')
+            if not os.path.exists(config_path):
+                config_path = os.path.join(os.getcwd(), 'config', 'logmisc.json')
             if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
+                with open(config_path, 'r', encoding='utf-8') as f:
                     self.log_config = json.load(f)
-                    
+
                     import core.state as state
                     state.log_config = self.log_config
-        except:
+        except Exception:
             pass
 
     def log(self, bot, log_type, message):
@@ -46,6 +50,10 @@ class NeuraLogs:
         dedup_key = f"{bot_uid}:{log_type}:{message}"
         if now - self.last_logs.get(dedup_key, 0) < 1.0:
             return
+        # the dedup map is keyed by the whole message, so it grows forever unless trimmed
+        if len(self.last_logs) > 2000:
+            cutoff = now - 60
+            self.last_logs = {k: v for k, v in self.last_logs.items() if v > cutoff}
         self.last_logs[dedup_key] = now
 
         type_colors = self.log_config.get("colors", {})

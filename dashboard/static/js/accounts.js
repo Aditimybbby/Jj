@@ -61,6 +61,7 @@ window.selectAccount = function(id) {
     if (lineChart) lineChart.data.datasets[0].data = Array(30).fill(0);
     const configView = document.getElementById('config');
     if (configView && configView.classList.contains('active-view')) loadConfig();
+    if (typeof loadCustomCommands === 'function') loadCustomCommands();
     update();
     const dashNav = document.querySelector('.nav-item[onclick*="dash"]');
     if (dashNav) nav('dash', dashNav);
@@ -113,9 +114,26 @@ function renderAccountGrid() {
                         <div class="account-stat-lbl">Gems Used</div>
                     </div>
                 </div>
+                ${renderXpBar(acc.xp, acc.xp_needed)}
             </div>
         `;
     }).join('');
+}
+
+// owo replies with level AND xp in one message ("is level 42 [1,234/5,000 xp]")
+function renderXpBar(xp, needed) {
+    if (xp === null || xp === undefined) return '';
+    const total = needed || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((xp / total) * 100)) : 0;
+    const label = total > 0
+        ? `${xp.toLocaleString()} / ${total.toLocaleString()} XP · ${pct}%`
+        : `${xp.toLocaleString()} XP`;
+    return `
+        <div class="account-xp">
+            <div class="account-xp-track"><div class="account-xp-fill" style="width:${pct}%"></div></div>
+            <div class="account-xp-label">${label}</div>
+        </div>
+    `;
 }
 
 window.fetchAccountConfig = async function() {

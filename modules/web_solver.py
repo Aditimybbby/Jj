@@ -27,6 +27,8 @@ import os
 import subprocess
 from urllib.parse import quote
 
+import core.state as state
+
 from modules.services.yescaptcha import YesCaptchaService
 from modules.services.nopecha import NopeCaptchaService
 from modules.services.anticaptcha import AntiCaptchaService
@@ -355,7 +357,6 @@ def _open_url(url, bot):
     if not opened:
         bot.log("WARN", "All browser opening methods failed. Please use dashboard to solve captcha manually.")
 
-import core.state as state
 
 def setup_web_solver(bot):
     return WebSolver(bot)

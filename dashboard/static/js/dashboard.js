@@ -44,6 +44,7 @@ function update() {
         }
         if (d.cash) document.getElementById('cash').innerText = d.cash.toLocaleString();
         if (d.uptime) document.getElementById('uptimeDisplay').innerText = d.uptime;
+        renderLevelKpi(d.level, d.xp, d.xp_needed);
         if (d.logs) renderLogs(d.logs);
         const dot = document.getElementById('statusDot'), lbl = document.getElementById('botStatus');
         lbl.innerText = d.status; dot.className = "ping-dot " + (d.status === "PAUSED" ? "paused" : "");
@@ -79,6 +80,25 @@ function update() {
         try { if (d.cmd_states) renderScheduler(d.cmd_states); } catch(e) { console.error("Scheduler Render Error in update():", e); }
         try { fetchSecuritySummary(); } catch(e) { console.error("Security Summary Error:", e); }
     });
+}
+
+
+// owo answers "owo level" with the level AND the xp pair in one message, so
+// both land in /api/stats - show them together
+function renderLevelKpi(level, xp, needed) {
+    const lvlEl = document.getElementById('owoLevel');
+    if (!lvlEl) return;
+    let xpText = '';
+    if (xp !== null && xp !== undefined) {
+        if (needed) {
+            const pct = Math.min(100, Math.round((xp / needed) * 100));
+            xpText = `(${xp.toLocaleString()}/${needed.toLocaleString()} xp · ${pct}%)`;
+        } else {
+            xpText = `(${xp.toLocaleString()} xp)`;
+        }
+    }
+    const lvlText = (level === null || level === undefined) ? '—' : level;
+    lvlEl.innerHTML = `${lvlText} <span style="font-size:0.45em; color:var(--text-muted);" id="owoXp">${xpText}</span>`;
 }
 
 

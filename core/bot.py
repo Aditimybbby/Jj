@@ -456,11 +456,12 @@ class NeuraBot(commands.Bot):
         cog_names = set()
         cmd_to_cog = {
             "owo": "Grinding", "hunt": "Grinding", "battle": "Grinding",
-            "coinflip": "Gambling", "slots": "Gambling",
+            "coinflip": "Gambling", "slots": "Gambling", "blackjack": "Gambling",
             "curse": "NeuraCursePray", "pray": "NeuraCursePray",
             "shop": "Shop", "huntbot": "HuntBot", "daily": "Daily",
             "quest": "Quest", "rpp": "RPP", "cookie": "Cookie",
             "level_grind": "LevelQuotes",
+            "team": "Others", "weapon": "Weapons", "custom": "CustomCommands",
         }
         top_to_cog = {
             "reactionBot": ["ReactionBot"],
@@ -484,8 +485,8 @@ class NeuraBot(commands.Bot):
         """Remove scheduler entries for commands that are now disabled."""
         cmds = self.config.get("commands", {})
 
-        def enabled(name):
-            return bool(cmds.get(name, {}).get("enabled", False))
+        def enabled(name, default=False):
+            return bool(cmds.get(name, {}).get("enabled", default))
 
         rules = [
             ("owo", enabled("owo")),
@@ -506,9 +507,31 @@ class NeuraBot(commands.Bot):
             ("channelswitch", self.config.get("utilities", {}).get("autochannel", {}).get("enabled", False)),
             ("cash_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("balance", True)),
             ("level_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("level", True)),
+            ("team_scan", enabled("team", True)),
+            ("weapon_scan", enabled("weapon", True)),
         ]
         for cmd_id, is_on in rules:
             if not is_on and cmd_id in self.cmd_states:
+                del self.cmd_states[cmd_id]
+
+        # every custom command owns a `custom_<n>` scheduler slot; drop the ones that
+        # were deleted or switched off so a removed row stops firing without a restart
+        custom_cfg = cmds.get("custom", {})
+        live_custom = set()
+        if custom_cfg.get("enabled", False):
+            for index, entry in enumerate(custom_cfg.get("commands", []) or []):
+                if not isinstance(entry, dict) or not str(entry.get("command", "")).strip():
+                    continue
+                if entry.get("enabled", True) is False:
+                    continue
+                try:
+                    interval = float(entry.get("interval_s") or 0)
+                except (TypeError, ValueError):
+                    interval = 0
+                if interval > 0:
+                    live_custom.add(f"custom_{index}")
+        for cmd_id in [c for c in self.cmd_states if c.startswith("custom_")]:
+            if cmd_id not in live_custom:
                 del self.cmd_states[cmd_id]
 
     async def sync_settings(self, new_config):
@@ -598,7 +621,7 @@ class NeuraBot(commands.Bot):
             else:
                 self.log("SYS", "Using global settings: settings.json")
 
-            account_file = os.path.join(self.base_dir, 'config', 'accounts.json')
+            account_file = os.path.join(state.CONFIG_DIR, 'accounts.json')
             if os.path.exists(account_file):
                 try:
                     with open(account_file, 'r') as f:
@@ -630,7 +653,7 @@ class NeuraBot(commands.Bot):
                     self.channels = primary.get('channels', [])
                     self.channel_id = int(self.channels[0]) if self.channels else None
 
-            shortform_file = os.path.join(self.base_dir, 'config', 'shortform.json')
+            shortform_file = os.path.join(state.CONFIG_DIR, 'shortform.json')
             if os.path.exists(shortform_file):
                 try:
                     with open(shortform_file, 'r') as f:
@@ -725,7 +748,7 @@ class NeuraBot(commands.Bot):
     def get_cmd_priority(self, cmd_id, default=3):
         """load priority from cmd_priorities.json, fallback to default."""
         try:
-            prio_file = os.path.join(self.base_dir, 'config', 'cmd_priorities.json')
+            prio_file = os.path.join(state.CONFIG_DIR, 'cmd_priorities.json')
             if os.path.exists(prio_file):
                 with open(prio_file, 'r') as f:
                     priorities = json.load(f)
@@ -865,11 +888,12 @@ class NeuraBot(commands.Bot):
                         self.cmd_states[cmd_id]['last_ran'] = time.time()
                     
                     if cmd_id and cmd_id in self.cmd_states:
-                        if cmd_id in ["rpp", "quest", "level_quotes", "huntbot", "daily", "cookie", "coinflip", "slots", "blackjack"]:
+                        if cmd_id in ["rpp", "quest", "level_quotes", "huntbot", "daily", "cookie", "coinflip", "slots", "blackjack", "cursepray"]:
                             class_map = {
-                                "rpp": "RPP", "quest": "Quest", "level_quotes": "LevelQuotes", 
+                                "rpp": "RPP", "quest": "Quest", "level_quotes": "LevelQuotes",
                                 "huntbot": "HuntBot", "daily": "Daily", "cookie": "Cookie",
-                                "coinflip": "Gambling", "slots": "Gambling", "blackjack": "Gambling"
+                                "coinflip": "Gambling", "slots": "Gambling", "blackjack": "Gambling",
+                                "cursepray": "NeuraCursePray",
                             }
                             
                             cog = self.get_cog(class_map[cmd_id])
@@ -922,23 +946,28 @@ class NeuraBot(commands.Bot):
                     continue
 
                 now = time.time()
-                for cmd_id, state in list(self.cmd_states.items()):
-                    if state["in_queue"]: continue
-                    
-                    if now - state["last_ran"] >= state["delay"]:
-                        state["in_queue"] = True
-                        actual_content = state["content"]
+                # do not name this `state` - it would shadow the core.state module import
+                for cmd_id, cmd_state in list(self.cmd_states.items()):
+                    if cmd_state["in_queue"]: continue
+
+                    if now - cmd_state["last_ran"] >= cmd_state["delay"]:
+                        cmd_state["in_queue"] = True
+                        actual_content = cmd_state["content"]
                         if callable(actual_content):
-                            if asyncio.iscoroutinefunction(actual_content):
-                                actual_content = await actual_content()
-                            else:
-                                actual_content = actual_content()
-                        
+                            try:
+                                if asyncio.iscoroutinefunction(actual_content):
+                                    actual_content = await actual_content()
+                                else:
+                                    actual_content = actual_content()
+                            except Exception as e:
+                                self.log("ERROR", f"Scheduler hook '{cmd_id}' failed: {e}")
+                                actual_content = None
+
                         if actual_content is not None:
-                            asyncio.create_task(self.neura_enqueue(actual_content, priority=state["priority"], _cmd_id=cmd_id))
+                            asyncio.create_task(self.neura_enqueue(actual_content, priority=cmd_state["priority"], _cmd_id=cmd_id))
                         else:
-                            state["in_queue"] = False
-                            state["last_ran"] = time.time()
+                            cmd_state["in_queue"] = False
+                            cmd_state["last_ran"] = time.time()
 
                 await asyncio.sleep(1)
             except Exception as e:

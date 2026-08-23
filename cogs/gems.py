@@ -322,5 +322,6 @@ class NeuraGems(commands.Cog):
 
 async def setup(bot):
     cog = NeuraGems(bot)
-    bot.add_listener(cog.on_message, 'on_message')
+    # on_message is already decorated with @commands.Cog.listener(); add_cog registers it.
+    # Adding it again made every gem reply get handled twice.
     await bot.add_cog(cog)

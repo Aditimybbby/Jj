@@ -170,6 +170,24 @@
             "enabled": true,
             "itemsToBuy": 1,
             "cooldown": 3600
+        },
+        "team": {
+            "enabled": true,
+            "check_interval_min": 45,
+            "slots": 3,
+            "add_template": "team add {animal}",
+            "remove_template": "team remove {slot}"
+        },
+        "weapon": {
+            "enabled": true,
+            "check_interval_min": 60,
+            "slots": 3,
+            "list_command": "weapon",
+            "equip_template": "weapon equip {weapon} {slot}"
+        },
+        "custom": {
+            "enabled": false,
+            "commands": []
         }
     },
     "stealth": {

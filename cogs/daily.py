@@ -25,11 +25,15 @@ import time
 import random
 import re
 
+import core.state as state
+
 class Daily(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.active = True
-        self.stats_file = 'data/stats_daily.json'
+        self.cooldown = 86400
+        # DATA_DIR is the volume; a relative 'data/' path is lost on every redeploy
+        self.stats_file = os.path.join(state.DATA_DIR, 'stats_daily.json')
         self.last_run = self._load_last_run()
         self.last_daily_sent = 0
 
@@ -39,7 +43,7 @@ class Daily(commands.Cog):
                 with open(self.stats_file, 'r') as f:
                     data = json.load(f)
                     return data.get(str(self.bot.user_id), 0)
-            except:
+            except Exception:
                 return 0
         return 0
 
@@ -49,13 +53,14 @@ class Daily(commands.Cog):
             try:
                 with open(self.stats_file, 'r') as f:
                     data = json.load(f)
-            except:
+            except Exception:
                 pass
         data[str(self.bot.user_id)] = ts
         try:
+            os.makedirs(os.path.dirname(self.stats_file) or '.', exist_ok=True)
             with open(self.stats_file, 'w') as f:
                 json.dump(data, f, indent=4)
-        except:
+        except Exception:
             pass
 
     def trigger_action(self):
@@ -123,7 +128,9 @@ class Daily(commands.Cog):
                 
                 if is_for_daily:
                     self.cooldown = total_seconds + random.randint(10, 30)
-                    self.last_run = time.time()
+                    # back-date so a restart keeps the remaining wait instead of
+                    # assuming a fresh 24h
+                    self.last_run = time.time() - max(0, 86400 - self.cooldown)
                     self._save_last_run(self.last_run)
                     self.bot.log("COOLDOWN", f"Daily wait synced: {h}h {m}m {s}s remaining.")
                     

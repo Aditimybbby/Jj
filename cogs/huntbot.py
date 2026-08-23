@@ -65,10 +65,14 @@ class HuntBot(commands.Cog):
         await self._process_message(after)
 
     async def _process_message(self, message):
+        # without this every user's message could set owo_user and drive huntbot state
+        monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
+        if str(message.author.id) != monitor_id:
+            return
         if self.bot.owo_user is None:
             self.bot.owo_user = message.author
-        if message.channel.id != self.bot.channel_id: return
-        
+        if str(message.channel.id) not in [str(c) for c in self.bot.channels]:
+            return
         cfg = self.bot.config.get('commands', {}).get('huntbot', {})
         
         content = message.content or ""
