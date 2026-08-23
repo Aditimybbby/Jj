@@ -168,6 +168,32 @@ def protect_large_ints(obj):
         return str(obj)
     return obj
 
+def _asset_version():
+    """Cache-busting token for the css/js tags.
+
+    Derived from the newest mtime under static/ so an edited file is picked up on
+    the next reload. The js tags previously carried no ?v= at all while the css did,
+    so after a deploy a browser ran the old javascript against the new markup - the
+    dashboard looked broken until someone hard-refreshed by hand.
+    """
+    newest = 0.0
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    for root, _dirs, files in os.walk(static_dir):
+        for name in files:
+            if not name.endswith(('.js', '.css')):
+                continue
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(root, name)))
+            except OSError:
+                continue
+    return str(int(newest)) or "0"
+
+
+@app.context_processor
+def inject_asset_version():
+    return {'asset_v': _asset_version()}
+
+
 @app.route('/')
 @login_required
 def home():
@@ -285,6 +311,7 @@ def account_list():
             'level': st.get('level'),
             'xp': st.get('xp'),
             'xp_needed': st.get('xp_needed'),
+            'level_source': st.get('level_source'),
             'session_total': session_total,
             'gems_used': st.get('gems_used', 0)
         })
@@ -347,13 +374,33 @@ def stats():
     is_active = bot and str(bot.user.id) == uid if bot and bot.user else False
     current_status = ("PAUSED" if bot.paused else "ONLINE") if is_active else "OFFLINE"
 
+    # the battle team lives on the cog, not in stats, because it is rebuilt from
+    # whatever owo last showed us rather than persisted
+    team_info = {'slots': [], 'watching': False, 'owned': 0}
+    if is_active:
+        others = bot.get_cog('Others')
+        if others:
+            team_cfg = bot.config.get('commands', {}).get('team', {})
+            team_info = {
+                'slots': [
+                    {'animal': animal, 'rarity': others.rarity_name(animal)}
+                    for animal in (others.current_team or [])
+                ],
+                'watching': bool(team_cfg.get('enabled', True) and team_cfg.get('watch_zoo', True)),
+                'owned': others.owned_count,
+            }
+
     response_data = {
         'uptime': utils.format_seconds(elapsed),
         'cash': st.get('current_cash', 0),
         'level': st.get('level'),
         'xp': st.get('xp'),
         'xp_needed': st.get('xp_needed'),
+        # "image" means owo answered with a rendered card we cannot read - the UI shows
+        # that instead of leaving a stale number looking freshly synced
+        'level_source': st.get('level_source'),
         'last_level_update': st.get('last_level_update'),
+        'team': team_info,
         'logs': [l for l in state.command_logs if str(l.get('bot_id')) == uid][:200],
         'status': current_status,
         'security': {

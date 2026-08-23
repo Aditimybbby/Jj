@@ -45,6 +45,16 @@
     --legendary-glow: rgb(255, 238, 0);
     --fabled: #00ffff;
     --fabled-glow: rgba(0, 255, 255, 1);
+    /* the zoo parser ranks these tiers too, so the palette has to cover them or a
+       hidden/distorted animal renders with no colour at all */
+    --mythical: #a855f7;
+    --mythical-glow: rgba(168, 85, 247, 0.8);
+    --hidden: #ff7ac6;
+    --hidden-glow: rgba(255, 122, 198, 0.85);
+    --distorted: #f43f5e;
+    --distorted-glow: rgba(244, 63, 94, 0.9);
+    --unknown: #64748b;
+    --unknown-glow: rgba(100, 116, 139, 0.35);
 }
 
 * { box-sizing: border-box; }

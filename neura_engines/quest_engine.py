@@ -21,6 +21,7 @@ import asyncio
 import time
 import random
 import core.state as state
+from neura_engines import coop
 
 # quest intelligence is still under testing , errors and bugs can occur
 
@@ -48,14 +49,13 @@ import core.state as state
 
 EMOTE_COMMANDS = ["hug", "poke", "pat", "cuddle", "kiss"]
 
-FALLBACK_TARGETS = ["408785106942164992"]
-
 class NeuraQuestEngine:
     def __init__(self, bot):
         self.bot = bot
         self.last_solver_run = 0
         self.solver_task = None
         self._alt_warned = False
+        self._target_warned = False
         self.last_signaled = {}
         self.last_queued = {}
 
@@ -97,26 +97,30 @@ class NeuraQuestEngine:
                 total = q.get('total', 1)
                 remaining = total - current
 
-                # priorty 1: social quests that need an alt account 
+                # priorty 1: social quests that need an alt account
                 if self.is_alt_quest(desc):
                     now = time.time()
                     if now - self.last_signaled.get(desc, 0) < 60:
-                        break 
+                        continue
                     cfg = self.bot.config.get('commands', {}).get('quest', {})
-                    if cfg.get('use_alt_account', True):
-                        instances = getattr(state, 'bot_instances', [])
-                        if len(instances) > 1:
-                            self.last_signaled[desc] = now
-                            await self._signal_alt(desc)
-                        else:
-                            if not self._alt_warned:
-                                self.bot.log(
-                                    "WARN",
-                                    "Quest Engine: Social quest active but no alt accounts online. "
-                                    f"Quest: '{q.get('description', '')}'"
-                                )
-                                self._alt_warned = True
-                    break  
+                    if not cfg.get('use_alt_account', True) or not coop.enabled(self.bot, 'quests'):
+                        continue
+
+                    helpers = coop.peers(self.bot)
+                    if helpers:
+                        self.last_signaled[desc] = now
+                        self._alt_warned = False
+                        await self._signal_alt(desc, helpers, remaining)
+                    elif not self._alt_warned:
+                        self.bot.log(
+                            "WARN",
+                            "Quest Engine: Social quest active but no alt account is online in a "
+                            f"shared channel. Quest: '{q.get('description', '')}'"
+                        )
+                        self._alt_warned = True
+                    # a second social quest is somebody else's command budget, not ours,
+                    # so keep going instead of dropping out of the whole pass
+                    continue
 
                 # priorty 2: self-contained quests we automate directly ──
 
@@ -126,6 +130,9 @@ class NeuraQuestEngine:
 
                 elif "use an action command on someone" in desc or "use an emote command on someone" in desc:
                     target_id = self._get_sibling_or_fallback()
+                    if target_id is None:
+                        self._warn_no_target(q.get('description', ''))
+                        break
                     emote = random.choice(EMOTE_COMMANDS)
                     await self._queue_quest_command(
                         f"owo {emote} <@{target_id}>",
@@ -153,20 +160,31 @@ class NeuraQuestEngine:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_sibling_or_fallback(self):
-        instances = getattr(state, 'bot_instances', [])
-        if len(instances) > 1:
-            sibling = next(
-                (inst for inst in instances if str(inst.user.id) != str(self.bot.user_id)),
-                None
-            )
-            if sibling:
-                return sibling.user.id
-        return random.choice(FALLBACK_TARGETS)
+        """Somebody we can aim an action command at, or None if there is nobody.
+
+        Returning None matters: this used to fall back to owo's own user id, and owo
+        rejects action commands aimed at a bot, so the quest never moved and the
+        wasted command looked like it had worked.
+        """
+        helpers = coop.peers(self.bot)
+        if helpers:
+            return random.choice(helpers).user.id
+        return coop.fallback_target(self.bot)
+
+    def _warn_no_target(self, description):
+        if self._target_warned:
+            return
+        self._target_warned = True
+        self.bot.log(
+            "WARN",
+            f"Quest Engine: '{description}' needs somebody to act on, but no sibling account "
+            "is online and coop.fallback_targets is empty - add a friend's user id there."
+        )
 
     async def _queue_quest_command(self, cmd, reason, cooldown=10):
         now = time.time()
         if now - self.last_queued.get(cmd, 0) < cooldown:
-            return  
+            return
         self.last_queued[cmd] = now
         self.bot.log("SYS", f"Quest Engine: Queueing [{cmd}] for {reason}")
         await self.bot.neura_enqueue(cmd, priority=5)
@@ -182,8 +200,18 @@ class NeuraQuestEngine:
         ]
         return any(s in desc for s in socials)
 
-    async def _signal_alt(self, desc):
+    async def _signal_alt(self, desc, helpers, remaining=1):
+        """Get sibling accounts to do the social half of a quest for us.
+
+        Every ask goes through coop.ask_peer, which drops it unless the peer is
+        actually able to send (not paused, not sitting on an unsolved captcha) and
+        shares a channel with us - owo only credits what it sees us both in.
+        """
         my_id = self.bot.user_id
+
+        if "battle with a friend" in desc:
+            await self._friendly_battle(helpers)
+            return
 
         target_cmd = None
         if "pray to you" in desc:
@@ -191,27 +219,52 @@ class NeuraQuestEngine:
         elif "curse you" in desc:
             target_cmd = f"owo curse <@{my_id}>"
         elif "action command on you" in desc or "emote command on you" in desc:
-            emote = random.choice(EMOTE_COMMANDS)
-            target_cmd = f"owo {emote} <@{my_id}>"
+            target_cmd = f"owo {random.choice(EMOTE_COMMANDS)} <@{my_id}>"
         elif "cookie from" in desc:
             target_cmd = f"owo cookie <@{my_id}>"
 
-        for instance in getattr(state, 'bot_instances', []):
-            is_other = str(instance.user.id) != str(my_id)
-            is_active = getattr(instance, 'is_ready', False) and not getattr(instance, 'paused', False)
-            if not (is_other and is_active):
-                continue
+        if not target_cmd:
+            return
 
-            if "battle with a friend" in desc:
-                await self.bot.neura_enqueue(f"owo battle <@{instance.user.id}>", priority=5)
+        # "receive a cookie from 3 friends" wants three *different* people, so ask as
+        # many siblings as the quest still needs. The old code stopped after the first
+        # peer no matter what the quest asked for.
+        distinct_needed = max(1, int(remaining)) if "cookie from" in desc else 1
+        action = desc[:40]
 
-                async def delayed_ab(inst=instance):
-                    await asyncio.sleep(4.0)
-                    await inst.neura_enqueue("owo ab", priority=4, target_channel_id=self.bot.channel_id)
+        asked = 0
+        for peer in helpers:
+            if asked >= distinct_needed:
+                break
+            if await coop.ask_peer(self.bot, peer, target_cmd, action, cooldown=90):
+                asked += 1
+                await asyncio.sleep(random.uniform(1.0, 2.5))
 
-                asyncio.create_task(delayed_ab())
-                self.bot.log("SYS", f"Quest Engine: Coordinated friendly battle with {instance.user.name}")
-            elif target_cmd:
-                await instance.neura_enqueue(target_cmd, priority=5, target_channel_id=self.bot.channel_id)
-                self.bot.log("SYS", f"Quest Engine: Signalled alt {instance.user.name} → [{target_cmd}]")
-            break 
+        if not asked:
+            self.bot.log("INFO", f"Quest Engine: no sibling was free to help with '{desc[:50]}'")
+
+    async def _friendly_battle(self, helpers):
+        """A friendly battle needs both sides, so only one account may start it."""
+        partner = next((peer for peer in helpers if coop.is_initiator(self.bot, peer)), None)
+        if partner is None:
+            # a sibling with a lower id owns this pairing and will send the challenge;
+            # our own response_handler accepts it when it arrives
+            return
+
+        channel = coop.shared_channel(self.bot, partner)
+        if channel is None:
+            return
+        if not coop.may_ask(partner, self.bot, "friendly_battle", 90):
+            return
+        coop.note_ask(partner, self.bot, "friendly_battle")
+
+        await self.bot.neura_enqueue(
+            f"owo battle <@{partner.user.id}>",
+            priority=5,
+            target_channel_id=channel,
+            _cmd_id="coop_battle",
+        )
+        cog = self.bot.get_cog("Coop")
+        if cog:
+            cog.arm_accept_fallback(partner, channel)
+        self.bot.log("SYS", f"Quest Engine: Coordinated friendly battle with {partner.user.name}")

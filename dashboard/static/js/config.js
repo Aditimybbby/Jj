@@ -257,7 +257,10 @@ function renderCategoryFlat(obj, path, categoryName, depth = 0, parentEnabled = 
 
 function isListField(path) {
     const name = path.split('.').pop();
-    return ['channels', 'targets', 'active_commands', 'ignore_guilds'].includes(name);
+    // fallback_targets has to be here: without it an empty list falls through to the
+    // plain text input below, whose onchange writes back a *string* - and the bot then
+    // iterates that string character by character looking for user ids
+    return ['channels', 'targets', 'fallback_targets', 'active_commands', 'ignore_guilds'].includes(name);
 }
 
 function isSelectField(path) {

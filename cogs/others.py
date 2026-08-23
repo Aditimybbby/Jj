@@ -18,20 +18,37 @@ LazyFarmers - https://github.com/routo-loop/neura-self
 
 
 import asyncio
+import json
 import time
 import re
 import random
 import core.state as state
 from discord.ext import commands
+from component_v2_neura import parse_v2_message, collect_text
 
-# `owo level` answers with the level AND the xp bar in one message, e.g.
-#   "**Routo**, you are level **24**!  `12,340/18,000` xp"
-# so the level and the xp progress both have to come out of the same reply.
-LEVEL_PHRASES = ("you are", "is now", "leveled up", "your level", "level up", "levelled up")
+# ── level ────────────────────────────────────────────────────────────────────
+# owo prints the word "level" in hunt results, battle logs, quest lines, weapon
+# and pet replies, so matching it loosely is how a random number ended up on the
+# dashboard labelled as the account level. Only these phrasings are owo talking
+# about *our own* level, and a blank level beats a wrong one.
+SELF_LEVEL_PHRASES = (
+    "you are level", "you're level", "you are now level", "you're now level",
+    "your level is", "your current level", "you have reached level",
+    "you reached level", "you leveled up", "you levelled up",
+    "you are lvl", "you're lvl", "your lvl is",
+)
+# a level that belongs to an animal, a weapon, a pet or another player
+LEVEL_NOISE = ("'s level", "s' level", "weapon level", "your pet", "battle log")
+
+# xp has to be spelled out. The old pattern had "(?:xp|exp)?" optional, so any
+# "12/20" - quest progress, battle hp, an inventory count - was read as an xp bar,
+# and a non-None xp then waved the level guard through with whatever number the
+# level regex happened to find first.
+XP_LABELLED_RE = re.compile(r'(?:xp|exp)\s*\**\s*:?\s*`?\s*([\d,]+)\s*/\s*([\d,]+)')
+XP_PAIR_RE = re.compile(r'([\d,]+)\s*/\s*([\d,]+)\s*\**\s*`?\s*(?:xp|exp)\b')
+XP_NEEDED_RE = re.compile(r'need\D{0,12}([\d,]+)\s*\**\s*(?:xp|exp)')
 LEVEL_RE = re.compile(r'\b(?:lvl|level)\s*(?:is|:|-)?\s*\**\s*`?\s*(\d{1,4})\b')
 LEVEL_SUFFIX_RE = re.compile(r'\b(\d{1,4})\s*\**\s*(?:lvl|level)\b')
-XP_PAIR_RE = re.compile(r'([\d,]+)\s*/\s*([\d,]+)\s*\**\s*`?\s*(?:xp|exp)?')
-XP_NEEDED_RE = re.compile(r'need\D{0,12}([\d,]+)\s*\**\s*(?:xp|exp)')
 
 NO_TEAM_PHRASES = (
     "do not have an active battle team",
@@ -41,6 +58,11 @@ NO_TEAM_PHRASES = (
     "you do not have a team",
     "you don't have a team",
 )
+
+HUNT_PHRASES = ("you found:", "caught a", "caught an")
+# owo says this when `team add` was handed something it does not recognise
+BAD_ANIMAL_PHRASES = ("invalid animal", "could not find that animal", "is not a valid animal",
+                      "you do not own", "don't own that")
 
 # every zoo row lists the whole tier in a fixed order, with a question mark holding
 # the slot of an animal you have never caught - so the slot index gives us the name
@@ -55,8 +77,20 @@ ZOO_TIERS = {
 }
 CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):\d+>')
 
+# unicode fallbacks for the same lists. A zoo row drawn with plain emoji used to be
+# thrown away, which is the main reason rare animals never made it onto the team.
+UNICODE_ANIMALS = {
+    "🐝": "bee", "🐛": "bug", "🐌": "snail", "🪲": "beetle", "🦋": "butterfly",
+    "🐤": "chick", "🐭": "mouse", "🐔": "chicken", "🐰": "rabbit", "🐿": "chipmunk",
+    "🐑": "sheep", "🐷": "pig", "🐮": "cow", "🐶": "dog", "🐱": "cat",
+    "🐊": "crocodile", "🐯": "tiger", "🐧": "penguin", "🐘": "elephant", "🐳": "whale",
+    "🐲": "dragon", "🦄": "unicorn", "⛄": "snowman", "👻": "ghost", "🕊": "dove",
+}
+# selectors and joiners that ride along with an emoji but are not part of its identity
+EMOJI_MODIFIERS = ("️", "︎", "‍", "⃣")
+
 # a zoo row looks like:  common   🐝¹⁰  🐛⁰⁵  ❓⁰⁰ ...
-# the superscript is how many you own, and ❓⁰⁰ is a slot you have never caught
+# the superscript is how many you own, and ❓ is a slot you have never caught
 ZOO_TOKEN_RE = re.compile(
     r'(?P<emoji><a?:\w+:\d+>|[\U0001F000-\U0001FAFF☀-➿⬀-⯿][️‍\U0001F000-\U0001FAFF]*)'
     r'(?P<count>[⁰¹²³⁴-⁹]*)'
@@ -80,13 +114,24 @@ STATIC_RANKS = {
 }
 
 
+def emoji_key(emoji):
+    """An emoji stripped of variation selectors, for dictionary lookups."""
+    return ''.join(ch for ch in emoji if ch not in EMOJI_MODIFIERS)
+
+
 def parse_level_xp(content):
-    """(level, xp, xp_needed) out of an `owo level` reply - any of them may be None."""
+    """(level, xp, xp_needed) out of an owo reply - any of them may be None.
+
+    Deliberately strict. Everything here feeds the dashboard, and the previous
+    version happily reported an animal's level as the account level.
+    """
     if "level" not in content and "lvl" not in content:
+        return None, None, None
+    if any(noise in content for noise in LEVEL_NOISE):
         return None, None, None
 
     xp = xp_needed = None
-    xp_match = XP_PAIR_RE.search(content)
+    xp_match = XP_LABELLED_RE.search(content) or XP_PAIR_RE.search(content)
     if xp_match:
         try:
             xp = int(xp_match.group(1).replace(',', ''))
@@ -104,12 +149,16 @@ def parse_level_xp(content):
             except ValueError:
                 xp_needed = None
 
-    # a bare "level" mention is not enough - owo says "level" in plenty of other replies
-    if xp is None and xp_needed is None and not any(p in content for p in LEVEL_PHRASES):
+    # an "N/M xp" bar with the unit spelled out only ever shows up on our own card
+    anchor = min((content.find(p) for p in SELF_LEVEL_PHRASES if p in content), default=-1)
+    if anchor == -1 and xp is None:
         return None, None, None
 
+    # read the number next to the phrase, not the first "level N" anywhere in the
+    # message - a level card also lists weapon and pet levels further down
+    window = content[anchor:anchor + 80] if anchor != -1 else content
     level = None
-    match = LEVEL_RE.search(content) or LEVEL_SUFFIX_RE.search(content)
+    match = LEVEL_RE.search(window) or LEVEL_SUFFIX_RE.search(window)
     if match:
         try:
             level = int(match.group(1))
@@ -131,6 +180,44 @@ class Others(commands.Cog):
         self._owned_at = 0
         self._want_team_check = False
         self._last_team_action = 0
+        self._team = []
+        self._want_level_until = 0.0
+        self._level_image_warned = False
+        self._handled_v2 = {}
+
+    # ── level ────────────────────────────────────────────────────────────────
+
+    def _store_level(self, level, xp, xp_needed, source="text"):
+        st = self.bot.stats
+        changed = []
+        if level is not None and st.get('level') != level:
+            st['level'] = level
+            changed.append(f"level {level}")
+        if xp is not None:
+            st['xp'] = xp
+            st['xp_needed'] = xp_needed
+            changed.append(f"{xp:,}/{xp_needed:,} xp" if xp_needed else f"{xp:,} xp")
+        elif xp_needed is not None:
+            st['xp_needed'] = xp_needed
+        if level is not None or xp is not None:
+            st['level_source'] = source
+        if changed:
+            st['last_level_update'] = time.time()
+            state.save_account_stats()
+            self.bot.log("INFO", f"OwO level synced: {', '.join(changed)}")
+
+    def _note_level_unreadable(self):
+        """owo drew the level as a picture - say so instead of inventing a number."""
+        self._want_level_until = 0.0
+        self.bot.stats['level_source'] = 'image'
+        if self._level_image_warned:
+            return
+        self._level_image_warned = True
+        self.bot.log(
+            "WARN",
+            "OwO answered `owo level` with an image card and no readable text. Level and "
+            "xp stay blank on the dashboard rather than showing a guessed number."
+        )
 
     # ── zoo / team ───────────────────────────────────────────────────────────
 
@@ -140,42 +227,104 @@ class Others(commands.Cog):
     def rank_of(self, animal):
         return self._animal_ranks.get(str(animal).lower(), -1)
 
+    # ── read by the dashboard (/api/stats) ───────────────────────────────────
+
+    @property
+    def current_team(self):
+        return list(self._team)
+
+    @property
+    def owned_count(self):
+        return len(self._owned)
+
+    def rarity_name(self, animal):
+        return RANK_NAMES.get(self.rank_of(animal), 'unknown')
+
+    @staticmethod
+    def _is_tier_badge(emoji):
+        """True for the rarity badge owo prints in front of a zoo row.
+
+        Matched by name rather than by position: a row where every animal is owned
+        exactly once carries no superscripts at all, and the count heuristic below
+        cannot tell badge from animal there - which let the badge through as a fake
+        animal named "epictier" that `team add` would only ever reject.
+        """
+        custom = CUSTOM_EMOJI_RE.fullmatch(emoji or '')
+        if not custom:
+            return False
+        name = custom.group(1).lower()
+        if 'tier' in name:
+            return True
+        return any(name == word or name == f"{word}s" for word, _rank in RARITY_RANK)
+
+    @classmethod
+    def _drop_tier_icon(cls, tokens, tier, tier_names):
+        """The emoji in front of a zoo row is the tier badge, not an animal."""
+        if not tokens:
+            return tokens
+        first_emoji, first_count = tokens[0][0], tokens[0][1]
+        if cls._is_tier_badge(first_emoji):
+            return tokens[1:]
+        custom = CUSTOM_EMOJI_RE.fullmatch(first_emoji)
+        if custom and tier in custom.group(1).lower():
+            return tokens[1:]
+        if tier_names and len(tokens) == len(tier_names) + 1:
+            return tokens[1:]
+        # a badge never carries an owned-count superscript, an animal usually does
+        if not first_count and any(token[1] for token in tokens[1:]):
+            return tokens[1:]
+        return tokens
+
+    def _name_for(self, emoji, tier_names, slot):
+        """What `owo team add` should be handed for this zoo slot."""
+        custom = CUSTOM_EMOJI_RE.fullmatch(emoji)
+        if custom:
+            # owo names every animal emoji after the animal, and this is the only
+            # thing that works for legendary/fabled/hidden rows we have no list for
+            return custom.group(1).lower()
+        known = UNICODE_ANIMALS.get(emoji_key(emoji))
+        if known:
+            return known
+        if slot < len(tier_names):
+            return tier_names[slot]
+        # last resort: owo takes the animal emoji itself in `team add`. Dropping the
+        # token here is exactly how the ultra-rare rows used to be ignored.
+        return emoji_key(emoji)
+
     def parse_zoo(self, raw):
         """Animals you actually own, rarest first, named the way owo team add wants them."""
         found = []
         for line in raw.splitlines():
-            head = line.replace('*', '').strip().lower()[:24]
-            match = next(((word, rank) for word, rank in RARITY_RANK if word in head), None)
+            # strip the custom emoji before looking for the tier word. The badge in
+            # front of a rare row is a long "<:legendaryTier:123...>" and the old code
+            # only looked at the first 24 characters, so the word was hidden behind it
+            # and the whole row - every rare animal in it - was skipped.
+            bare = CUSTOM_EMOJI_RE.sub(' ', line).replace('*', '').replace('`', '').lower()
+            match = next(((word, rank) for word, rank in RARITY_RANK if word in bare), None)
             if match is None:
                 continue
             tier, rank = match
             tier_names = ZOO_TIERS.get(tier, ())
 
-            # every animal carries a superscript count; the tier icon in front of the
-            # row does not, and counting it would shift every slot by one
-            slots = [
-                (token.group('emoji'), ''.join(SUPERSCRIPTS[c] for c in token.group('count')))
-                for token in ZOO_TOKEN_RE.finditer(line)
-                if token.group('count')
-            ]
-            aligned = bool(tier_names) and len(slots) == len(tier_names)
+            tokens = []
+            for token in ZOO_TOKEN_RE.finditer(line):
+                # keep what owo printed straight after the emoji: an unowned marker can
+                # sit there rather than replacing the animal, and under "no superscript
+                # means one copy" that slot would otherwise read as an animal we own
+                tail = line[token.end():token.end() + 2]
+                tokens.append((token.group('emoji'), token.group('count'), tail))
+            tokens = self._drop_tier_icon(tokens, tier, tier_names)
 
-            for slot, (emoji, digits) in enumerate(slots):
-                if int(digits) == 0 or any(marker in emoji for marker in UNOWNED):
+            for slot, (emoji, count, tail) in enumerate(tokens):
+                digits = ''.join(SUPERSCRIPTS[c] for c in count) if count else ''
+                # no superscript at all means owo printed a single copy, not zero.
+                # Requiring one is what made whole rows vanish from the parse.
+                owned = int(digits) if digits else 1
+                if owned == 0 or any(marker in emoji or marker in tail for marker in UNOWNED):
                     continue
 
-                # owo renders every animal as a custom emoji whose name is the animal,
-                # so that beats guessing from the slot index - and it is the only thing
-                # that works for legendary/fabled/hidden rows we have no name list for
-                custom = CUSTOM_EMOJI_RE.fullmatch(emoji)
-                if custom:
-                    animal = custom.group(1).lower()
-                elif aligned:
-                    animal = tier_names[slot]
-                elif slot < len(tier_names):
-                    animal = tier_names[slot]
-                else:
-                    # a unicode emoji in a row we cannot line up - no usable name
+                animal = self._name_for(emoji, tier_names, slot)
+                if not animal:
                     continue
 
                 found.append((rank, animal))
@@ -193,6 +342,11 @@ class Others(commands.Cog):
         """Animal names currently on the battle team, in slot order."""
         names = [name.lower() for name in CUSTOM_EMOJI_RE.findall(raw)]
         if not names:
+            for token in ZOO_TOKEN_RE.finditer(raw):
+                known = UNICODE_ANIMALS.get(emoji_key(token.group('emoji')))
+                if known:
+                    names.append(known)
+        if not names:
             # a text-only team listing quotes the names instead
             names = [n.lower() for n in re.findall(r'`\s*([a-z][a-z_\- ]{1,20})\s*`', raw, re.IGNORECASE)]
         seen = []
@@ -202,11 +356,18 @@ class Others(commands.Cog):
             seen.append(name)
         return seen
 
+    def _weakest_team_rank(self):
+        if not self._team:
+            return -1
+        return min(self.rank_of(animal) for animal in self._team)
+
     async def request_team_check(self, reason=""):
         """Read the zoo, then the team, so we can swap in anything rarer."""
-        if not self._team_cfg().get('enabled', True):
+        cfg = self._team_cfg()
+        if not cfg.get('enabled', True):
             return
-        if time.time() - self._last_team_action < 45:
+        cooldown = max(20, int(cfg.get('min_action_gap_s', 45) or 45))
+        if time.time() - self._last_team_action < cooldown:
             return
         self._last_team_action = time.time()
         self.zoo = True
@@ -233,13 +394,26 @@ class Others(commands.Cog):
         # anything already in place stays put; everything else is a candidate swap
         keep = [animal for animal in current if animal in wanted]
         missing = [animal for animal in wanted if animal not in keep]
-        free_slots = [i + 1 for i, animal in enumerate(current) if animal not in keep]
-        free_slots += list(range(len(current) + 1, slots + 1))
 
         if not missing:
             best_rank = RANK_NAMES.get(self.rank_of(wanted[0]), '?') if wanted else '?'
             self.bot.log("TEAM", f"Team already holds the rarest animals we own (top tier: {best_rank})")
             return
+
+        # hysteresis: only churn the team when the swap actually buys rarity. Without
+        # it a tie inside one tier makes every scan remove and re-add the same animals.
+        if len(current) >= slots:
+            gain = max(self.rank_of(animal) for animal in missing)
+            weakest = min(self.rank_of(animal) for animal in current)
+            if gain <= weakest:
+                self.bot.log(
+                    "TEAM",
+                    f"Nothing rarer than the current {RANK_NAMES.get(weakest, '?')} slot - team left alone"
+                )
+                return
+
+        free_slots = [i + 1 for i, animal in enumerate(current) if animal not in keep]
+        free_slots += list(range(len(current) + 1, slots + 1))
 
         replaced = [
             animal for i, animal in enumerate(current)
@@ -250,8 +424,10 @@ class Others(commands.Cog):
         for slot in sorted([s for s in free_slots if s <= len(current)], reverse=True):
             await self.bot.neura_enqueue(remove_template.format(slot=slot), priority=3)
 
+        added = []
         for animal, slot in zip(missing, free_slots):
             await self.bot.neura_enqueue(add_template.format(animal=animal, slot=slot), priority=3)
+            added.append(animal)
             self.bot.log(
                 "TEAM",
                 f"Team slot {slot}: adding {animal} ({RANK_NAMES.get(self.rank_of(animal), 'unknown')})"
@@ -259,6 +435,89 @@ class Others(commands.Cog):
 
         if replaced:
             self.bot.log("TEAM", f"Dropped {', '.join(replaced)} for rarer animals")
+
+        # remember what the team should look like so the zoo watcher has something to
+        # compare a fresh catch against before the next full scan
+        self._team = (keep + added)[:slots]
+
+    def _animals_in(self, raw, content):
+        """Animal names a hunt result mentions, by emoji or by name."""
+        names = set()
+        for name in CUSTOM_EMOJI_RE.findall(raw):
+            names.add(name.lower())
+        for token in ZOO_TOKEN_RE.finditer(raw):
+            known = UNICODE_ANIMALS.get(emoji_key(token.group('emoji')))
+            if known:
+                names.add(known)
+        for word in re.findall(r'\*\*\s*([a-z][a-z_\- ]{1,20})\s*\*\*', content):
+            candidate = word.strip()
+            if candidate in self._animal_ranks:
+                names.add(candidate)
+        return names
+
+    async def _watch_hunt(self, message, content):
+        """A catch rarer than the weakest team slot earns an immediate re-check.
+
+        This is the zoo watcher: a hunt result is the exact moment the zoo changes,
+        so there is no reason to poll for it.
+        """
+        cfg = self._team_cfg()
+        if not cfg.get('enabled', True) or not cfg.get('watch_zoo', True):
+            return
+
+        slots = max(1, int(cfg.get('slots', 3) or 3))
+        weakest = self._weakest_team_rank()
+        # owo prints the rarity next to the catch, which covers animals we have
+        # never seen and therefore cannot rank ourselves
+        tier_hint = next((rank for word, rank in RARITY_RANK if word in content), -1)
+
+        best_rank, best_name = -1, None
+        for name in self._animals_in(message.content or "", content):
+            rank = self.rank_of(name)
+            if rank < 0:
+                rank = tier_hint
+            if rank > best_rank:
+                best_rank, best_name = rank, name
+
+        if best_name is None:
+            if tier_hint > weakest and len(self._team) >= slots:
+                await self.request_team_check(f"caught a {RANK_NAMES.get(tier_hint, '?')} animal")
+            return
+
+        if best_name in self._team:
+            return
+        if len(self._team) >= slots and best_rank <= weakest:
+            return
+
+        await self.request_team_check(
+            f"caught {best_name} ({RANK_NAMES.get(best_rank, 'unknown')})"
+        )
+
+    async def _handle_zoo(self, raw, content):
+        self.zoo = False
+        self._owned = self.parse_zoo(raw)
+        self._owned_at = time.time()
+
+        if not self._owned:
+            self.bot.log("WARN", "Zoo has no animals we can read - team not built")
+            self._want_team_check = False
+            return
+
+        top = ", ".join(f"{a} ({RANK_NAMES.get(r, '?')})" for a, r in self._owned[:3])
+        self.bot.log("TEAM", f"Zoo read: {len(self._owned)} animals owned, rarest are {top}")
+
+        if self._want_team_check:
+            await self.bot.neura_enqueue("team", priority=3, _cmd_id="team")
+
+    async def _handle_team(self, raw):
+        self._want_team_check = False
+        current = self.parse_team(raw)
+        self._team = current
+        self.bot.log("TEAM", f"Current team: {', '.join(current) if current else 'empty'}")
+        await self._apply_team_upgrade(current)
+        weapons = self.bot.get_cog('Weapons')
+        if weapons:
+            weapons.note_team(self._team or [animal for animal, _r in self._owned[:3]])
 
     async def _auto_accept_rules(self, message):
         all_channels = [str(c) for c in self.bot.channels]
@@ -278,6 +537,84 @@ class Others(commands.Cog):
                             self.bot.log("SUCCESS", "Auto-Accepted OwO Rules")
                 except Exception as e:
                     self.bot.log("ERROR", f"Failed to accept rules: {e}")
+
+    # ── components v2 ────────────────────────────────────────────────────────
+
+    def _v2_is_mine(self, full_text):
+        """components v2 messages are invisible to discord.py-self, so match by name."""
+        if f"<@{self.bot.user.id}>" in full_text or f"<@!{self.bot.user.id}>" in full_text:
+            return True
+        idents = {self.bot.user.name.lower(), (self.bot.display_name or "").lower()}
+        for ident in getattr(self.bot, 'identifiers', []):
+            idents.add(ident.replace("<@", "").replace("!", "").replace(">", "").lower())
+        return any(ident and len(ident) >= 2 and ident in full_text for ident in idents)
+
+    def _seen_v2(self, data):
+        """True the second time the same v2 message reaches us (owo edits its cards)."""
+        key = str(data.get("id"))
+        stamp = f"{data.get('edited_timestamp') or ''}|{len(data.get('components') or [])}"
+        if self._handled_v2.get(key) == stamp:
+            return True
+        if len(self._handled_v2) > 60:
+            self._handled_v2.clear()
+        self._handled_v2[key] = stamp
+        return False
+
+    @commands.Cog.listener()
+    async def on_socket_raw_receive(self, msg):
+        """`owo level`, `owo zoo` and `owo team` now answer with components v2 cards.
+
+        discord.py-self models none of that, so message.content is empty and the
+        on_message path below never sees them - hence reading the raw payload.
+        """
+        if isinstance(msg, bytes) or not getattr(self.bot, 'is_ready', False):
+            return
+        try:
+            raw_data = json.loads(msg)
+        except Exception:
+            return
+        if raw_data.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
+            return
+
+        data = raw_data.get("d") or {}
+        if str((data.get("author") or {}).get("id")) != self.bot.owo_bot_id:
+            return
+        if str(data.get("channel_id")) not in [str(c) for c in self.bot.channels]:
+            return
+
+        components = parse_v2_message(data)
+        if not components:
+            return
+
+        raw_text = f"{data.get('content') or ''}\n{collect_text(components)}"
+        content = raw_text.lower()
+        if not self._v2_is_mine(content):
+            return
+
+        try:
+            if self.zoo and "zoo" in content:
+                if self._seen_v2(data):
+                    return
+                await self._handle_zoo(raw_text, content)
+                return
+
+            if self._want_team_check and ("'s team" in content or "battle team" in content):
+                if self._seen_v2(data):
+                    return
+                await self._handle_team(raw_text)
+                return
+
+            if time.time() <= self._want_level_until:
+                level, xp, xp_needed = parse_level_xp(content)
+                if level is not None or xp is not None:
+                    self._want_level_until = 0.0
+                    self._store_level(level, xp, xp_needed, source="v2")
+                elif data.get("attachments"):
+                    self._note_level_unreadable()
+        except Exception as e:
+            self.bot.log("ERROR", f"V2 card handling failed: {e}")
+
+    # ── plain messages ───────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -316,26 +653,29 @@ class Others(commands.Cog):
                 pass
             return
 
+        if any(phrase in content for phrase in BAD_ANIMAL_PHRASES) and "team" in content:
+            self.bot.log("WARN", f"OwO rejected a team change: {content.splitlines()[0][:120]}")
+            return
+
         level, xp, xp_needed = parse_level_xp(content)
         if level is not None or xp is not None:
             if not self.bot.is_message_for_me(message, role="header") and not self.bot.is_message_for_me(message):
                 self.bot.log("DEBUG", f"Level reply ignored, not recognised as mine: {content.splitlines()[0][:80]}")
                 return
-            st = self.bot.stats
-            changed = []
-            if level is not None and st.get('level') != level:
-                st['level'] = level
-                changed.append(f"level {level}")
-            if xp is not None:
-                st['xp'] = xp
-                st['xp_needed'] = xp_needed
-                changed.append(f"{xp:,}/{xp_needed:,} xp" if xp_needed else f"{xp:,} xp")
-            elif xp_needed is not None:
-                st['xp_needed'] = xp_needed
-            if changed:
-                st['last_level_update'] = time.time()
-                state.save_account_stats()
-                self.bot.log("INFO", f"OwO level synced: {', '.join(changed)}")
+            self._want_level_until = 0.0
+            self._store_level(level, xp, xp_needed)
+            return
+
+        # `owo level` answered, but with nothing we can read - do not leave the old
+        # number sitting there as if it were fresh
+        if (time.time() <= self._want_level_until and message.attachments
+                and self.bot.is_message_for_me(message, role="header")):
+            self._note_level_unreadable()
+            return
+
+        if any(phrase in content for phrase in HUNT_PHRASES):
+            if self.bot.is_message_for_me(message):
+                await self._watch_hunt(message, content)
             return
 
         if any(phrase in content for phrase in NO_TEAM_PHRASES):
@@ -350,32 +690,15 @@ class Others(commands.Cog):
         if "'s zoo!" in content and self.zoo:
             if not self.bot.is_message_for_me(message, role="header"):
                 return
-            self.zoo = False
-            self._owned = self.parse_zoo(message.content)
-            self._owned_at = time.time()
-
-            if not self._owned:
-                self.bot.log("WARN", "Zoo has no animals we can read - team not built")
-                self._want_team_check = False
-                return
-
-            top = ", ".join(f"{a} ({RANK_NAMES.get(r, '?')})" for a, r in self._owned[:3])
-            self.bot.log("TEAM", f"Zoo read: {len(self._owned)} animals owned, rarest are {top}")
-
-            if self._want_team_check:
-                await self.bot.neura_enqueue("team", priority=3, _cmd_id="team")
+            await self._handle_zoo(message.content, content)
             return
 
-        if self._want_team_check and ("'s team" in content or "battle team" in content) and "add" not in content:
+        # the old "add not in content" guard skipped a legitimate team listing whenever
+        # the word appeared anywhere in it; the pending flag already scopes this
+        if self._want_team_check and ("'s team" in content or "battle team" in content):
             if not self.bot.is_message_for_me(message, role="header"):
                 return
-            self._want_team_check = False
-            current = self.parse_team(message.content)
-            self.bot.log("TEAM", f"Current team: {', '.join(current) if current else 'empty'}")
-            await self._apply_team_upgrade(current)
-            weapons = self.bot.get_cog('Weapons')
-            if weapons:
-                weapons.note_team(current or [animal for animal, _r in self._owned[:3]])
+            await self._handle_team(message.content)
             return
 
     async def register_actions(self):
@@ -392,7 +715,7 @@ class Others(commands.Cog):
         if cfg.get('level', True):
             await self.bot.neura_register_command(
                 "level_sync",
-                "owo level",
+                self._level_sync_tick,
                 priority=self.bot.get_cmd_priority("level_sync", 4),
                 delay=max(600, int(cfg.get('level_interval_s', 3600))),
                 initial_offset=45,
@@ -408,9 +731,18 @@ class Others(commands.Cog):
                 delay=interval,
                 initial_offset=90,
             )
-            self.bot.log("SYS", f"Team Manager configured (zoo re-check every {interval // 60}m).")
+            watching = "on" if team_cfg.get('watch_zoo', True) else "off"
+            self.bot.log(
+                "SYS",
+                f"Team Manager configured (zoo re-check every {interval // 60}m, catch watcher {watching})."
+            )
         else:
             self.bot.cmd_states.pop('team_scan', None)
+
+    async def _level_sync_tick(self):
+        """Arm the level parser, then let the queue send the command as usual."""
+        self._want_level_until = time.time() + 60
+        return "owo level"
 
     async def _team_scan_tick(self):
         """Timer hook - kicks off a zoo read and returns None so nothing is sent twice."""

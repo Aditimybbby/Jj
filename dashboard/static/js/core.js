@@ -41,6 +41,8 @@ const CONFIG_CATEGORY_HINTS = {
     boss: 'Boss fight automation',
     level_grind: 'XP grinding behavior',
     utilities: 'Extra helper utilities',
+    owner: 'Drive every farm account from your own Discord',
+    coop: 'Accounts helping each other with quests and battles',
     commands: 'Per-command automation modules'
 };
 
