@@ -139,7 +139,7 @@ function renderTeam(team) {
         el.innerHTML = `<div class="team-empty">No battle team read yet</div>`;
     } else {
         el.innerHTML = slots.map(s =>
-            `<span class="team-chip rarity-${s.rarity}" title="${s.rarity}">${s.animal}</span>`
+            `<span class="team-chip rarity-${escAttr(s.rarity)}" title="${escAttr(s.rarity)}">${escHtml(s.animal)}</span>`
         ).join('');
     }
 
@@ -175,7 +175,7 @@ function renderScheduler(states) {
             return;
         }
         list.innerHTML = items.map(item => {
-            const name = item.id.toUpperCase();
+            const name = escHtml(String(item.id).toUpperCase());
             let statusHtml = '';
             let progress = 0;
             if (item.in_queue) {
@@ -214,7 +214,7 @@ function renderQuests(quests, timer) {
     const timerEl = document.getElementById('nextQuestTimer');
     if (!list || !timerEl) return;
     if (timer) {
-        timerEl.innerHTML = `<span class="icon-svg" style="--icon: url('/static/assets/neura_icons/clock.svg'); width: 14px; height: 14px;"></span> Next quest in: ${timer}`;
+        timerEl.innerHTML = `<span class="icon-svg" style="--icon: url('/static/assets/neura_icons/clock.svg'); width: 14px; height: 14px;"></span> Next quest in: ${escHtml(timer)}`;
         timerEl.style.display = 'block';
     } else {
         timerEl.style.display = 'none';
@@ -227,24 +227,25 @@ function renderQuests(quests, timer) {
         const percent = Math.min(100, Math.round((q.current / q.total) * 100));
         const isCompleted = q.completed;
         const color = isCompleted ? 'var(--success)' : 'var(--primary)';
+        const desc = String(q.description || '');
         let status = "Auto-solving";
         if (isCompleted) status = "Completed";
         else {
-            const desc = q.description.toLowerCase();
+            const lowered = desc.toLowerCase();
             const socialQuests = ["friend", "pray to you", "curse you", "cookie from", "action command on you", "emote command on you"];
-            if (socialQuests.some(s => desc.includes(s))) {
+            if (socialQuests.some(s => lowered.includes(s))) {
                 status = "Alt Coordinated";
-            } else if (desc.includes("hunt 3 animals")) {
+            } else if (lowered.includes("hunt 3 animals")) {
                 status = "Gem Optimized";
-            } else if (desc.includes("gamble")) {
+            } else if (lowered.includes("gamble")) {
                 status = "Auto Gambling";
             }
         }
         return `
             <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.05); padding:15px; border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9rem;">
-                    <span style="color:#eee; font-weight:500;">${q.description}</span>
-                    <span style="color:${color}; font-weight:bold;">${q.current}/${q.total}</span>
+                    <span style="color:#eee; font-weight:500;">${escHtml(desc)}</span>
+                    <span style="color:${color}; font-weight:bold;">${escHtml(q.current)}/${escHtml(q.total)}</span>
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                     <span style="font-size:0.65rem; color:${isCompleted ? 'var(--success)' : '#888'}; text-transform:uppercase; letter-spacing:0.8px; font-family:var(--font-mono);">${status}</span>
@@ -264,10 +265,11 @@ function renderLogs(logs) {
     if (currentHash === lastLogsHash) return;
     lastLogsHash = currentHash;
     t.innerHTML = logs.map(l => {
-        const tagClass = l.type ? `tag-${l.type.toLowerCase()}` : '';
+        const type = String(l.type || '');
+        const tagClass = type ? `tag-${escAttr(type.toLowerCase())}` : '';
         const localTime = l.timestamp ? timeFormatter.format(new Date(l.timestamp * 1000)) : l.time;
-        const botTag = l.bot_name ? `<span style="color:magenta; margin-right:5px;">[${l.bot_name}]</span>` : '';
-        return `<div class="history-item ${l.type ? l.type.toLowerCase() : ''}">${botTag}<span class="history-time">[${localTime}]</span> <span class="history-tag ${tagClass}">${l.type}</span> <span class="history-msg">${l.message}</span></div>`;
+        const botTag = l.bot_name ? `<span style="color:magenta; margin-right:5px;">[${escHtml(l.bot_name)}]</span>` : '';
+        return `<div class="history-item ${type ? escAttr(type.toLowerCase()) : ''}">${botTag}<span class="history-time">[${escHtml(localTime)}]</span> <span class="history-tag ${tagClass}">${escHtml(type)}</span> <span class="history-msg">${escHtml(l.message)}</span></div>`;
     }).join('');
 }
 

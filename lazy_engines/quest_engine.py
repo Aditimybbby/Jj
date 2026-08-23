@@ -10,18 +10,11 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 import asyncio
 import time
 import random
 import core.state as state
-from neura_engines import coop
+from lazy_engines import coop
 
 # quest intelligence is still under testing , errors and bugs can occur
 
@@ -49,7 +42,7 @@ from neura_engines import coop
 
 EMOTE_COMMANDS = ["hug", "poke", "pat", "cuddle", "kiss"]
 
-class NeuraQuestEngine:
+class LazyQuestEngine:
     def __init__(self, bot):
         self.bot = bot
         self.last_solver_run = 0

@@ -10,13 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 from discord.ext import commands
 import asyncio
 import time

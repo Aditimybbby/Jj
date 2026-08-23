@@ -10,11 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
 import sys
 import os
 
@@ -34,15 +29,15 @@ from rich.align import Align
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from neura_engines.setup_engine import NeuraSetupEngine
+from lazy_engines.setup_engine import LazySetupEngine
 from core.bot import NeuraBot
-from core import supervisor
+from core import spaces, supervisor
 from dashboard.app import app as flask_app
 import core.state as state
 from utils import proxy_manager
 
 console = Console()
-engine = NeuraSetupEngine()
+engine = LazySetupEngine()
 
 # no interactive menu on hosts without a usable console. Railway attaches a tty that
 # nobody can type into, so the menu would block forever and the dashboard would never start.
@@ -96,13 +91,25 @@ def start_dashboard():
         _dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
         _dashboard_thread.start()
 
-def load_enabled_accounts():
-    try:
-        with open(os.path.join(state.CONFIG_DIR, 'accounts.json'), 'r') as f:
-            acc_data = json.load(f)
-        return [a for a in acc_data.get('accounts', []) if a.get('enabled', True)]
-    except (OSError, ValueError):
-        return []
+def load_enabled_accounts(owner):
+    return [a for a in proxy_manager.load_accounts(owner) if a.get('enabled', True)]
+
+
+_started_spaces = set()
+
+def spaces_with_accounts():
+    """(owner, accounts) for every space that has something to start.
+
+    The admin space comes first so the operator's own farm is up before any
+    dashboard user's, and it is always listed even when empty - the menu below
+    reports on it.
+    """
+    out = []
+    for owner in spaces.list_owners():
+        accounts = load_enabled_accounts(owner)
+        if accounts or owner == spaces.ADMIN_SPACE:
+            out.append((owner, accounts))
+    return out
 
 async def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -114,7 +121,7 @@ async def main():
         is_termux = detect_platform()
         state.load_account_stats()
         console.print(f"[cyan]Config Directory:[/cyan] {state.CONFIG_DIR}")
-        console.print(f"[cyan]Accounts File:[/cyan] {os.path.join(state.CONFIG_DIR, 'accounts.json')}\n")
+        console.print(f"[cyan]Accounts File:[/cyan] {spaces.accounts_path(spaces.ADMIN_SPACE)}\n")
         if not HEADLESS:
             console.print("\n[bold cyan]1.[/bold cyan] Start Lazy Farmers")
             console.print("[bold cyan]2.[/bold cyan] Manage Accounts")
@@ -132,18 +139,25 @@ async def main():
             elif choice == "3":
                 console.print("\n[yellow]Shutting down. See you next time![/yellow]")
                 sys.exit(0)
-        accounts = load_enabled_accounts()
-        if not accounts and not HEADLESS:
+        # every dashboard user has their own space, so boot them all - not just the
+        # operator's (see core/spaces.py)
+        pending = spaces_with_accounts()
+        total = sum(len(accounts) for _owner, accounts in pending)
+        if not total and not HEADLESS:
             console.print("[bold red]No active accounts? Add some in the Account Manager (Option 2).[/bold red]")
             time.sleep(2)
             continue
         import utils.history_tracker as ht
-        ht.start_session()
-        if accounts:
-            console.print(f"[bold yellow]Initializing {len(accounts)} accounts...[/bold yellow]")
-            for ok, message in await supervisor.start_all(accounts):
+        for owner, accounts in pending:
+            if not accounts:
+                continue
+            ht.start_session(owner=owner)
+            _started_spaces.add(owner)
+            label = "operator" if owner == spaces.ADMIN_SPACE else owner
+            console.print(f"[bold yellow]Initializing {len(accounts)} accounts for {label}...[/bold yellow]")
+            for ok, message in await supervisor.start_all(accounts, owner):
                 console.print(f"[green]{message}[/green]" if ok else f"[bold red]{message}[/bold red]")
-        else:
+        if not total:
             console.print("[bold yellow]No enabled accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
         console.print("[bold green]Dashboard is in control. Start, stop and verify accounts from the Accounts page.[/bold green]")
         while True:
@@ -157,7 +171,8 @@ if __name__ == "__main__":
     finally:
         try:
             import utils.history_tracker as ht
-            ht.end_session()
+            for owner in _started_spaces:
+                ht.end_session(owner=owner)
             state.save_account_stats()
             console.print("\n[bold yellow][!] Systems shut down. History saved.[/bold yellow]")
         except Exception:

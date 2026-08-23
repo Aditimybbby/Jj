@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Lazy Farmers"
-REPO_URL="https://github.com/routo-loop/neura-self.git"
+REPO_URL="https://github.com/Aditimybbby/Jj.git"
 
 RED="\033[1;31m"
 GREEN="\033[1;32m"

@@ -11,15 +11,13 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-
 Activation keys and dashboard user accounts.
 
 The admin generates a one-time activation key that is good for N days. A user
 redeems it on /activate with an email and a password of their choosing; that
 creates a dashboard login which stops working when the key's duration runs out
-or when the admin revokes it.
+or when the admin revokes it. Redeeming also creates that user's space (see
+core/spaces.py) where their own accounts, proxies and history live.
 
 NOTE ON PASSWORDS: they are stored in clear text on purpose - the operator asked
 to be able to read a user's password back from the admin panel. The store file
@@ -27,16 +25,19 @@ therefore holds credentials and is gitignored. Do not expose it.
 """
 
 
+import hmac
 import json
 import os
 import re
 import secrets
+import stat
 import string
 import threading
 import time
 import uuid
 
 import core.state as state
+from core import spaces
 
 
 STORE_FILE = os.path.join(state.CONFIG_DIR, 'dashboard_users.json')
@@ -49,6 +50,11 @@ KEY_ALPHABET = string.ascii_uppercase + string.digits
 
 def _empty_store():
     return {'keys': [], 'users': []}
+
+
+def same_secret(a, b):
+    """Constant-time compare that survives non-ascii passwords."""
+    return hmac.compare_digest(str(a or '').encode('utf-8'), str(b or '').encode('utf-8'))
 
 
 def _read():
@@ -71,6 +77,11 @@ def _write(store):
     tmp = STORE_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(store, f, indent=4)
+    # the file holds readable passwords, so keep it off other local accounts
+    try:
+        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
     os.replace(tmp, STORE_FILE)
 
 
@@ -88,7 +99,7 @@ def normalise_key(raw):
 
 
 def _key_matches(entry, wanted):
-    return normalise_key(entry.get('key')) == wanted
+    return same_secret(normalise_key(entry.get('key')), wanted)
 
 
 def generate_keys(days, count=1, note=''):
@@ -225,16 +236,23 @@ def redeem_key(key, email, password):
         store['users'].append(user)
         _write(store)
 
+    # give the new login somewhere of its own to keep accounts and proxies
+    try:
+        spaces.ensure_space(user['id'])
+    except Exception:
+        pass
+
     return _public_user(user), None
 
 
 def authenticate(email, password):
     """(user, error) for an email/password pair."""
     email = str(email or '').strip().lower()
+    password = str(password or '')
     with _lock:
         store = _read()
         user = next((u for u in store['users'] if u.get('email') == email), None)
-        if not user or user.get('password') != password:
+        if not user or not same_secret(user.get('password'), password):
             return None, 'Invalid Credentials'
         if user.get('revoked'):
             return None, 'Your access has been removed'
@@ -312,4 +330,10 @@ def delete_user(user_id):
         removed = before - len(store['users'])
         if removed:
             _write(store)
+    if removed:
+        # their accounts, proxies, settings and history go with the login
+        try:
+            spaces.delete_space(user_id)
+        except Exception:
+            pass
     return removed > 0

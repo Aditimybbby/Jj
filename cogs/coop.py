@@ -10,18 +10,11 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 import asyncio
 import random
 import time
 from discord.ext import commands
-from neura_engines import coop
+from lazy_engines import coop
 
 
 class Coop(commands.Cog):

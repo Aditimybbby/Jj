@@ -10,12 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
 import asyncio
 import re
 import time
@@ -23,7 +17,7 @@ import random
 import json
 import core.state as state
 from discord.ext import commands
-from neura_engines.quest_engine import NeuraQuestEngine
+from lazy_engines.quest_engine import LazyQuestEngine
 from component_v2_neura import parse_v2_message, collect_text, buttons
 
 QUEST_TITLE_RE = re.compile(r'^\W{0,4}(\d{1,2})\s*[.)\-]\s*(.+)$')
@@ -38,7 +32,7 @@ class Quest(commands.Cog):
         self.bot = bot
         self.active = True
         self.task = None
-        self.engine = NeuraQuestEngine(self.bot)
+        self.engine = LazyQuestEngine(self.bot)
         self._claimed = {}
         self._claim_lock = asyncio.Lock()
         self._last_recheck = 0.0

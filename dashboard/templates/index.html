@@ -20,6 +20,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <title>Lazy Farmers</title>
     <link rel="icon" type="image/x-icon" href="/static/assets/neura.ico">
     <link
@@ -45,7 +46,7 @@
         <div class="save-bar-text">Careful — you have unsaved changes!</div>
         <div class="save-bar-btns">
             <button class="btn-discard-floating" onclick="discardChanges()">Reset</button>
-            <button class="btn-save-all-floating" onclick="saveToAllConfigs()" data-admin-only>Save to All
+            <button class="btn-save-all-floating" onclick="saveToAllConfigs()">Save to All
                 Accounts</button>
             <button class="btn-save-floating" onclick="saveAllConfigs()">Save Changes</button>
         </div>
@@ -99,7 +100,7 @@
                         style="--icon: url('/static/assets/neura_icons/chart-pie.svg');"></span> Dashboard</a>
                 <a class="nav-item" onclick="nav('config', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/sliders.svg');"></span> Configuration</a>
-                <a class="nav-item" onclick="nav('proxies', this)" data-admin-only><span class="icon-svg"
+                <a class="nav-item" onclick="nav('proxies', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/layers.svg');"></span> Proxies</a>
                 <a class="nav-item" onclick="nav('security', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/shield-halved.svg');"></span> Security</a>
@@ -118,16 +119,8 @@
                     <div class="ping-dot" id="statusDot"></div>
                     <span id="botStatus">ONLINE</span>
                 </div>
-                <div class="social-links">
-                    <a href="https://github.com/routo-loop" target="_blank"><span class="icon-svg social-btn"
-                            style="--icon: url('/static/assets/neura_icons/github.svg');" title="GitHub"></span></a>
-                    <a href="https://discord.gg/88jNZK2hkw" target="_blank"><span class="icon-svg social-btn"
-                            style="--icon: url('/static/assets/neura_icons/discord.svg');" title="Discord"></span></a>
-                    <a href="https://www.youtube.com/@dev1-9?sub_confirmation=1" target="_blank"><span
-                            class="icon-svg social-btn" style="--icon: url('/static/assets/neura_icons/youtube.svg');"
-                            title="YouTube"></span></a>
-                </div>
-                <div class="version glowing-text">v2.4.4</div>
+                <div class="space-label" id="spaceLabel"></div>
+                <div class="version glowing-text">v2.5.0</div>
             </div>
         </aside>
 
@@ -140,7 +133,7 @@
                 <div id="accounts-grid" class="accounts-picker-grid">
                     <div class="no-data">Loading accounts…</div>
                 </div>
-                <div data-admin-only>
+                <div>
                 <h3 class="section-subtitle" style="margin-top: 32px;">Manage Accounts</h3>
                 <p class="accounts-page-hint">Every account needs a name, a token and at least one channel ID. Proxy is
                     optional — leave as direct if not needed. Start, stop and verify accounts right here, no restart

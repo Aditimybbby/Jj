@@ -10,11 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
 import asyncio
 import json
 import os
@@ -32,10 +27,10 @@ if sys.stdout.encoding != 'utf-8':
         pass
 
 import core.state as state
-from neura_engines.setup_engine import NeuraSetupEngine, console, Confirm, Prompt, Table, Panel
+from lazy_engines.setup_engine import LazySetupEngine, console, Confirm, Prompt, Table, Panel
 from utils import proxy_manager
 
-engine = NeuraSetupEngine()
+engine = LazySetupEngine()
 
 from neuraself_ascii.neura_ascii import show_banner
 
@@ -336,14 +331,14 @@ async def setup_menu():
             try:
                 with open(auth_path, "r", encoding="utf-8") as f:
                     auth = json.load(f)
-                if auth.get("password") == "lazyfarmers_default_password_change_me":
-                    if Confirm.ask("change default dashboard password?", default=False):
-                        new_pass = Prompt.ask("new password", password=True)
-                        if new_pass:
-                            auth["password"] = new_pass
-                            with open(auth_path, "w", encoding="utf-8") as f:
-                                json.dump(auth, f, indent=4)
-                            console.print("[green]password updated.[/green]")
+                console.print(f"\ndashboard login: [bold]{auth.get('username', 'admin')}[/bold] / [bold]{auth.get('password', '')}[/bold]")
+                if Confirm.ask("set your own dashboard password?", default=False):
+                    new_pass = Prompt.ask("new password", password=True)
+                    if new_pass:
+                        auth["password"] = new_pass
+                        with open(auth_path, "w", encoding="utf-8") as f:
+                            json.dump(auth, f, indent=4)
+                        console.print("[green]password updated.[/green]")
             except Exception:
                 pass
             proxies = engine.load_proxies()

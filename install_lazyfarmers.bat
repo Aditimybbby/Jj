@@ -5,7 +5,7 @@ cd /d "%~dp0"
 chcp 65001 >nul
 
 set "INSTALL_DIR=%USERPROFILE%\Desktop\LazyFarmers"
-set "REPO_URL=https://github.com/routo-loop/neura-self.git"
+set "REPO_URL=https://github.com/Aditimybbby/Jj.git"
 set "PYTHON_VER=3.10.11"
 set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VER%/python-%PYTHON_VER%-amd64.exe"
 

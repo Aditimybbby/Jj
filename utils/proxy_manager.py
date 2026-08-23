@@ -11,8 +11,11 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+The single reader/writer for a space's accounts.json and its proxy pool.
+
+Every public function takes the owning space id first (see core/spaces.py), so a
+dashboard user can only ever touch the accounts and proxies inside their own
+space. Pass spaces.ADMIN_SPACE for the operator's own farm.
 """
 
 
@@ -31,64 +34,74 @@ try:
 except ImportError:
     aiohttp = None
 
-import core.state as state
-
-PROXIES_FILE = os.path.join(state.CONFIG_DIR, "proxies.json")
-ACCOUNTS_FILE = os.path.join(state.CONFIG_DIR, "accounts.json")
+from core import spaces
 
 DEFAULT_PROXY_TYPE = "socks5"
 SUPPORTED_TYPES = ("http", "https", "socks5", "socks4")
 
-
-def _ensure_config_dir():
-    if not os.path.exists(state.CONFIG_DIR):
-        os.makedirs(state.CONFIG_DIR)
+PROXY_ID_RE = re.compile(r"^px_[0-9a-f]{8}$")
+# an account name is rendered in the dashboard and stored in proxy records,
+# so keep it to characters that cannot turn into markup or a path
+ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,40}$")
 
 
 def _new_proxy_id():
     return f"px_{secrets.token_hex(4)}"
 
 
-def load_proxies():
-    _ensure_config_dir()
-    if not os.path.exists(PROXIES_FILE):
-        save_proxies([])
+def valid_proxy_id(proxy_id):
+    return bool(PROXY_ID_RE.match(str(proxy_id or "")))
+
+
+def valid_account_name(name):
+    return bool(ACCOUNT_NAME_RE.match(str(name or "")))
+
+
+def _write_json(path, payload):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=4)
+    os.replace(tmp, path)
+
+
+def load_proxies(owner):
+    path = spaces.proxies_path(owner)
+    if not os.path.exists(path):
+        save_proxies(owner, [])
         return []
     try:
-        with open(PROXIES_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data.get("proxies", [])
     except (json.JSONDecodeError, OSError):
         return []
 
 
-def save_proxies(proxies):
-    _ensure_config_dir()
-    with open(PROXIES_FILE, "w", encoding="utf-8") as f:
-        json.dump({"proxies": proxies}, f, indent=4)
+def save_proxies(owner, proxies):
+    _write_json(spaces.proxies_path(owner), {"proxies": proxies})
 
 
-def load_accounts():
-    if not os.path.exists(ACCOUNTS_FILE):
+def load_accounts(owner):
+    path = spaces.accounts_path(owner)
+    if not os.path.exists(path):
         return []
     try:
-        with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f).get("accounts", [])
     except (json.JSONDecodeError, OSError):
         return []
 
 
-def save_accounts(accounts):
-    _ensure_config_dir()
-    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"accounts": accounts}, f, indent=4)
+def save_accounts(owner, accounts):
+    _write_json(spaces.accounts_path(owner), {"accounts": accounts})
 
 
-def set_account_status(name, status, reason=None):
+def set_account_status(owner, name, status, reason=None):
     """Record why an account is unusable so the dashboard can group it separately."""
     if not name:
         return
-    accounts = load_accounts()
+    accounts = load_accounts(owner)
     changed = False
     for account in accounts:
         if str(account.get("name")) != str(name):
@@ -100,7 +113,7 @@ def set_account_status(name, status, reason=None):
         account["status_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         changed = True
     if changed:
-        save_accounts(accounts)
+        save_accounts(owner, accounts)
 
 
 def _normalize_type(proxy_type):
@@ -197,21 +210,21 @@ def get_proxy_auth(proxy_dict):
     return None
 
 
-def get_proxy_by_id(proxy_id):
+def get_proxy_by_id(owner, proxy_id):
     if not proxy_id:
         return None
-    for proxy in load_proxies():
+    for proxy in load_proxies(owner):
         if proxy.get("id") == proxy_id and proxy.get("enabled", True):
             return proxy
     return None
 
 
-def resolve_account_proxy(account):
+def resolve_account_proxy(owner, account):
     proxy_id = account.get("proxy_id") if account else None
     if not proxy_id:
         return None, None, "direct"
 
-    proxy = get_proxy_by_id(proxy_id)
+    proxy = get_proxy_by_id(owner, proxy_id)
     if not proxy:
         return None, None, "direct"
 
@@ -219,8 +232,13 @@ def resolve_account_proxy(account):
     return build_proxy_url(proxy), get_proxy_auth(proxy), label
 
 
-def bulk_import(text):
-    existing = load_proxies()
+def bulk_import(owner, text, limit=None):
+    """Add every parseable proxy line to a space's pool.
+
+    `limit` caps the pool size so one space cannot fill the disk with a paste;
+    lines past the cap come back as errors rather than being silently dropped.
+    """
+    existing = load_proxies(owner)
     fingerprints = {
         _proxy_fingerprint(p.get("host"), p.get("port"), p.get("username", ""), p.get("password", ""), p.get("type"))
         for p in existing
@@ -243,12 +261,17 @@ def bulk_import(text):
             errors.append({"line": i, "text": raw_line.strip(), "error": "duplicate"})
             continue
 
+        if limit is not None and len(existing) >= limit:
+            errors.append({"line": i, "text": raw_line.strip(),
+                           "error": f"pool limit reached ({limit})"})
+            continue
+
         fingerprints.add(fp)
         existing.append(proxy)
         added.append(proxy)
 
     if added:
-        save_proxies(existing)
+        save_proxies(owner, existing)
     return {"added": added, "errors": errors, "total": len(existing)}
 
 
@@ -280,19 +303,19 @@ async def test_proxy(proxy_dict):
     return ok
 
 
-async def test_all_proxies():
-    proxies = load_proxies()
+async def test_all_proxies(owner):
+    proxies = load_proxies(owner)
     results = []
     for proxy in proxies:
         if not proxy.get("enabled", True):
             continue
         ok = await test_proxy(proxy)
         results.append({"id": proxy.get("id"), "ok": ok})
-    save_proxies(proxies)
+    save_proxies(owner, proxies)
     return results
 
 
-def _sync_assigned_to(proxies, accounts):
+def _sync_assigned_to(owner, proxies, accounts):
     account_names = {a.get("name"): a for a in accounts}
     proxy_ids = {p.get("id") for p in proxies}
     for proxy in proxies:
@@ -305,12 +328,12 @@ def _sync_assigned_to(proxies, accounts):
             for proxy in proxies:
                 if proxy.get("id") == pid:
                     proxy["assigned_to"] = acc.get("name")
-    save_proxies(proxies)
+    save_proxies(owner, proxies)
 
 
-def auto_assign():
-    proxies = load_proxies()
-    accounts = load_accounts()
+def auto_assign(owner):
+    proxies = load_proxies(owner)
+    accounts = load_accounts(owner)
 
     free_proxies = [
         p for p in proxies
@@ -327,74 +350,74 @@ def auto_assign():
         assigned.append({"account": acc.get("name"), "proxy_id": proxy["id"]})
 
     if assigned:
-        save_accounts(accounts)
-        save_proxies(proxies)
+        save_accounts(owner, accounts)
+        save_proxies(owner, proxies)
     return assigned
 
 
-def remove_proxy(proxy_id):
-    proxies = load_proxies()
+def remove_proxy(owner, proxy_id):
+    proxies = load_proxies(owner)
     proxies = [p for p in proxies if p.get("id") != proxy_id]
-    save_proxies(proxies)
+    save_proxies(owner, proxies)
 
-    accounts = load_accounts()
+    accounts = load_accounts(owner)
     changed = False
     for acc in accounts:
         if acc.get("proxy_id") == proxy_id:
             acc["proxy_id"] = None
             changed = True
     if changed:
-        save_accounts(accounts)
+        save_accounts(owner, accounts)
     return True
 
 
-def remove_all_proxies():
-    save_proxies([])
-    accounts = load_accounts()
+def remove_all_proxies(owner):
+    save_proxies(owner, [])
+    accounts = load_accounts(owner)
     changed = False
     for acc in accounts:
         if acc.get("proxy_id"):
             acc["proxy_id"] = None
             changed = True
     if changed:
-        save_accounts(accounts)
+        save_accounts(owner, accounts)
     return True
 
 
-def remove_failed_proxies():
-    proxies = load_proxies()
+def remove_failed_proxies(owner):
+    proxies = load_proxies(owner)
     failed_ids = {p["id"] for p in proxies if p.get("status") == "fail"}
     proxies = [p for p in proxies if p.get("id") not in failed_ids]
-    save_proxies(proxies)
+    save_proxies(owner, proxies)
 
     if failed_ids:
-        accounts = load_accounts()
+        accounts = load_accounts(owner)
         changed = False
         for acc in accounts:
             if acc.get("proxy_id") in failed_ids:
                 acc["proxy_id"] = None
                 changed = True
         if changed:
-            save_accounts(accounts)
+            save_accounts(owner, accounts)
     return len(failed_ids)
 
 
 
-def unassign_proxy_from_accounts(proxy_id):
-    accounts = load_accounts()
+def unassign_proxy_from_accounts(owner, proxy_id):
+    accounts = load_accounts(owner)
     changed = False
     for acc in accounts:
         if acc.get("proxy_id") == proxy_id:
             acc["proxy_id"] = None
             changed = True
     if changed:
-        save_accounts(accounts)
+        save_accounts(owner, accounts)
 
 
-def sync_proxy_assignments():
-    proxies = load_proxies()
-    accounts = load_accounts()
-    _sync_assigned_to(proxies, accounts)
+def sync_proxy_assignments(owner):
+    proxies = load_proxies(owner)
+    accounts = load_accounts(owner)
+    _sync_assigned_to(owner, proxies, accounts)
 
 
 def mask_token(token):

@@ -10,13 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 """Cross-account coordination.
 
 Every NeuraBot in this process shares one asyncio loop - neura.py binds it and

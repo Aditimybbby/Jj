@@ -26,6 +26,56 @@ let activeConfigCategory = null;
 let configSearchQuery = '';
 let lastLogsHash = '';
 
+// Everything the server hands us - account names, proxy labels, log lines - is
+// written by whoever owns that space, and the admin renders it in their own
+// session. So nothing goes into innerHTML unescaped. These live here rather than
+// in a feature file because core.js loads first and every renderer needs them.
+function escHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escAttr(s) {
+    return escHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// For values that go inside a quoted JS string inside an onclick= attribute.
+// escAttr is not enough there: the HTML parser decodes &#39; back to ' before the
+// JS is parsed, so a name containing a quote could still close the string and run
+// code. encodeURIComponent leaves ' alone, hence the extra replace - the result is
+// only [A-Za-z0-9%()!~*._-], inert in both contexts, and the handlers already
+// decodeURIComponent it back.
+function jsArg(s) {
+    return encodeURIComponent(String(s === null || s === undefined ? '' : s)).replace(/'/g, '%27');
+}
+
+// CSRF, once, instead of at ~60 fetch() call sites. The server requires
+// X-CSRF-Token on every non-GET /api/ request; this attaches it to same-origin
+// calls and leaves cross-origin ones (hcaptcha, discord) untouched.
+(function installCsrf() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    let token = meta ? meta.getAttribute('content') : '';
+    const nativeFetch = window.fetch.bind(window);
+
+    window.setCsrfToken = function (value) {
+        if (value) token = value;
+    };
+
+    window.fetch = function (input, init) {
+        init = init || {};
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const method = (init.method || (input && input.method) || 'GET').toUpperCase();
+        const sameOrigin = !/^https?:\/\//i.test(url) || url.startsWith(window.location.origin);
+
+        if (token && sameOrigin && method !== 'GET' && method !== 'HEAD') {
+            const headers = new Headers(init.headers || (input && input.headers) || {});
+            if (!headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', token);
+            init = Object.assign({}, init, { headers: headers });
+        }
+        return nativeFetch(input, init);
+    };
+})();
+
 const timeFormatter = new Intl.DateTimeFormat('en-US', {
     hour: '2-digit',
     minute: '2-digit',

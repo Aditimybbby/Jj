@@ -4,14 +4,7 @@
   <br/>
   <br/>
 
-  <img src="https://readme-typing-svg.herokuapp.com/?font=Pacifico&size=40&pause=1000&color=FF0000&center=true&vCenter=true&random=false&width=600&lines=Advanced+OwO+Automation;Built+by+ROUTO;Star+the+repo" alt="Lazy Farmers">
-  
-  <br/>
-  <br/>
-
-  <a href="https://discord.gg/XQS473Scfe">
-    <img src="https://invidget.switchblade.xyz/XQS473Scfe" alt="Discord Community"/>
-  </a>
+  <img src="https://readme-typing-svg.herokuapp.com/?font=Pacifico&size=40&pause=1000&color=FF0000&center=true&vCenter=true&random=false&width=600&lines=Advanced+OwO+Automation;Multi-user+Dashboard;Star+the+repo" alt="Lazy Farmers">
   
   <br/>
   <br/>
@@ -74,13 +67,13 @@ Instead of sending just gambling commands, it has strategies (martingale ,flat) 
 ### Windows
 
 ```bash
-curl -o "%TEMP%\install_neuraself.bat" https://raw.githubusercontent.com/routo-loop/neura-self/main/install_neuraself.bat && "%TEMP%\install_neuraself.bat"
+curl -o "%TEMP%\install_lazyfarmers.bat" https://raw.githubusercontent.com/Aditimybbby/Jj/main/install_lazyfarmers.bat && "%TEMP%\install_lazyfarmers.bat"
 ```
 
 ### Termux / Linux / MacOS
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/routo-loop/neura-self/main/install_neuraself.sh)
+bash <(curl -s https://raw.githubusercontent.com/Aditimybbby/Jj/main/install_lazyfarmers.sh)
 ```
 
 #### For Termux
@@ -109,7 +102,7 @@ This tool is for **educational purposes only**. Using self-bots violates Discord
 
 ### Lazy Farmers
 
-**Advanced OwO Bot Grinder** • Built by **ROUTO** • Made with ❤️
+**Advanced OwO Bot Grinder** • Multi-user dashboard • Made with ❤️
 
 **Star this project if you find it useful!**
 

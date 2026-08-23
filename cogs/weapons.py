@@ -11,8 +11,6 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
 
 Keeps the best weapons we own bolted onto the battle team. `owo weapon` is read on a
 timer, the strongest unequipped weapons are picked, and each one is equipped to a team

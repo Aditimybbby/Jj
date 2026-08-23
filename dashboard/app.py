@@ -11,28 +11,44 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+The Flask dashboard.
+
+Two roles share it. The operator (config/auth.json) manages activation keys and
+dashboard users. Everyone else redeems a key, which mints a space of their own
+(core/spaces.py) holding their accounts, proxies, settings and history - full
+control inside it, no visibility outside it.
+
+Isolation lives in two places rather than being repeated per route:
+
+  * @space_required resolves the caller's space once into flask.g.owner
+  * get_bot() only ever searches that space, so a foreign discord id looks
+    exactly like one that does not exist
+
+Only /api/users*, /api/debug* and writing the shipped config/settings.json
+defaults stay admin-only.
 """
 
 
-
-
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g
 from functools import wraps
 from concurrent.futures import TimeoutError as FuturesTimeout
 import threading
 import time
 import json
+import hashlib
+import hmac
 import logging
 import os
+import re
 import secrets
+import stat
 import core.state as state
 import utils.utils as utils
 import asyncio
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+from core import spaces
 from dashboard import users as dash_users
 
 
@@ -58,9 +74,78 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 AUTH_FILE = os.path.join(state.CONFIG_DIR, 'auth.json')
+SECRET_FILE = os.path.join(state.CONFIG_DIR, 'secret.key')
 LOGIN_ATTEMPTS = {}
-BLOCK_DURATION = 300  
+BLOCK_DURATION = 300
+ATTEMPT_WINDOW = 900
 MAX_ATTEMPTS = 5
+SESSION_LIFETIME = timedelta(days=7)
+
+# a space may not grow without bound - one tenant should not be able to fill the box
+MAX_ACCOUNTS_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_ACCOUNTS', '25'))
+MAX_PROXIES_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_PROXIES', '200'))
+
+# non-GET /api/ calls need the session's csrf token. key_status is the exception:
+# the activate page hits it before there is a session to protect, and it is rate
+# limited instead.
+CSRF_EXEMPT = {'user_key_status'}
+
+
+def load_secret_key():
+    """The cookie signing key, from config/secret.key.
+
+    This used to fall back to a constant baked into the source, which meant
+    anyone reading the repo could sign themselves a cookie carrying
+    is_admin: True. There is no fallback now - the key is generated on first
+    boot and kept out of git.
+    """
+    try:
+        with open(SECRET_FILE, 'r', encoding='utf-8') as f:
+            existing = f.read().strip()
+        if len(existing) >= 32:
+            return existing
+    except OSError:
+        pass
+
+    fresh = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(SECRET_FILE) or '.', exist_ok=True)
+        with open(SECRET_FILE, 'w', encoding='utf-8') as f:
+            f.write(fresh)
+        os.chmod(SECRET_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError as exc:
+        # an unwritable config dir means sessions die on restart, which is
+        # inconvenient but still better than a predictable key
+        print(f"[!] could not persist {SECRET_FILE}: {exc}", flush=True)
+    return fresh
+
+
+def seed_auth_config():
+    """Write config/auth.json with a random password on a fresh install.
+
+    auth.json is gitignored now, so a fresh clone has none. Shipping a known
+    default password would hand over the admin panel to anyone who read the
+    repo, so generate one instead and print it once - the operator reads it out
+    of the boot log and changes it from the dashboard or neura_setup.py.
+    """
+    password = secrets.token_urlsafe(12)
+    cfg = {'username': 'admin', 'password': password}
+    try:
+        os.makedirs(os.path.dirname(AUTH_FILE) or '.', exist_ok=True)
+        with open(AUTH_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=4)
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError as exc:
+        print(f"[!] could not write {AUTH_FILE}: {exc}", flush=True)
+        return cfg
+    print("\n" + "=" * 62, flush=True)
+    print("  First boot - dashboard admin credentials generated:", flush=True)
+    print(f"    username: admin", flush=True)
+    print(f"    password: {password}", flush=True)
+    print(f"  Stored in {AUTH_FILE}. Change it once you are in.", flush=True)
+    print("=" * 62 + "\n", flush=True)
+    return cfg
+
 
 def load_auth_config():
     cfg = None
@@ -68,19 +153,16 @@ def load_auth_config():
         try:
             with open(AUTH_FILE, 'r') as f:
                 cfg = json.load(f)
-                
-            if cfg.get('secret_key', '').startswith("generate_a_random_long_secret_key_here_please"):
-                new_secret = secrets.token_hex(32)
-                cfg['secret_key'] = new_secret
-                with open(AUTH_FILE, 'w') as f:
-                    json.dump(cfg, f, indent=4)
-        except:
+        except Exception:
             cfg = None
+    elif not (os.environ.get('LAZYFARMERS_DASHBOARD_USER')
+              or os.environ.get('LAZYFARMERS_DASHBOARD_PASSWORD')):
+        cfg = seed_auth_config()
 
     env_user = os.environ.get('LAZYFARMERS_DASHBOARD_USER')
     env_pass = os.environ.get('LAZYFARMERS_DASHBOARD_PASSWORD')
     if env_user or env_pass:
-        cfg = dict(cfg) if cfg else {'secret_key': secrets.token_hex(32)}
+        cfg = dict(cfg) if cfg else {}
         if env_user:
             cfg['username'] = env_user
         if env_pass:
@@ -88,11 +170,37 @@ def load_auth_config():
 
     return cfg
 
-auth_cfg = load_auth_config()
-if auth_cfg:
-    app.secret_key = auth_cfg.get('secret_key', 'lazyfarmers_fallback_secret')
-else:
-    app.secret_key = 'temporary_secret_key'
+
+app.secret_key = load_secret_key()
+# eagerly, so a fresh install prints its generated password in the boot log
+# rather than on whichever login attempt happens to come first
+load_auth_config()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    # a plain-http deployment would lose its cookie entirely with Secure on, so
+    # only ask for it when the operator says the front door is https
+    SESSION_COOKIE_SECURE=os.environ.get('LAZYFARMERS_HTTPS', '').lower() in ('1', 'true', 'yes'),
+    PERMANENT_SESSION_LIFETIME=SESSION_LIFETIME,
+    MAX_CONTENT_LENGTH=8 * 1024 * 1024,
+)
+
+
+def same_secret(a, b):
+    """Constant-time compare of two credentials, safe on non-ascii input."""
+    return hmac.compare_digest(str(a or '').encode('utf-8'), str(b or '').encode('utf-8'))
+
+
+def admin_fingerprint():
+    """Ties an admin session to the credentials it was issued against.
+
+    Changing the dashboard password now logs out sessions minted with the old
+    one instead of leaving them valid forever.
+    """
+    cfg = load_auth_config() or {}
+    raw = f"{cfg.get('username', '')}:{cfg.get('password', '')}".encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()[:32]
+
 
 def _current_user():
     """The activated (non-admin) user behind this session, or None for the admin."""
@@ -105,8 +213,11 @@ def _current_user():
 def _session_valid():
     if 'logged_in' not in session:
         return False
+    # a cookie is never both, so one claiming both was hand-made
+    if session.get('is_admin') and session.get('user_id'):
+        return False
     if session.get('is_admin'):
-        return True
+        return same_secret(session.get('auth_fp'), admin_fingerprint())
     # a user's access dies the moment the key duration runs out or the admin
     # revokes it, so re-check on every request instead of trusting the cookie
     return dash_users.is_active(_current_user())
@@ -138,26 +249,162 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+def _payload():
+    """The JSON body as a dict, without raising on a non-JSON request."""
+    if request.is_json:
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def resolve_owner():
+    """Which space this request acts on, or None when the session cannot name one.
+
+    The admin acts on their own space unless they explicitly ask for another with
+    ?space=<owner> - that is the only cross-space access in the app, and it is
+    never implicit.
+    """
+    if session.get('is_admin'):
+        wanted = request.args.get('space') or _payload().get('space')
+        if wanted:
+            try:
+                return spaces.normalise_owner(wanted)
+            except spaces.InvalidOwner:
+                return None
+        return spaces.ADMIN_SPACE
+    try:
+        return spaces.normalise_owner(session.get('user_id'))
+    except spaces.InvalidOwner:
+        return None
+
+
+def space_required(f):
+    """login_required plus a resolved g.owner for every space-scoped route."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not _session_valid():
+            return _reject_session()
+        owner = resolve_owner()
+        if not owner:
+            return jsonify({'success': False, 'error': 'Unknown space'}), 403
+        g.owner = owner
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def current_owner():
+    return getattr(g, 'owner', None) or resolve_owner() or spaces.ADMIN_SPACE
+
+
+def acting_label():
+    """Who to name in the audit log for a mutating action."""
+    if session.get('is_admin'):
+        return 'operator'
+    user = _current_user() or {}
+    return user.get('email') or session.get('user_id') or 'user'
+
+
+def client_ip():
+    """The address to rate limit on.
+
+    X-Forwarded-For is only trusted when the operator says something in front of
+    us sets it - otherwise a header would let one client empty everyone's bucket
+    (or dodge their own).
+    """
+    if os.environ.get('LAZYFARMERS_TRUSTED_PROXY', '').lower() in ('1', 'true', 'yes'):
+        forwarded = request.headers.get('X-Forwarded-For', '')
+        if forwarded:
+            return forwarded.split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+
 def check_rate_limit(ip):
+    """(allowed, seconds_to_wait) for one client.
+
+    The old version reset the counter on every call - `now - block_time >
+    BLOCK_DURATION` is always true while block_time is 0 - so no number of bad
+    logins ever locked anyone out.
+    """
     now = time.time()
-    if ip in LOGIN_ATTEMPTS:
-        attempts, block_time = LOGIN_ATTEMPTS[ip]
-        if block_time > now:
-            return False, int(block_time - now)
-        if now - block_time > BLOCK_DURATION: 
-             LOGIN_ATTEMPTS[ip] = [0, 0]
+    record = LOGIN_ATTEMPTS.get(ip)
+    if not record:
+        return True, 0
+
+    _count, window_start, blocked_until = record
+    if blocked_until > now:
+        return False, int(blocked_until - now) + 1
+    if now - window_start > ATTEMPT_WINDOW:
+        LOGIN_ATTEMPTS.pop(ip, None)
     return True, 0
+
 
 def fail_login(ip):
     now = time.time()
-    if ip not in LOGIN_ATTEMPTS:
-        LOGIN_ATTEMPTS[ip] = [1, 0]
-    else:
-        attempts, block_time = LOGIN_ATTEMPTS[ip]
-        attempts += 1
-        if attempts >= MAX_ATTEMPTS:
-            block_time = now + BLOCK_DURATION
-        LOGIN_ATTEMPTS[ip] = [attempts, block_time]
+    count, window_start, blocked_until = LOGIN_ATTEMPTS.get(ip, (0, now, 0.0))
+    if now - window_start > ATTEMPT_WINDOW:
+        count, window_start, blocked_until = 0, now, 0.0
+    count += 1
+    if count >= MAX_ATTEMPTS:
+        blocked_until = now + BLOCK_DURATION
+    LOGIN_ATTEMPTS[ip] = (count, window_start, blocked_until)
+
+    # keep the table from growing forever on a public host
+    if len(LOGIN_ATTEMPTS) > 4096:
+        for key, (_c, started, blocked) in list(LOGIN_ATTEMPTS.items()):
+            if blocked <= now and now - started > ATTEMPT_WINDOW:
+                LOGIN_ATTEMPTS.pop(key, None)
+
+
+def clear_rate_limit(ip):
+    LOGIN_ATTEMPTS.pop(ip, None)
+
+
+def csrf_token():
+    token = session.get('csrf')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['csrf'] = token
+    return token
+
+
+@app.before_request
+def enforce_csrf():
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
+    if not request.path.startswith('/api/'):
+        return None
+    if request.endpoint in CSRF_EXEMPT:
+        return None
+    sent = request.headers.get('X-CSRF-Token') or request.headers.get('X-CSRFToken') or ''
+    expected = session.get('csrf') or ''
+    if not expected or not same_secret(sent, expected):
+        return jsonify({'success': False, 'error': 'Bad or missing CSRF token'}), 403
+    return None
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    # 'unsafe-inline' is unavoidable while the templates use inline onclick=,
+    # but the origin allow-list still blocks exfiltration to an attacker host
+    response.headers.setdefault('Content-Security-Policy', "; ".join([
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://js.hcaptcha.com https://newassets.hcaptcha.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+        "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net",
+        "img-src 'self' data: https:",
+        "connect-src 'self' https://hcaptcha.com https://*.hcaptcha.com",
+        "frame-src https://newassets.hcaptcha.com https://hcaptcha.com",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ]))
+    return response
+
 
 def protect_large_ints(obj):
     if isinstance(obj, dict):
@@ -191,7 +438,7 @@ def _asset_version():
 
 @app.context_processor
 def inject_asset_version():
-    return {'asset_v': _asset_version()}
+    return {'asset_v': _asset_version(), 'csrf_token': csrf_token()}
 
 
 @app.route('/')
@@ -202,7 +449,7 @@ def home():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        ip = request.remote_addr
+        ip = client_ip()
         allowed, wait_time = check_rate_limit(ip)
 
         if not allowed:
@@ -213,12 +460,16 @@ def login():
         password = data.get('password') or ''
         cfg = load_auth_config()
 
-        if cfg and identifier == cfg.get('username') and password == cfg.get('password'):
+        # compare_digest so a wrong password cannot be found a character at a time
+        if cfg and same_secret(identifier, cfg.get('username')) and same_secret(password, cfg.get('password')):
             session.clear()
             session['logged_in'] = True
             session['is_admin'] = True
+            # so changing the dashboard password invalidates old admin cookies
+            session['auth_fp'] = admin_fingerprint()
             session.permanent = True
-            if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
+            csrf_token()
+            clear_rate_limit(ip)
             return jsonify({'success': True, 'is_admin': True})
 
         # not the admin - try an activated user account
@@ -229,7 +480,13 @@ def login():
             session['is_admin'] = False
             session['user_id'] = user['id']
             session.permanent = True
-            if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
+            csrf_token()
+            clear_rate_limit(ip)
+            # a login is the first thing that needs the space to exist
+            try:
+                spaces.ensure_space(user['id'])
+            except spaces.InvalidOwner:
+                pass
             return jsonify({'success': True, 'is_admin': False, 'days_left': user.get('days_left')})
 
         fail_login(ip)
@@ -247,7 +504,7 @@ def activate():
         return render_template('activate.html')
 
     data = request.json or {}
-    ip = request.remote_addr
+    ip = client_ip()
     allowed, wait_time = check_rate_limit(ip)
     if not allowed:
         return jsonify({'success': False, 'error': f'Too many attempts. Try again in {wait_time}s'})
@@ -265,13 +522,15 @@ def activate():
         fail_login(ip)
         return jsonify({'success': False, 'error': error})
 
-    if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
+    clear_rate_limit(ip)
     session.clear()
     session['logged_in'] = True
     session['is_admin'] = False
     session['user_id'] = user['id']
     session.permanent = True
-    state.log_command("SYS", f"Activation key redeemed by {user['email']} ({user['days']} days)", "success")
+    csrf_token()
+    state.log_command("SYS", f"Activation key redeemed by {user['email']} ({user['days']} days)", "success",
+                      owner=spaces.ADMIN_SPACE)
     return jsonify({'success': True, 'days_left': user.get('days_left')})
 
 
@@ -279,11 +538,20 @@ def activate():
 @login_required
 def session_info():
     user = _current_user()
+    owner = resolve_owner() or spaces.ADMIN_SPACE
     return jsonify({
         'is_admin': bool(session.get('is_admin')),
         'email': user.get('email') if user else None,
         'days_left': user.get('days_left') if user else None,
         'expires_at': user.get('expires_at') if user else None,
+        # every non-GET /api/ call has to echo this back in X-CSRF-Token
+        'csrf_token': csrf_token(),
+        'space': owner,
+        'space_label': 'operator' if owner == spaces.ADMIN_SPACE else (user.get('email') if user else owner),
+        'limits': {
+            'max_accounts': MAX_ACCOUNTS_PER_SPACE,
+            'max_proxies': MAX_PROXIES_PER_SPACE,
+        },
     })
 
 
@@ -293,15 +561,15 @@ def logout():
     return redirect(url_for('login'))
 
 @app.route('/api/accounts/list')
-@login_required
+@space_required
 def account_list():
     accounts = []
-    for bot in state.bot_instances:
+    for bot in state.bots_for(g.owner):
         if not bot.user or not bot.is_ready: continue
         uid = str(bot.user.id)
         st = state.account_stats.get(uid, {})
         session_total = st.get('session_hunt_count', 0) + st.get('session_battle_count', 0) + st.get('session_owo_count', 0) + st.get('session_other_count', 0)
-        
+
         accounts.append({
             'id': uid,
             'username': bot.username,
@@ -317,30 +585,47 @@ def account_list():
         })
     return jsonify(accounts)
 
-def get_bot(account_id):
-    """Resolve an account id to a live bot.
+def get_bot(account_id, owner=None):
+    """Resolve an account id to a live bot inside one space.
 
     An explicit id that is not running returns None - falling back to the first
-    instance would silently send commands to the wrong account.
+    instance would silently send commands to the wrong account. Resolution never
+    leaves the caller's space, so a foreign discord id is indistinguishable from
+    one that does not exist.
     """
+    pool = state.bots_for(owner or current_owner())
     if not account_id:
-        return state.bot_instances[0] if state.bot_instances else None
-    for bot in state.bot_instances:
+        return pool[0] if pool else None
+    for bot in pool:
         if bot.user and str(bot.user.id) == str(account_id):
             return bot
     return None
 
 
+def owns_account(account_id, owner=None):
+    """True when this space owns the discord account, running or not."""
+    if not account_id:
+        return True
+    space = owner or current_owner()
+    if get_bot(account_id, space):
+        return True
+    return spaces.owner_for_account(account_id) == space
+
+
 @app.route('/api/stats')
-@login_required
+@space_required
 def stats():
     account_id = request.args.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
+    # stats are served from account_stats even when the bot is offline, so the
+    # ownership check cannot rely on a live instance
+    if account_id and not owns_account(account_id, g.owner):
+        return jsonify({})
     uid = str(account_id) if account_id else (str(bot.user.id) if bot and bot.user else None)
 
     if not uid:
         return jsonify({})
-        
+
     st = state.account_stats.get(uid)
     if not st:
         if bot and bot.user:
@@ -470,20 +755,20 @@ def debug_status():
     return jsonify(res)
 
 @app.route('/api/history')
-@login_required
+@space_required
 def get_history():
-    return jsonify(list(reversed(state.full_session_history)))
+    return jsonify(list(reversed(state.visible_logs(state.full_session_history, g.owner))))
 
 @app.route('/api/history/analytics')
-@login_required
+@space_required
 def get_analytics():
     try:
         from utils import history_tracker
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
-        
-        dat = history_tracker.get_analytics_data(start_date=start_date, end_date=end_date)
-        dat['recent_logs'] = list(state.full_session_history)[-500:]
+
+        dat = history_tracker.get_analytics_data(start_date=start_date, end_date=end_date, owner=g.owner)
+        dat['recent_logs'] = state.visible_logs(state.full_session_history, g.owner)[-500:]
         return jsonify(dat)
     except Exception as e:
         import traceback
@@ -491,53 +776,60 @@ def get_analytics():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/settings', methods=['GET', 'POST'])
-@login_required
+@space_required
 def settings():
     account_id = request.args.get('id')
-    
+
+    # ?id= becomes a filename, so it is validated before it ever touches a path -
+    # "../../auth" used to be an arbitrary json read/write
     if account_id:
-        config_path = os.path.join(state.CONFIG_DIR, f'settings_{account_id}.json')
+        if not spaces.is_valid_discord_id(account_id):
+            return jsonify({"status": "error", "message": "Invalid account id"}), 400
+        if not owns_account(account_id, g.owner):
+            return jsonify({"status": "error", "message": "Not your account"}), 403
+        config_path = spaces.settings_path(g.owner, account_id)
     else:
-        config_path = os.path.join(state.CONFIG_DIR, 'settings.json')
-        
+        # a space's own default for every account in it. The shipped
+        # config/settings.json is only reachable with ?global=true, admin only.
+        want_global = request.args.get('global') == 'true'
+        if want_global and not session.get('is_admin'):
+            return jsonify({"status": "error", "message": "Admin only"}), 403
+        config_path = (os.path.join(state.CONFIG_DIR, 'settings.json') if want_global
+                       else spaces.settings_path(g.owner))
+
     if request.method == 'POST':
         new_config = request.json
         try:
             save_to_all = request.args.get('all_accounts') == 'true' or request.args.get('all') == 'true'
 
-            # writing the global defaults, or every account at once, is an admin
-            # action - an activated user may only touch one running account
-            if (save_to_all or not account_id) and not session.get('is_admin'):
-                return jsonify({"status": "error", "message": "Admin only"}), 403
-
             if save_to_all:
-                global_path = os.path.join(state.CONFIG_DIR, 'settings.json')
-                with open(global_path, 'w') as f:
-                    json.dump(new_config, f, indent=4)
-                
-                for filename in os.listdir(state.CONFIG_DIR):
-                    if filename.startswith("settings_") and filename.endswith(".json"):
-                        file_path = os.path.join(state.CONFIG_DIR, filename)
-                        with open(file_path, 'w') as f:
-                            json.dump(new_config, f, indent=4)
-                
-                for bot in state.bot_instances:
+                # "all" now means every account in the caller's own space, so a
+                # normal user can finally configure their farm in one go
+                targets = spaces.settings_files(g.owner)
+                for file_path in targets:
+                    with open(file_path, 'w') as f:
+                        json.dump(new_config, f, indent=4)
+
+                for bot in state.bots_for(g.owner):
                     asyncio.run_coroutine_threadsafe(bot.sync_settings(new_config), bot.loop)
-                
-                state.log_command("SYS", "Settings updated for ALL accounts", "success")
+
+                state.log_command("SYS", f"Settings updated for ALL accounts by {acting_label()}", "success",
+                                  owner=g.owner)
             else:
+                os.makedirs(os.path.dirname(config_path) or '.', exist_ok=True)
                 with open(config_path, 'w') as f:
                     json.dump(new_config, f, indent=4)
-                
-                for bot in state.bot_instances:
+
+                for bot in state.bots_for(g.owner):
                     if (not account_id) or (bot.user and str(bot.user.id) == str(account_id)):
                         asyncio.run_coroutine_threadsafe(bot.sync_settings(new_config), bot.loop)
-                
-                state.log_command("SYS", f"Settings updated for {'Account ' + account_id if account_id else 'Global'}", "success")
-            
+
+                state.log_command("SYS", f"Settings updated for {'Account ' + account_id if account_id else 'Global'}", "success",
+                                  owner=g.owner)
+
             return jsonify({"status": "success"})
         except Exception as e:
-            state.log_command("ERROR", f"Failed to save settings: {e}")
+            state.log_command("ERROR", f"Failed to save settings: {e}", owner=g.owner)
             return jsonify({"status": "error", "message": str(e)}), 500
     else:
         try:
@@ -546,41 +838,65 @@ def settings():
                     data = json.load(f)
                     return jsonify(protect_large_ints(data))
 
-            elif account_id:
-                global_path = os.path.join(state.CONFIG_DIR, 'settings.json')
-                if os.path.exists(global_path):
-                    with open(global_path, 'r') as f:
+            # nothing saved for this account yet - fall back the same way the bot
+            # merges: this space's default, then the shipped defaults
+            fallbacks = []
+            if account_id:
+                fallbacks.append(spaces.settings_path(g.owner))
+            fallbacks.append(os.path.join(state.CONFIG_DIR, 'settings.json'))
+            for path in fallbacks:
+                if os.path.exists(path):
+                    with open(path, 'r') as f:
                         return jsonify(protect_large_ints(json.load(f)))
             return jsonify({})
-        except:
+        except Exception:
             return jsonify({})
 
 @app.route('/api/accounts/config', methods=['GET', 'POST'])
-@admin_required
+@space_required
 def accounts_config_api():
-    accounts_path = os.path.join(state.CONFIG_DIR, 'accounts.json')
+    from utils import proxy_manager
+    from core import supervisor
     if request.method == 'POST':
         payload = request.json or {}
         accounts = payload.get('accounts', payload if isinstance(payload, list) else [])
+        if not isinstance(accounts, list):
+            return jsonify({"status": "error", "message": "accounts must be a list"}), 400
+        if len(accounts) > MAX_ACCOUNTS_PER_SPACE:
+            return jsonify({"status": "error",
+                            "message": f"At most {MAX_ACCOUNTS_PER_SPACE} accounts per space"}), 400
+
+        # an account name reaches the admin's browser inside an account card, and
+        # it is also matched against by supervisor - so keep it boring
+        seen = set()
+        for account in accounts:
+            if not isinstance(account, dict):
+                return jsonify({"status": "error", "message": "Malformed account entry"}), 400
+            name = str(account.get('name') or '').strip()
+            if not proxy_manager.valid_account_name(name):
+                return jsonify({"status": "error",
+                                "message": f"Invalid account name: {name!r}"}), 400
+            if name in seen:
+                return jsonify({"status": "error", "message": f"Duplicate account name: {name}"}), 400
+            seen.add(name)
+            account['name'] = name
+            pid = account.get('proxy_id')
+            if pid and not proxy_manager.valid_proxy_id(pid):
+                return jsonify({"status": "error", "message": f"Invalid proxy id: {pid!r}"}), 400
+
         try:
-            with open(accounts_path, 'w', encoding='utf-8') as f:
-                json.dump({'accounts': accounts}, f, indent=4)
-            from utils import proxy_manager
-            proxy_manager.sync_proxy_assignments()
-            for bot in state.bot_instances:
+            proxy_manager.save_accounts(g.owner, accounts)
+            proxy_manager.sync_proxy_assignments(g.owner)
+            for bot in state.bots_for(g.owner):
                 bot.accounts = accounts
-            state.log_command("SYS", "Accounts config updated.", "success")
+            state.log_command("SYS", f"Accounts config updated by {acting_label()}.", "success", owner=g.owner)
             return jsonify({"status": "success"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
 
     try:
-        from utils import proxy_manager
-        from core import supervisor
-        with open(accounts_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        accounts = data.get('accounts', [])
-        running = supervisor.running_names()
+        accounts = proxy_manager.load_accounts(g.owner)
+        running = supervisor.running_names(g.owner)
         for acc in accounts:
             if acc.get('token'):
                 acc['token_masked'] = proxy_manager.mask_token(acc['token'])
@@ -621,79 +937,81 @@ def _find_account(accounts, name):
 
 
 @app.route('/api/accounts/launch', methods=['POST'])
-@admin_required
+@space_required
 def account_launch():
     from utils import proxy_manager
     from core import supervisor
     name = (request.json or {}).get('name')
-    account = _find_account(proxy_manager.load_accounts(), name)
+    # the lookup is inside the caller's space, so one tenant cannot start another
+    # tenant's account by guessing its name
+    account = _find_account(proxy_manager.load_accounts(g.owner), name)
     if not account:
         return jsonify({'success': False, 'error': f'No account named {name}'}), 404
 
-    result, error = _bot_loop_call(supervisor.start_account(account))
+    result, error = _bot_loop_call(supervisor.start_account(account, g.owner))
     if error:
         return jsonify({'success': False, 'error': error}), 503
     ok, message = result
-    state.log_command("SYS", message, "success" if ok else "error")
+    state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
     return jsonify({'success': ok, 'message': message})
 
 
 @app.route('/api/accounts/stop', methods=['POST'])
-@admin_required
+@space_required
 def account_stop():
     from core import supervisor
     name = (request.json or {}).get('name')
-    result, error = _bot_loop_call(supervisor.stop_account(name))
+    result, error = _bot_loop_call(supervisor.stop_account(g.owner, name))
     if error:
         return jsonify({'success': False, 'error': error}), 503
     ok, message = result
-    state.log_command("SYS", message, "success" if ok else "error")
+    state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
     return jsonify({'success': ok, 'message': message})
 
 
 @app.route('/api/accounts/launch_all', methods=['POST'])
-@admin_required
+@space_required
 def account_launch_all():
     from utils import proxy_manager
     from core import supervisor
     pending = [
-        a for a in proxy_manager.load_accounts()
-        if a.get('enabled', True) and not supervisor.find_bot(a.get('name'))
+        a for a in proxy_manager.load_accounts(g.owner)
+        if a.get('enabled', True) and not supervisor.find_bot(g.owner, a.get('name'))
     ]
     if not pending:
         return jsonify({'success': False, 'error': 'No enabled accounts left to start'})
 
-    error = _bot_loop_fire(supervisor.start_all(pending))
+    error = _bot_loop_fire(supervisor.start_all(pending, g.owner))
     if error:
         return jsonify({'success': False, 'error': error}), 503
-    state.log_command("SYS", f"Starting {len(pending)} accounts from dashboard", "success")
+    state.log_command("SYS", f"Starting {len(pending)} accounts from dashboard", "success", owner=g.owner)
     return jsonify({'success': True, 'message': f'Starting {len(pending)} accounts'})
 
 
 @app.route('/api/accounts/stop_all', methods=['POST'])
-@admin_required
+@space_required
 def account_stop_all():
     from core import supervisor
-    names = supervisor.running_names()
+    names = supervisor.running_names(g.owner)
     if not names:
         return jsonify({'success': False, 'error': 'No accounts are running'})
 
-    error = _bot_loop_fire(supervisor.stop_all())
+    error = _bot_loop_fire(supervisor.stop_all(g.owner))
     if error:
         return jsonify({'success': False, 'error': error}), 503
-    state.log_command("SYS", f"Stopping {len(names)} accounts from dashboard", "success")
+    state.log_command("SYS", f"Stopping {len(names)} accounts from dashboard", "success", owner=g.owner)
     return jsonify({'success': True, 'message': f'Stopping {len(names)} accounts'})
 
 
-async def _verify_accounts(accounts, targets):
-    from neura_engines.setup_engine import NeuraSetupEngine
+async def _verify_accounts(owner, accounts, targets):
+    from lazy_engines.setup_engine import LazySetupEngine
     from utils import proxy_manager
-    engine = NeuraSetupEngine()
+    engine = LazySetupEngine()
     results = []
     channels_changed = False
 
     for account in targets:
-        proxy_url, proxy_auth, _label = engine.resolve_account_proxy(account)
+        proxy_url, proxy_auth, _label = proxy_manager.resolve_account_proxy(owner, account)
         try:
             valid, user, channels = await engine.verify_token(
                 account.get('token'), account.get('channels', []), proxy_url, proxy_auth
@@ -713,17 +1031,17 @@ async def _verify_accounts(accounts, targets):
         })
 
     if channels_changed:
-        proxy_manager.save_accounts(accounts)
+        proxy_manager.save_accounts(owner, accounts)
     return results
 
 
 @app.route('/api/accounts/verify', methods=['POST'])
-@admin_required
+@space_required
 def account_verify():
     from utils import proxy_manager
     payload = request.json or {}
     names = payload.get('names')
-    accounts = proxy_manager.load_accounts()
+    accounts = proxy_manager.load_accounts(g.owner)
 
     if names:
         targets = [a for a in accounts if a.get('name') in names]
@@ -732,21 +1050,24 @@ def account_verify():
     if not targets:
         return jsonify({'success': False, 'error': 'No accounts to verify'})
 
-    results, error = _bot_loop_call(_verify_accounts(accounts, targets), timeout=40 * len(targets) + 20)
+    results, error = _bot_loop_call(_verify_accounts(g.owner, accounts, targets),
+                                    timeout=40 * len(targets) + 20)
     if error:
         return jsonify({'success': False, 'error': error}), 503
 
     passed = sum(1 for r in results if r['valid'])
-    state.log_command("SYS", f"Verified {passed}/{len(results)} accounts", "success" if passed else "error")
+    state.log_command("SYS", f"Verified {passed}/{len(results)} accounts", "success" if passed else "error",
+                      owner=g.owner)
     return jsonify({'success': True, 'results': results})
 
 
 @app.route('/api/accounts/export')
-@admin_required
+@space_required
 def account_export():
     from utils import proxy_manager
     only_problem = request.args.get('only') == 'problem'
-    accounts = proxy_manager.load_accounts()
+    # raw tokens leave the box here, so it is strictly the caller's own space
+    accounts = proxy_manager.load_accounts(g.owner)
     if only_problem:
         accounts = [a for a in accounts if a.get('status', 'ok') != 'ok']
 
@@ -759,6 +1080,7 @@ def account_export():
 
     body = '\n'.join(lines) + ('\n' if lines else '')
     name = 'problem-accounts.txt' if only_problem else 'accounts.txt'
+    state.log_command("SYS", f"Accounts exported by {acting_label()}", "info", owner=g.owner)
     return app.response_class(
         body,
         mimetype='text/plain',
@@ -767,7 +1089,7 @@ def account_export():
 
 
 @app.route('/api/accounts/bulk', methods=['POST'])
-@admin_required
+@space_required
 def account_bulk_import():
     from utils import proxy_manager
     payload = request.json or {}
@@ -778,8 +1100,17 @@ def account_bulk_import():
 
     if not tokens:
         return jsonify({'success': False, 'error': 'Paste at least one token'})
+    if proxy_id and not proxy_manager.valid_proxy_id(proxy_id):
+        return jsonify({'success': False, 'error': 'Invalid proxy id'}), 400
+    # the prefix ends up in an account name, which ends up in a rendered card
+    if not proxy_manager.valid_account_name(prefix):
+        return jsonify({'success': False, 'error': 'Prefix may only use letters, digits, _ . -'}), 400
 
-    accounts = proxy_manager.load_accounts()
+    accounts = proxy_manager.load_accounts(g.owner)
+    if len(accounts) + len(tokens) > MAX_ACCOUNTS_PER_SPACE:
+        return jsonify({'success': False,
+                        'error': f'That would exceed the {MAX_ACCOUNTS_PER_SPACE} account limit'}), 400
+
     used_names = {a.get('name') for a in accounts}
     counter = 1
     for token in tokens:
@@ -795,154 +1126,176 @@ def account_bulk_import():
             'proxy_id': proxy_id,
         })
 
-    proxy_manager.save_accounts(accounts)
-    proxy_manager.sync_proxy_assignments()
-    state.log_command("SYS", f"Imported {len(tokens)} accounts", "success")
+    proxy_manager.save_accounts(g.owner, accounts)
+    proxy_manager.sync_proxy_assignments(g.owner)
+    state.log_command("SYS", f"Imported {len(tokens)} accounts ({acting_label()})", "success", owner=g.owner)
     return jsonify({'success': True, 'message': f'Imported {len(tokens)} accounts'})
 
 
 @app.route('/api/accounts', methods=['GET', 'POST'])
-@admin_required
+@space_required
 def accounts_api():
+    from utils import proxy_manager
     if request.method == 'POST':
         new_accounts = request.json
         try:
-            accounts_path = os.path.join(state.CONFIG_DIR, 'accounts.json')
-            with open(accounts_path, 'w') as f:
-                json.dump(new_accounts, f, indent=4)
+            accounts = new_accounts.get('accounts', []) if isinstance(new_accounts, dict) else (new_accounts or [])
+            if not isinstance(accounts, list):
+                return jsonify({"status": "error", "message": "accounts must be a list"}), 400
+            if len(accounts) > MAX_ACCOUNTS_PER_SPACE:
+                return jsonify({"status": "error",
+                                "message": f"At most {MAX_ACCOUNTS_PER_SPACE} accounts per space"}), 400
+            for account in accounts:
+                if not isinstance(account, dict) or not proxy_manager.valid_account_name(account.get('name')):
+                    return jsonify({"status": "error",
+                                    "message": f"Invalid account name: {(account or {}).get('name')!r}"}), 400
 
-            for bot in state.bot_instances:
-                bot.accounts = new_accounts.get('accounts', new_accounts) if isinstance(new_accounts, dict) else new_accounts
+            proxy_manager.save_accounts(g.owner, accounts)
 
-            state.log_command("SYS", "Accounts updated successfully. Restart recommended.", "success")
+            for bot in state.bots_for(g.owner):
+                bot.accounts = accounts
+
+            state.log_command("SYS", "Accounts updated successfully. Restart recommended.", "success", owner=g.owner)
             return jsonify({"status": "success"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
     else:
         try:
-            accounts_path = os.path.join(state.CONFIG_DIR, 'accounts.json')
-            with open(accounts_path, 'r') as f:
-                return jsonify(json.load(f))
+            return jsonify({'accounts': proxy_manager.load_accounts(g.owner)})
         except Exception:
             return jsonify([])
 
 
 @app.route('/api/proxies', methods=['GET', 'POST'])
-@admin_required
+@space_required
 def proxies_api():
     from utils import proxy_manager
     if request.method == 'POST':
         payload = request.json or {}
         proxies = payload.get('proxies', [])
-        proxy_manager.save_proxies(proxies)
-        proxy_manager.sync_proxy_assignments()
-        state.log_command("SYS", "Proxy pool saved", "success")
-        return jsonify({"status": "success", "proxies": proxy_manager.load_proxies()})
-    return jsonify({"proxies": proxy_manager.load_proxies()})
+        if not isinstance(proxies, list):
+            return jsonify({"status": "error", "message": "proxies must be a list"}), 400
+        if len(proxies) > MAX_PROXIES_PER_SPACE:
+            return jsonify({"status": "error",
+                            "message": f"At most {MAX_PROXIES_PER_SPACE} proxies per space"}), 400
+        proxy_manager.save_proxies(g.owner, proxies)
+        proxy_manager.sync_proxy_assignments(g.owner)
+        state.log_command("SYS", "Proxy pool saved", "success", owner=g.owner)
+        return jsonify({"status": "success", "proxies": proxy_manager.load_proxies(g.owner)})
+    return jsonify({"proxies": proxy_manager.load_proxies(g.owner)})
 
 
 @app.route('/api/proxies/bulk', methods=['POST'])
-@admin_required
+@space_required
 def proxies_bulk():
     from utils import proxy_manager
     text = (request.json or {}).get('text', '')
-    result = proxy_manager.bulk_import(text)
-    state.log_command("SYS", f"Bulk imported {len(result['added'])} proxies", "success")
+    existing = len(proxy_manager.load_proxies(g.owner))
+    if existing >= MAX_PROXIES_PER_SPACE:
+        return jsonify({"status": "error",
+                        "message": f"Proxy pool is already at the {MAX_PROXIES_PER_SPACE} limit"}), 400
+    result = proxy_manager.bulk_import(g.owner, text, limit=MAX_PROXIES_PER_SPACE)
+    state.log_command("SYS", f"Bulk imported {len(result['added'])} proxies", "success", owner=g.owner)
     return jsonify({
         "status": "success",
         "added": len(result['added']),
         "errors": result['errors'],
-        "proxies": proxy_manager.load_proxies(),
+        "proxies": proxy_manager.load_proxies(g.owner),
     })
 
 
 @app.route('/api/proxies/test', methods=['POST'])
-@admin_required
+@space_required
 def proxies_test():
     from utils import proxy_manager
     payload = request.json or {}
     proxy_id = payload.get('id')
+    owner = g.owner
+    if proxy_id and not proxy_manager.valid_proxy_id(proxy_id):
+        return jsonify({"status": "error", "message": "Invalid proxy id"}), 400
 
     async def _run():
         if proxy_id:
-            proxy = proxy_manager.get_proxy_by_id(proxy_id)
+            proxy = proxy_manager.get_proxy_by_id(owner, proxy_id)
             if not proxy:
                 return {"ok": False, "error": "not found"}
             ok = await proxy_manager.test_proxy(proxy)
-            proxies = proxy_manager.load_proxies()
+            proxies = proxy_manager.load_proxies(owner)
             for p in proxies:
                 if p.get('id') == proxy_id:
                     p['status'] = proxy['status']
                     p['last_check'] = proxy['last_check']
-            proxy_manager.save_proxies(proxies)
+            proxy_manager.save_proxies(owner, proxies)
             return {"ok": ok, "id": proxy_id, "status": proxy['status']}
-        results = await proxy_manager.test_all_proxies()
-        return {"results": results, "proxies": proxy_manager.load_proxies()}
+        results = await proxy_manager.test_all_proxies(owner)
+        return {"results": results, "proxies": proxy_manager.load_proxies(owner)}
 
     result = asyncio.run(_run())
     return jsonify({"status": "success", **result})
 
 
 @app.route('/api/proxies/assign', methods=['POST'])
-@admin_required
+@space_required
 def proxies_assign():
     from utils import proxy_manager
-    assigned = proxy_manager.auto_assign()
-    state.log_command("SYS", f"Auto-assigned {len(assigned)} proxies to accounts", "success")
-    return jsonify({"status": "success", "assigned": assigned, "proxies": proxy_manager.load_proxies()})
+    assigned = proxy_manager.auto_assign(g.owner)
+    state.log_command("SYS", f"Auto-assigned {len(assigned)} proxies to accounts", "success", owner=g.owner)
+    return jsonify({"status": "success", "assigned": assigned, "proxies": proxy_manager.load_proxies(g.owner)})
 
 
 @app.route('/api/proxies/<proxy_id>', methods=['DELETE'])
-@admin_required
+@space_required
 def proxies_delete(proxy_id):
     from utils import proxy_manager
-    proxy_manager.remove_proxy(proxy_id)
-    state.log_command("SYS", f"Removed proxy {proxy_id}", "info")
-    return jsonify({"status": "success", "proxies": proxy_manager.load_proxies()})
+    if not proxy_manager.valid_proxy_id(proxy_id):
+        return jsonify({"status": "error", "message": "Invalid proxy id"}), 400
+    proxy_manager.remove_proxy(g.owner, proxy_id)
+    state.log_command("SYS", f"Removed proxy {proxy_id}", "info", owner=g.owner)
+    return jsonify({"status": "success", "proxies": proxy_manager.load_proxies(g.owner)})
 
 
 @app.route('/api/proxies/all', methods=['DELETE'])
-@admin_required
+@space_required
 def proxies_delete_all():
     from utils import proxy_manager
-    proxy_manager.remove_all_proxies()
-    state.log_command("SYS", "Deleted ALL proxies", "info")
+    proxy_manager.remove_all_proxies(g.owner)
+    state.log_command("SYS", "Deleted ALL proxies", "info", owner=g.owner)
     return jsonify({"status": "success", "proxies": []})
 
 
 @app.route('/api/proxies/failed', methods=['DELETE'])
-@admin_required
+@space_required
 def proxies_delete_failed():
     from utils import proxy_manager
-    count = proxy_manager.remove_failed_proxies()
-    state.log_command("SYS", f"Deleted {count} failed proxies", "info")
-    return jsonify({"status": "success", "count": count, "proxies": proxy_manager.load_proxies()})
+    count = proxy_manager.remove_failed_proxies(g.owner)
+    state.log_command("SYS", f"Deleted {count} failed proxies", "info", owner=g.owner)
+    return jsonify({"status": "success", "count": count, "proxies": proxy_manager.load_proxies(g.owner)})
 
 
 @app.route('/api/security/test', methods=['POST'])
-@login_required
+@space_required
 def test_security():
     account_id = request.args.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     if not bot:
         return jsonify({'status': 'error', 'message': 'Bot not found'}), 404
-        
+
     sec = bot.get_cog('Security')
     if sec:
         asyncio.run_coroutine_threadsafe(sec.play_beep(), bot.loop)
         sec._show_desktop_notification("Test: Lazy Farmers Security Alert working!")
         sec._send_webhook("SYSTEM TEST", "This is a test of your security notification system. All systems are operational.")
         return jsonify({'status': 'success', 'message': 'Test signals sent'})
-    
+
     return jsonify({'status': 'error', 'message': 'Security module not loaded'}), 500
 
 @app.route('/api/control', methods=['POST'])
-@login_required
+@space_required
 def control():
     data = request.json or {}
     action = (data.get('action') or '').lower()
     account_id = data.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
 
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
 
@@ -962,7 +1315,7 @@ def control():
             bot.send_message(f"{bot.prefix}cash", skip_typing=True, priority=True),
             bot.loop
         )
-        state.log_command("CMD", "Manual Cash Check Sent", "info", bot_name=bot.username)
+        state.log_command("CMD", "Manual Cash Check Sent", "info", bot_name=bot.username, owner=g.owner)
 
     else:
         return jsonify({'success': False, 'error': f'Unknown action: {action}'}), 400
@@ -970,29 +1323,29 @@ def control():
     return jsonify({'success': True})
 
 @app.route('/api/security', methods=['POST'])
-@login_required
+@space_required
 def security():
     data = request.json
     action = data.get('action')
     account_id = data.get('id')
-    bot = get_bot(account_id)
-    
+    bot = get_bot(account_id, g.owner)
+
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
 
     if action == 'resume':
         bot.paused = False
         bot.throttle_until = 0
-        state.log_command("SEC", f"User Resumed {bot.username} from Security Alert", "success")
-            
+        state.log_command("SEC", f"User Resumed {bot.username} from Security Alert", "success", owner=g.owner)
+
     return jsonify({'success': True})
 
 @app.route('/api/captcha/current')
-@login_required
+@space_required
 def captcha_current():
     account_id = request.args.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     if not bot: return jsonify({'success': False})
-    
+
     st = bot.stats
     captcha_data = st.get('current_captcha')
     
@@ -1013,46 +1366,46 @@ def captcha_current():
     return jsonify({'success': False, 'message': 'No active captcha'})
 
 @app.route('/api/captcha/submit', methods=['POST'])
-@login_required
+@space_required
 def captcha_submit():
     data = request.json
     code = data.get('code', '').strip()
     account_id = data.get('id')
-    bot = get_bot(account_id)
-    
+    bot = get_bot(account_id, g.owner)
+
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
-    
+
     if not code:
         return jsonify({'success': False, 'error': 'No password provided'})
-    
+
     st = bot.stats
     captcha_data = st.get('current_captcha')
     if not captcha_data:
         return jsonify({'success': False, 'error': 'No active captcha'})
-    
+
     cash = captcha_data.get('cash', 16000)
     command_template = captcha_data.get('command_template', f"owo autohunt {cash} {{password}}")
     full_command = command_template.replace('{password}', code)
-    
+
     asyncio.run_coroutine_threadsafe(
-        bot.send_message(full_command, skip_typing=True, priority=True), 
+        bot.send_message(full_command, skip_typing=True, priority=True),
         bot.loop
     )
-    
+
     if 'current_captcha' in st:
         del st['current_captcha']
-    
+
     st['captchas_solved_today'] = st.get('captchas_solved_today', 0) + 1
     st['captcha_success_count'] = st.get('captcha_success_count', 0) + 1
-    state.log_command("CMD", f"Captcha solution sent: {full_command}", bot_name=bot.username)
-    
+    state.log_command("CMD", f"Captcha solution sent: {full_command}", bot_name=bot.username, owner=g.owner)
+
     return jsonify({'success': True, 'message': f'Captcha solution sent: {full_command}'})
 
 @app.route('/api/captcha/balance', methods=['GET', 'POST'])
-@login_required
+@space_required
 def captcha_balance():
     account_id = request.args.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     if not bot:
         return jsonify({'balance': None, 'service': 'unknown', 'error': 'Bot not found'})
     
@@ -1100,23 +1453,23 @@ def captcha_balance():
         return jsonify({'balance': None, 'service': service, 'error': str(e)})
 
 @app.route('/api/captcha/stats')
-@login_required
+@space_required
 def captcha_stats():
     account_id = request.args.get('id')
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     st = bot.stats if bot else {}
-    
+
     solved = st.get('captchas_solved_today', 0)
     success = st.get('captcha_success_count', 0)
     success_rate = 100 if solved == 0 else round((success / max(solved, 1)) * 100)
-    
+
     return jsonify({
         'solved': solved,
         'success_rate': success_rate
     })
 
 @app.route('/api/bot/command', methods=['POST'])
-@login_required
+@space_required
 def bot_command():
     data = request.json or {}
     command = (data.get('command') or '').strip()
@@ -1135,41 +1488,46 @@ def bot_command():
         asyncio.run_coroutine_threadsafe(coro, bot.loop)
 
     if send_to_all:
-        targets = [b for b in state.bot_instances if b.user and b.is_ready]
+        # "all" is all of the caller's own accounts, never the whole process
+        targets = [b for b in state.bots_for(g.owner) if b.user and b.is_ready]
         if not targets:
             return jsonify({'success': False, 'error': 'No accounts are running'})
         for bot in targets:
             _dispatch(bot)
-            state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username)
+            state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username, owner=g.owner)
         return jsonify({
             'success': True,
             'message': f'Sent "{command}" on {len(targets)} accounts',
             'count': len(targets),
         })
 
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
 
     _dispatch(bot)
-    state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username)
+    state.log_command("CMD", f"Manual command sent: {command}", bot_name=bot.username, owner=g.owner)
     return jsonify({'success': True, 'message': f'Command sent: {command}'})
 
 
-def _settings_path_for(account_id):
+def _settings_path_for(owner, account_id):
+    """A settings file inside one space. Validates the id first - it is a filename."""
     if account_id:
-        return os.path.join(state.CONFIG_DIR, f'settings_{account_id}.json')
-    return os.path.join(state.CONFIG_DIR, 'settings.json')
+        return spaces.settings_path(owner, account_id)
+    return spaces.settings_path(owner)
 
 
-def _read_settings_for(account_id):
-    path = _settings_path_for(account_id)
-    if account_id and not os.path.exists(path):
-        path = os.path.join(state.CONFIG_DIR, 'settings.json')
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def _read_settings_for(owner, account_id):
+    candidates = [_settings_path_for(owner, account_id)]
+    if account_id:
+        candidates.append(spaces.settings_path(owner))
+    candidates.append(os.path.join(state.CONFIG_DIR, 'settings.json'))
+    for path in candidates:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return {}
 
 
 def _normalise_custom_commands(raw):
@@ -1198,13 +1556,18 @@ def _normalise_custom_commands(raw):
 
 
 @app.route('/api/bot/custom_commands', methods=['GET', 'POST'])
-@login_required
+@space_required
 def custom_commands_api():
     """The saved per-bot command list (commands.custom in the settings file)."""
     account_id = request.args.get('id')
+    if account_id:
+        if not spaces.is_valid_discord_id(account_id):
+            return jsonify({'success': False, 'error': 'Invalid account id'}), 400
+        if not owns_account(account_id, g.owner):
+            return jsonify({'success': False, 'error': 'Not your account'}), 403
 
     if request.method == 'GET':
-        custom = _read_settings_for(account_id).get('commands', {}).get('custom', {})
+        custom = _read_settings_for(g.owner, account_id).get('commands', {}).get('custom', {})
         return jsonify({
             'enabled': custom.get('enabled', False),
             'commands': _normalise_custom_commands(custom.get('commands')),
@@ -1215,33 +1578,26 @@ def custom_commands_api():
     block = {'enabled': bool(payload.get('enabled', True)), 'commands': commands_list}
     save_to_all = bool(payload.get('all'))
 
-    # same rule as /api/settings: touching the global defaults or every account
-    # at once is the admin's job, an activated user gets one account
-    if (save_to_all or not account_id) and not session.get('is_admin'):
-        return jsonify({'success': False, 'error': 'Admin only'}), 403
-
     try:
         if save_to_all:
-            paths = [os.path.join(state.CONFIG_DIR, 'settings.json')]
-            paths += [
-                os.path.join(state.CONFIG_DIR, f)
-                for f in os.listdir(state.CONFIG_DIR)
-                if f.startswith('settings_') and f.endswith('.json')
-            ]
+            # every settings file in the caller's own space - the space default
+            # first, so a newly added account inherits the list
+            paths = spaces.settings_files(g.owner)
         else:
-            paths = [_settings_path_for(account_id)]
+            paths = [_settings_path_for(g.owner, account_id)]
 
         for path in paths:
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
             except Exception:
-                cfg = _read_settings_for(account_id)
+                cfg = _read_settings_for(g.owner, account_id)
             cfg.setdefault('commands', {})['custom'] = block
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, indent=4)
 
-        for bot in state.bot_instances:
+        for bot in state.bots_for(g.owner):
             if save_to_all or (not account_id) or (bot.user and str(bot.user.id) == str(account_id)):
                 asyncio.run_coroutine_threadsafe(
                     bot.sync_settings({'commands': {'custom': block}}), bot.loop
@@ -1257,34 +1613,37 @@ def custom_commands_api():
 _pending_captchas = {}
 
 @app.route('/api/captcha_challenge', methods=['GET'])
-@login_required
+@space_required
 def get_captcha_challenge():
     """Get pending captcha challenges for dashboard display."""
     account_id = request.args.get('account_id', type=str)
     if account_id and account_id in _pending_captchas:
+        if not owns_account(account_id, g.owner):
+            return jsonify({'success': False, 'message': 'No captcha pending'})
         challenge = _pending_captchas[account_id]
         return jsonify({'success': True, 'challenge': challenge})
-    
-    if _pending_captchas:
-        for acc_id, challenge in _pending_captchas.items():
-            return jsonify({'success': True, 'challenge': challenge, 'account_id': acc_id})
+
+    for acc_id, challenge in _pending_captchas.items():
+        if not owns_account(acc_id, g.owner):
+            continue
+        return jsonify({'success': True, 'challenge': challenge, 'account_id': acc_id})
     return jsonify({'success': False, 'message': 'No captcha pending'})
 
 @app.route('/api/captcha_solve', methods=['POST'])
-@login_required
+@space_required
 def submit_captcha_solution():
     """Submit hCaptcha solution from dashboard."""
     import socket
     import requests
-    
+
     data = request.get_json()
     account_id = data.get('account_id', '')
     token = data.get('token', '')
-    
+
     if not account_id or not token:
         return jsonify({'success': False, 'error': 'Missing account_id or token'})
-    
-    bot = get_bot(account_id)
+
+    bot = get_bot(account_id, g.owner)
     if not bot:
         return jsonify({'success': False, 'error': 'Bot not found'})
     
@@ -1315,26 +1674,33 @@ def submit_captcha_solution():
             from modules.web_solver import WebSolver
             WebSolver.mark_verification_done(account_id)
             clear_captcha_challenge(account_id)
-            state.log_command("SEC", f"Captcha verified for account {account_id}", "success")
+            state.log_command("SEC", f"Captcha verified for account {account_id}", "success",
+                              owner=g.owner)
             return jsonify({'success': True, 'message': 'Captcha verified successfully'})
         else:
-            state.log_command("SEC", f"Captcha verification failed: {response.text}", "error")
+            state.log_command("SEC", f"Captcha verification failed: {response.text}", "error",
+                              owner=g.owner)
             return jsonify({'success': False, 'error': 'Invalid captcha token'})
     except Exception as e:
         socket.getaddrinfo = _original_getaddrinfo
-        state.log_command("SEC", f"Verification error: {e}", "error")
+        state.log_command("SEC", f"Verification error: {e}", "error", owner=g.owner)
         return jsonify({'success': False, 'error': str(e)})
-    
-    
+
+
 @app.route('/api/captcha/oauth_url', methods=['POST'])
-@login_required
+@space_required
 def captcha_oauth_url():
+    """Mint the Discord OAuth redirect that fronts owobot.com's captcha page.
+
+    The URL is signed by the account's own token, so resolving the id inside the
+    caller's space is the whole security boundary here.
+    """
     data = request.get_json() or {}
     account_id = data.get('account_id')
     if not account_id:
         return jsonify({'success': False, 'error': 'Missing account_id'})
 
-    bot = get_bot(account_id)
+    bot = get_bot(account_id, g.owner)
     if not bot:
         return jsonify({'success': False, 'error': 'Bot not found'})
 
@@ -1373,10 +1739,12 @@ def captcha_oauth_url():
     return jsonify({'success': True, 'url': redirect_url})
 
 @app.route('/api/captcha/pending', methods=['GET'])
-@login_required
+@space_required
 def pending_captchas():
     pending = []
     for acc_id, challenge in _pending_captchas.items():
+        if not owns_account(acc_id, g.owner):
+            continue
         pending.append({
             'account_id': acc_id,
             'account_name': challenge.get('account_name', acc_id),
@@ -1390,12 +1758,15 @@ def register_captcha_challenge(account_id, challenge_data):
         'created_at': time.time(),
         **challenge_data
     }
-    state.log_command("SEC", f"Captcha challenge registered for account {account_id}", "info")
+    # called from the bot loop, so the space comes from the account, not the session
+    state.log_command("SEC", f"Captcha challenge registered for account {account_id}", "info",
+                      owner=state.owner_of(account_id))
 
 def clear_captcha_challenge(account_id):
     if account_id in _pending_captchas:
         _pending_captchas.pop(account_id, None)
-        state.log_command("SEC", f"Captcha challenge cleared for account {account_id}", "info")
+        state.log_command("SEC", f"Captcha challenge cleared for account {account_id}", "info",
+                          owner=state.owner_of(account_id))
 
 
 # --------------------------------------------------------------------------
@@ -1422,7 +1793,8 @@ def user_keys_api():
     base = request.host_url.rstrip('/')
     for entry in created:
         entry['link'] = f"{base}/activate?key={quote(entry['key'])}"
-    state.log_command("USERS", f"Generated {len(created)} activation key(s) for {created[0]['days']} days", "success")
+    state.log_command("USERS", f"Generated {len(created)} activation key(s) for {created[0]['days']} days", "success",
+                      owner=spaces.ADMIN_SPACE)
     return jsonify({'success': True, 'keys': created})
 
 
@@ -1430,7 +1802,8 @@ def user_keys_api():
 @admin_required
 def user_key_delete(key):
     if dash_users.delete_key(key):
-        state.log_command("USERS", f"Activation key {key} deleted", "info")
+        state.log_command("USERS", f"Activation key {key} deleted", "info",
+                          owner=spaces.ADMIN_SPACE)
         return jsonify({'success': True})
     return jsonify({'success': False, 'error': 'No such key'}), 404
 
@@ -1447,8 +1820,18 @@ def users_api():
 @admin_required
 def user_detail_api(user_id):
     if request.method == 'DELETE':
+        # stop whatever that space is still running before its accounts.json goes
+        # away, otherwise the bots keep farming with no file behind them
+        from core import supervisor
+        try:
+            owner = spaces.normalise_owner(user_id)
+        except spaces.InvalidOwner:
+            owner = None
+        if owner and state.bots_for(owner):
+            _bot_loop_fire(supervisor.stop_all(owner))
         if dash_users.delete_user(user_id):
-            state.log_command("USERS", f"Dashboard user {user_id} deleted", "info")
+            state.log_command("USERS", f"Dashboard user {user_id} deleted (space wiped)", "info",
+                              owner=spaces.ADMIN_SPACE)
             return jsonify({'success': True})
         return jsonify({'success': False, 'error': 'No such user'}), 404
 
@@ -1468,14 +1851,15 @@ def user_detail_api(user_id):
 
     if error:
         return jsonify({'success': False, 'error': error}), 400
-    state.log_command("USERS", f"Dashboard user {user['email']}: {action}", "info")
+    state.log_command("USERS", f"Dashboard user {user['email']}: {action}", "info",
+                      owner=spaces.ADMIN_SPACE)
     return jsonify({'success': True, 'user': user})
 
 
 @app.route('/api/users/key_status', methods=['POST'])
 def user_key_status():
     """Open on purpose - the activate page checks a key before asking for a password."""
-    ip = request.remote_addr
+    ip = client_ip()
     allowed, wait_time = check_rate_limit(ip)
     if not allowed:
         return jsonify({'success': False, 'error': f'Too many attempts. Try again in {wait_time}s'})

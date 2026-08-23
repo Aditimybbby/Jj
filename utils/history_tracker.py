@@ -11,29 +11,61 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+Session, cash and command history.
+
+Each space (see core/spaces.py) gets its own sqlite database, so a dashboard user
+only ever sees their own analytics. Pass owner=None for the admin space.
 """
 
 import json
 import os
 import time
 import sqlite3
+import threading
 from datetime import datetime
 import calendar
 
+from core import spaces
 from core.paths import DATA_DIR
 
-HISTORY_FILE = os.path.join(DATA_DIR, 'neura_history.db')
 LEGACY_HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 
-def get_db():
-    conn = sqlite3.connect(HISTORY_FILE, check_same_thread=False)
+_ready = set()
+_ready_lock = threading.Lock()
+
+
+def _db_path(owner=None):
+    return spaces.history_path(owner or spaces.ADMIN_SPACE)
+
+
+def get_db(owner=None):
+    path = _db_path(owner)
+    _ensure(path)
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute('pragma journal_mode=wal')
     return conn
 
-def init_db():
-    conn = get_db()
+
+def _connect(path):
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.execute('pragma journal_mode=wal')
+    return conn
+
+
+def _ensure(path):
+    """Create the schema the first time a space's database is touched."""
+    with _ready_lock:
+        if path in _ready:
+            return
+        _ready.add(path)
+    init_db(path)
+    # the pre-sqlite history.json only ever belonged to the operator
+    if path == spaces.history_path(spaces.ADMIN_SPACE):
+        migrate_legacy_json(path)
+
+
+def init_db(path=None):
+    conn = _connect(path or _db_path())
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
@@ -65,15 +97,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-def migrate_legacy_json():
+def migrate_legacy_json(path=None):
     if not os.path.exists(LEGACY_HISTORY_FILE):
         return
-        
+
     try:
         with open(LEGACY_HISTORY_FILE, 'r') as f:
             data = json.load(f)
-            
-        conn = get_db()
+
+        conn = _connect(path or _db_path())
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM sessions')
         if c.fetchone()[0] > 0:
@@ -108,14 +140,11 @@ def migrate_legacy_json():
         print(f"Failed to migrate legacy history: {e}")
 
 
-init_db()
-migrate_legacy_json()
-
 def load_history():
-    return {} 
+    return {}
 
-def start_session(history_data=None):
-    conn = get_db()
+def start_session(history_data=None, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     date_str = datetime.now().strftime("%Y-%m-%d")
     time_str = datetime.now().strftime("%H:%M:%S")
@@ -133,8 +162,8 @@ def start_session(history_data=None):
     
     return {"id": session_id, "date": date_str, "start_time": time_str, "stats": {"hunts": 0, "battles": 0, "commands": 0, "captchas": 0}}
 
-def end_session(history_data=None):
-    conn = get_db()
+def end_session(history_data=None, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     time_str = datetime.now().strftime("%H:%M:%S")
     c.execute('UPDATE sessions SET end_time = ? WHERE end_time IS NULL', (time_str,))
@@ -151,9 +180,9 @@ def _ensure_active_session(c):
         return c.lastrowid
     return row[0]
 
-def track_command(history_data=None, cmd_type=None):
+def track_command(history_data=None, cmd_type=None, owner=None):
     if not cmd_type: return
-    conn = get_db()
+    conn = get_db(owner)
     c = conn.cursor()
     sess_id = _ensure_active_session(c)
     
@@ -169,8 +198,8 @@ def track_command(history_data=None, cmd_type=None):
     conn.commit()
     conn.close()
 
-def track_cash(history_data=None, amount=0):
-    conn = get_db()
+def track_cash(history_data=None, amount=0, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute('INSERT INTO cash_history (timestamp, amount) VALUES (?, ?)', (timestamp, amount))
@@ -183,8 +212,8 @@ def track_cash(history_data=None, amount=0):
     conn.commit()
     conn.close()
 
-def get_session_stats(history_data=None):
-    conn = get_db()
+def get_session_stats(history_data=None, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     c.execute('SELECT hunts, battles, commands, captchas FROM sessions ORDER BY id DESC LIMIT 1')
     row = c.fetchone()
@@ -194,8 +223,8 @@ def get_session_stats(history_data=None):
         return {"hunts": row[0], "battles": row[1], "commands": row[2], "captchas": row[3]}
     return {"hunts": 0, "battles": 0, "commands": 0, "captchas": 0}
 
-def get_all_time_stats(history_data=None):
-    conn = get_db()
+def get_all_time_stats(history_data=None, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     c.execute('SELECT SUM(hunts), SUM(battles), SUM(commands), SUM(captchas), COUNT(id) FROM sessions')
     row = c.fetchone()
@@ -217,8 +246,8 @@ def get_all_time_stats(history_data=None):
         "total_sessions": 0
     }
 
-def get_analytics_data(start_date=None, end_date=None):
-    conn = get_db()
+def get_analytics_data(start_date=None, end_date=None, owner=None):
+    conn = get_db(owner)
     c = conn.cursor()
     
     query = 'SELECT id, date, start_time, end_time, hunts, battles, commands, captchas FROM sessions'
@@ -273,7 +302,7 @@ def get_analytics_data(start_date=None, end_date=None):
     for row in c.fetchall():
         cash_history.append({"timestamp": row[0], "amount": row[1]})
         
-    totals = get_all_time_stats()
+    totals = get_all_time_stats(owner=owner)
     conn.close()
     
     return {

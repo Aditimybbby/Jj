@@ -10,13 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 # you can singup by using this link to support this project 
 # https://getcaptchasolution.com/nvmcytttsy 
 
