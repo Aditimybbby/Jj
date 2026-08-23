@@ -220,19 +220,17 @@
     text-align: center;
     font-family: var(--font-mono);
 }
-.social-links {
-    display: flex;
-    justify-content: center;
-    gap: 15px;
-    margin-bottom: 15px;
+/* whose space the sidebar is currently showing */
+.space-label {
+    font-size: 0.7rem;
+    color: #666;
+    text-align: center;
+    font-family: var(--font-mono);
+    margin: 10px 0 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
-.social-btn {
-    color: #555;
-    transition: 0.3s;
-    cursor: pointer;
-    font-size: 1.2rem;
-}
-.social-btn:hover { color: #ff0000; transform: translateY(-2px); }
 
 
 .mobile-menu-toggle {

@@ -9,13 +9,6 @@
 # You should have received a copy of the GNU General Public License
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 
 import os
 import sys
@@ -25,14 +18,14 @@ from rich.console import Console
 from rich.align import Align
 from rich.live import Live
 
-AUTHOR = "ROUTO"
+TAGLINE = "Multi-Account OwO Automation"
 
 MAIN_LOGO = rf"""[#ff0000] _      _    ______   __  ___ _   ___ __  __ ___ ___  ___[/#ff0000]
 [#ff0000]| |    /_\  |_  /\ \ / / | __/_\ | _ \  \/  | __| _ \/ __|[/#ff0000]
 [#ff0000]| |__ / _ \  / /  \ V /  | _/ _ \|   / |\/| | _||   /\__ \ [/#ff0000]
 [#ff0000]|____/_/ \_\/___|  |_|   |_/_/ \_\_|_\_|  |_|___|_|_\|___/[/#ff0000]
 [#ff0000]┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈[/#ff0000]
-[bold cyan]   L A Z Y   F A R M E R S[/bold cyan]  [white]•[/white]  [bold cyan]Made by {AUTHOR}[/bold cyan]
+[bold cyan]   L A Z Y   F A R M E R S[/bold cyan]  [white]•[/white]  [bold cyan]{TAGLINE}[/bold cyan]
 [#ff0000]┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈[/#ff0000]"""
 
 SETUP_LOGO = rf"""[red] _      _    ______   __  ___ _   ___ __  __ ___ ___  ___[/red]
@@ -40,7 +33,7 @@ SETUP_LOGO = rf"""[red] _      _    ______   __  ___ _   ___ __  __ ___ ___  ___
 [red]| |__ / _ \  / /  \ V /  | _/ _ \|   / |\/| | _||   /\__ \ [/red]
 [red]|____/_/ \_\/___|  |_|   |_/_/ \_\_|_\_|  |_|___|_|_\|___/[/red]
 [bold blue]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold blue]
-[bold cyan]      l a z y   f a r m e r s   s e t u p      Made by {AUTHOR}      [/bold cyan]
+[bold cyan]      l a z y   f a r m e r s   s e t u p      [/bold cyan]
 [bold blue]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold blue]"""
 
 NOISE = "█▓▒░@#$%&/=+*<>"

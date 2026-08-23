@@ -41,6 +41,18 @@ config/dashboard_users.json.tmp
 config/settings_*.json
 sc_stdout.txt
 
+# admin credentials - copy config/auth.example.json to config/auth.json to set up
+config/auth.json
+# flask session signing key, generated on first boot
+config/secret.key
+# pre-spaces leftovers; accounts and proxies now live in data/users/<owner>/
+config/accounts.json
+config/proxies.json
+config/*.migrated
+
+# per-user spaces: tokens, proxies, settings and history
+data/users/
+
 # ===============================
 # Virtual environments
 # ===============================

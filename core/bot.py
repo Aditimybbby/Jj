@@ -10,10 +10,8 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+One NeuraBot per Discord account.
 """
 
 
@@ -35,6 +33,7 @@ from component_v2_neura import setup_interactions
 from modules.captcha_solver import setup_solver
 from modules.web_solver import setup_web_solver
 import core.state as state
+from core import spaces
 import aiohttp
 import unicodedata
 import copy
@@ -44,11 +43,16 @@ from rich.align import Align
 
 _log = logging.getLogger(__name__)
 
+CURRENT_VERSION = "2.5.0"
+
 class NeuraBot(commands.Bot):
-    def __init__(self, token=None, channels=None, proxy_url=None, proxy_auth=None, proxy_label="direct"):
+    def __init__(self, token=None, channels=None, proxy_url=None, proxy_auth=None, proxy_label="direct",
+                 owner_id=spaces.ADMIN_SPACE):
         self.session = None
         self.base_dir = state.BASE_DIR
+        # the shared defaults; the per-account override lives in this bot's space
         self.config_file = os.path.join(state.CONFIG_DIR, 'settings.json')
+        self.owner_id = spaces.normalise_owner(owner_id)
         
         self.console = Console()
         self.aliases = {}
@@ -138,7 +142,7 @@ class NeuraBot(commands.Bot):
         
         try:
             history = state.ht.load_history()
-            state.ht.start_session(history)
+            state.ht.start_session(history, owner=self.owner_id)
         except Exception as e:
             self.log("ERROR", f"Failed to start history session: {e}")
 
@@ -192,6 +196,9 @@ class NeuraBot(commands.Bot):
         self.username = self.user.name
         self.display_name = self.user.display_name
         self.user_display_name = self.display_name
+
+        # so the dashboard can tell which space a running account belongs to
+        state.account_owners[self.user_id] = self.owner_id
         
         self.identifiers = [
             self.username.lower(),
@@ -416,7 +423,7 @@ class NeuraBot(commands.Bot):
             return
         try:
             from utils import proxy_manager
-            proxy_manager.set_account_status(name, status, reason)
+            proxy_manager.set_account_status(self.owner_id, name, status, reason)
         except Exception as e:
             _log.warning("could not record account status: %s", e)
 
@@ -629,9 +636,19 @@ class NeuraBot(commands.Bot):
             uid = getattr(self, 'user_id', None)
             if not uid and hasattr(self, '_connection') and self.user:
                 uid = str(self.user.id)
-            
+
+            # three layers: the shipped defaults, then whatever this space chose
+            # for all of its accounts, then this one account's overrides
+            space_config_file = spaces.settings_path(self.owner_id)
+            if os.path.exists(space_config_file):
+                try:
+                    with open(space_config_file, 'r') as f:
+                        self._deep_merge(self.config, json.load(f))
+                except Exception as e:
+                    self.log("ERROR", f"Failed to load space settings.json: {e}")
+
             if uid:
-                user_config_file = os.path.join(state.CONFIG_DIR, f'settings_{uid}.json')
+                user_config_file = spaces.settings_path(self.owner_id, uid)
                 
                 if os.path.exists(user_config_file):
                     try:
@@ -651,7 +668,7 @@ class NeuraBot(commands.Bot):
             else:
                 self.log("SYS", "Using global settings: settings.json")
 
-            account_file = os.path.join(state.CONFIG_DIR, 'accounts.json')
+            account_file = spaces.accounts_path(self.owner_id)
             if os.path.exists(account_file):
                 try:
                     with open(account_file, 'r') as f:
@@ -704,36 +721,8 @@ class NeuraBot(commands.Bot):
 
 
     def check_version(self):
-        CURRENT_VERSION = "2.4.4" 
-        VERSION_URL = "https://raw.githubusercontent.com/routo-loop/neura_status_api/main/version.json"
-        
-        self.log("SYS", "Checking for updates...")
-        try:
-            r = requests.get(VERSION_URL, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                latest_version = data.get("version", "2.4.4")
-                changelog = data.get("changelog", "No changes listed.")
-                
-                if latest_version != CURRENT_VERSION:
-                    os.system('cls' if os.name == 'nt' else 'clear')
-                    line = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
-                    self.console.print("\n")
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center(f"[bold white]   NEW VERSION AVAILABLE: [yellow]{latest_version}[/yellow] (Current: {CURRENT_VERSION})[/bold white]"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center(f"\n[bold cyan]CHANGELOG:[/bold cyan]\n[white]{changelog}[/white]\n"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center("[bold yellow]PLEASE UPDATE TO CONTINUE:[/bold yellow]"))
-                    self.console.print(Align.center("[bold cyan]https://github.com/routo-loop/neura-self[/bold cyan]"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print("\n")
-                    sys.exit(0)
-                else:
-                    self.log("SYS", "You are on the latest version.")
-        except Exception as e:
-            self.log("WARN", f"Version check failed: {e}")
-    
+        self.log("SYS", f"LazyFarmers {CURRENT_VERSION}")
+
     async def run_bot(self):
         self.check_version()
         route = f"via {self.proxy_label}" if self.proxy_label != "direct" else "direct connection"

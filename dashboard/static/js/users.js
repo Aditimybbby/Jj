@@ -21,8 +21,8 @@ window.sessionInfo = { is_admin: false };
 let activationKeys = [];
 let dashboardUsers = [];
 
-// the sidebar and the account-management block only make sense for the admin,
-// so ask the server who we are and drop everything marked data-admin-only
+// Only the Users tab is admin-only now - everyone else gets full control of their
+// own space, so ask the server who we are and drop what does not apply.
 window.applySessionRole = async function() {
     try {
         const res = await fetch('/api/session');
@@ -31,6 +31,15 @@ window.applySessionRole = async function() {
     } catch (e) {
         return;
     }
+    // the token rotates with the session, so take the fresh one over the meta tag
+    if (window.setCsrfToken) window.setCsrfToken(window.sessionInfo.csrf_token);
+
+    const spaceEl = document.getElementById('spaceLabel');
+    if (spaceEl && window.sessionInfo.space_label) {
+        spaceEl.textContent = window.sessionInfo.space_label;
+        spaceEl.title = `You are working in the "${window.sessionInfo.space_label}" space`;
+    }
+
     if (window.sessionInfo.is_admin) return;
     document.querySelectorAll('[data-admin-only]').forEach(el => el.remove());
     const nameEl = document.getElementById('currentAccountName');
@@ -219,7 +228,7 @@ window.changeUserPassword = async function(userId) {
 };
 
 window.deleteUser = async function(userId, email) {
-    if (!confirm(`Delete ${email}? Their login stops working right away.`)) return;
+    if (!confirm(`Delete ${email}?\n\nThis stops their bots and permanently wipes their space — accounts, tokens, proxies, settings and history. It cannot be undone.`)) return;
     const data = await usersRequest(`/api/users/${encodeURIComponent(userId)}`, 'DELETE');
     if (data.success) {
         showToast('User deleted', 'success');
@@ -244,13 +253,4 @@ async function usersRequest(url, method, body) {
 function fmtDate(ts) {
     if (!ts) return 'never';
     return new Date(ts * 1000).toLocaleString();
-}
-
-function escHtml(s) {
-    return String(s === null || s === undefined ? '' : s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function escAttr(s) {
-    return escHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }

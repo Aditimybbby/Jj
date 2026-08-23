@@ -65,11 +65,11 @@ async function fetchSecuritySummary() {
                 <div class="sec-account-card ${d.status === "PAUSED" ? 'alert-active' : ''} ${isActive ? 'selected' : ''}">
                     <div class="sec-acc-header">
                         <div class="sec-acc-info">
-                            ${acc.avatar ? `<img src="${acc.avatar}" class="account-avatar-lg" alt="">` : '<span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url(\'/static/assets/neura_icons/discord.svg\');"></span>'}
+                            ${acc.avatar ? `<img src="${escAttr(acc.avatar)}" class="account-avatar-lg" alt="">` : '<span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url(\'/static/assets/neura_icons/discord.svg\');"></span>'}
                             <div class="sec-acc-text">
-                                <div class="sec-acc-name">${acc.username}</div>
-                                <div class="sec-acc-id">User ID · ${acc.id}</div>
-                                <div class="sec-acc-status" style="color:${statusColor}">${d.status}</div>
+                                <div class="sec-acc-name">${escHtml(acc.username)}</div>
+                                <div class="sec-acc-id">User ID · ${escHtml(acc.id)}</div>
+                                <div class="sec-acc-status" style="color:${statusColor}">${escHtml(d.status)}</div>
                             </div>
                         </div>
                     </div>
@@ -261,9 +261,9 @@ function renderPendingDropdown() {
         const timeStr = formatTime(remaining);
         html += `
             <div class="pending-item ${urgencyClass}">
-                <span class="pending-name">${p.accountName}</span>
+                <span class="pending-name">${escHtml(p.accountName)}</span>
                 <span class="pending-timer">${timeStr}</span>
-                <button class="btn-proxy-sm solve-btn" onclick="triggerManualSolve('${p.accountId}')">Solve</button>
+                <button class="btn-proxy-sm solve-btn" onclick="triggerManualSolve('${jsArg(p.accountId)}')">Solve</button>
             </div>
         `;
     });
@@ -288,12 +288,12 @@ function renderSecurityCards() {
         html += `
             <div class="captcha-card ${urgencyClass}">
                 <div class="captcha-card-header">
-                    <span class="captcha-account">${p.accountName}</span>
+                    <span class="captcha-account">${escHtml(p.accountName)}</span>
                     <span class="captcha-timer">${timeStr}</span>
                 </div>
                 <div class="captcha-card-body">
-                    <button class="btn-control gold" onclick="triggerManualSolve('${p.accountId}')">Solve</button>
-                    <button class="btn-control" onclick="dismissCaptchaCard('${p.accountId}')">Dismiss</button>
+                    <button class="btn-control gold" onclick="triggerManualSolve('${jsArg(p.accountId)}')">Solve</button>
+                    <button class="btn-control" onclick="dismissCaptchaCard('${jsArg(p.accountId)}')">Dismiss</button>
                 </div>
             </div>
         `;
@@ -398,7 +398,7 @@ function _captchaFallbackHtml(accountId) {
         <div class="no-data" style="text-align:center;">
             hCaptcha widget unavailable here.<br>
             <button class="btn-control gold" style="margin-top:10px;"
-                onclick="triggerManualSolve('${accountId}')">Open solve page</button>
+                onclick="triggerManualSolve('${jsArg(accountId)}')">Open solve page</button>
         </div>
     `;
 }

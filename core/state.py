@@ -11,8 +11,7 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+Shared mutable state: live bot instances, per-account stats and the log sink.
 """
 
 
@@ -24,7 +23,15 @@ import datetime
 from collections import deque
 import utils.history_tracker as ht
 
-from core.paths import BASE_DIR, CONFIG_DIR, DATA_DIR
+from core import spaces
+from core.paths import BASE_DIR, CONFIG_DIR, DATA_DIR, USERS_DIR
+
+# move the pre-spaces single-tenant files into the admin space, once
+spaces.migrate_legacy()
+
+# discord user id (str) -> owner id, owned by core.spaces so history_tracker can
+# reach it without importing this module
+account_owners = spaces.account_owners
 
 log_config = {}
 LOG_MISC_PATH = os.path.join(CONFIG_DIR, 'logmisc.json')
@@ -38,6 +45,45 @@ active_session_start = time.time()
 stats = {
     'uptime_start': time.time()
 }
+
+
+def owner_of(bot_id):
+    """Which space a running discord account belongs to."""
+    return account_owners.get(str(bot_id or '')) or spaces.ADMIN_SPACE
+
+
+def bots_for(owner):
+    """Live bots inside one space."""
+    return [b for b in bot_instances if getattr(b, 'owner_id', spaces.ADMIN_SPACE) == owner]
+
+
+def owns_bot(owner, bot):
+    if bot is None:
+        return False
+    return getattr(bot, 'owner_id', spaces.ADMIN_SPACE) == owner
+
+
+def visible_logs(entries, owner, limit=None):
+    """Filter the log sink down to what one space is allowed to read.
+
+    Lines carrying neither an owner nor a bot_id came from the process itself;
+    only the operator sees those.
+    """
+    out = []
+    for entry in entries:
+        tag = entry.get('owner')
+        if tag is None:
+            bot_id = entry.get('bot_id')
+            tag = owner_of(bot_id) if bot_id else None
+        if tag is None:
+            if owner != spaces.ADMIN_SPACE:
+                continue
+        elif tag != owner:
+            continue
+        out.append(entry)
+        if limit and len(out) >= limit:
+            break
+    return out
 
 checking_gems = {}
 missing_gems_cache = {}
@@ -158,9 +204,9 @@ def load_account_stats():
 command_logs = deque(maxlen=1000)
 full_session_history = []
 
-def log_command(type, message, status="info", bot_name=None, bot_id=None):
+def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=None):
     hex_color = log_config.get("colors", {}).get(type, "#ffffff")
-    
+
     if "Sent: owo " in message:
         split_msg = message.split("Sent: owo ")
         if len(split_msg) > 1:
@@ -169,7 +215,7 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None):
                 hex_color = log_config["commands"][cmd_part]
     elif "RPP: owo " in message:
         hex_color = log_config.get("commands", {}).get("rpp", "#00ffff")
-        
+
     entry = {
         "time": time.strftime("%I:%M:%S %p"),
         "timestamp": time.time(),
@@ -178,7 +224,10 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None):
         "status": status,
         "color": hex_color,
         "bot_name": bot_name,
-        "bot_id": bot_id
+        "bot_id": bot_id,
+        # which space may see this line. Bot-attributed entries are resolved from
+        # bot_id; the dashboard passes owner explicitly for its own SYS lines.
+        "owner": owner or (owner_of(bot_id) if bot_id else None),
     }
     
     command_logs.appendleft(entry)
@@ -240,7 +289,7 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None):
         
         if type == "CMD":
             history = ht.load_history()
-            ht.track_command(history, cmd)
+            ht.track_command(history, cmd, owner=owner_of(bot_id))
 
 def record_snapshot(user_id):
     if user_id not in account_stats: return
@@ -253,7 +302,7 @@ def record_snapshot(user_id):
     st.setdefault('cowoncy_history', []).append((now, st['current_cash']))
     
     history = ht.load_history()
-    ht.track_cash(history, st['current_cash'])
+    ht.track_cash(history, st['current_cash'], owner=owner_of(user_id))
     
     if len(st['cowoncy_history']) > 100:
         st['cowoncy_history'].pop(0)

@@ -11,8 +11,7 @@
 
 
 """
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
+Where LazyFarmers keeps its data.
 """
 
 
@@ -28,16 +27,23 @@ BUNDLED_CONFIG_DIR = os.path.join(BASE_DIR, 'config')
 DATA_ROOT = os.environ.get('LAZYFARMERS_DATA_ROOT') or os.environ.get('RAILWAY_VOLUME_MOUNT_PATH') or BASE_DIR
 CONFIG_DIR = os.path.join(DATA_ROOT, 'config')
 DATA_DIR = os.path.join(DATA_ROOT, 'data')
+# one sub-directory per dashboard login, see core/spaces.py
+USERS_DIR = os.path.join(DATA_DIR, 'users')
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(USERS_DIR, exist_ok=True)
 
 if DATA_ROOT == BASE_DIR and any(key.startswith('RAILWAY_') for key in os.environ):
     print("[!] No volume attached - accounts, tokens and stats will be wiped on the next deploy. "
           "Add a volume in Railway (any mount path) or set LAZYFARMERS_DATA_ROOT.", flush=True)
 
 if CONFIG_DIR != BUNDLED_CONFIG_DIR and os.path.isdir(BUNDLED_CONFIG_DIR):
+    # accounts.json / proxies.json are per-space now (core/spaces.py) so they are
+    # deliberately not seeded here
     for name in os.listdir(BUNDLED_CONFIG_DIR):
+        if name in ('accounts.json', 'proxies.json'):
+            continue
         src = os.path.join(BUNDLED_CONFIG_DIR, name)
         dst = os.path.join(CONFIG_DIR, name)
         if os.path.isfile(src) and not os.path.exists(dst):

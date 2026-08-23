@@ -10,13 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 from .parser import (
     V2Component,
     parse_v2_message,

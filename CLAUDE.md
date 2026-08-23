@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-LazyFarmers ("neura-self") is a multi-account Discord **selfbot** that automates the OwO bot game, plus a
+LazyFarmers is a multi-account Discord **selfbot** that automates the OwO bot game, plus a multi-tenant
 Flask web dashboard for monitoring and configuring it. Python 3.10+, `discord.py-self` (pinned commit),
 no build step, no test suite.
 
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 There are no tests and no linter config. The de facto verification step is a syntax/import check:
 
 ```bash
-python -m compileall -q core cogs modules utils neura_engines component_v2_neura dashboard neura.py neura_setup.py
+python -m compileall -q core cogs modules utils lazy_engines component_v2_neura dashboard neura.py neura_setup.py
 ```
 
 Beyond that, changes are validated by running the app and watching the rich console log / dashboard.
@@ -42,7 +42,7 @@ auto-set by Railway), `LAZYFARMERS_HEADLESS`, `LAZYFARMERS_DASHBOARD_USER`,
 
 ### Process shape
 
-`neura.py` → runs `NeuraSetupEngine.environment_healthy()` (self-installs deps and re-execs if not) →
+`neura.py` → runs `LazySetupEngine.environment_healthy()` (self-installs deps and re-execs if not) →
 starts Flask in a **daemon thread** → optional interactive menu → `supervisor.start_all(...)` → idles
 forever. Headless is auto-detected (`LAZYFARMERS_HEADLESS`, any `RAILWAY_*` env var, or no tty) because
 a blocked console prompt would otherwise keep the dashboard from ever serving.
@@ -55,6 +55,56 @@ destroyed; the dashboard drives it so accounts can be started/stopped without re
 must be scheduled with `asyncio.run_coroutine_threadsafe(coro, bot.loop)` or the `_bot_loop_call` /
 `_bot_loop_fire` helpers in `dashboard/app.py` (they use the loop registered by
 `supervisor.bind_loop()`). Setting plain flags like `bot.paused` from a route is fine.
+
+### Per-user spaces (multi-tenancy)
+
+The dashboard has two roles — the admin (`config/auth.json`) and activation-key users
+(`config/dashboard_users.json`) — and **each gets its own data space**. A space is a directory:
+
+```
+data/users/admin/            accounts.json  proxies.json  settings.json  settings_<discord_id>.json  history.db
+data/users/u_<hex>/          same, one per dashboard user
+```
+
+`core/spaces.py` is the only module that turns an owner string into a path, and `normalise_owner()` is
+the only function that does the turning — that is what closes path traversal on this axis. Owner ids
+must match `^(?:admin|u_[0-9a-f]{6,32})$`; Discord ids must match `^\d{5,25}$`. Use
+`spaces.accounts_path(owner)` / `proxies_path(owner)` / `settings_path(owner, discord_id)` /
+`history_path(owner)`; never join `DATA_DIR` by hand. `migrate_legacy()` runs once on `core.state`
+import and moves a pre-existing single-tenant `config/{accounts,proxies,settings_*}.json` into the
+admin space.
+
+Everything downstream carries the owner explicitly:
+
+- `utils/proxy_manager.py` — owner is the **first argument** of every stateful function.
+- `core/supervisor.py` — `find_bot(owner, name)`, `start_account(account, owner)`,
+  `stop_account(owner, name)`, `start_all(accounts, owner)`, `stop_all(owner=None)`,
+  `running_names(owner=None)`. Keying on `(owner, name)` is what stops two tenants who both named an
+  account `acc1` from stopping each other's bot.
+- `NeuraBot` — `self.owner_id`, set from the supervisor; `bot.log`/`flag_account`/`_load_config` all
+  route through it.
+- `core/state.py` — `account_owners` (Discord id string → owner), `owner_of(id)`, `bots_for(owner)`,
+  `owns_bot(owner, id)`, `visible_logs(owner)`, and `log_command(..., owner=None)`.
+
+**Isolation in the dashboard is two chokepoints, not per-route checks.** `@space_required` resolves
+`flask.g.owner` once, and `get_bot(account_id, owner)` only ever searches `state.bots_for(owner)` — so a
+foreign Discord id is indistinguishable from a nonexistent one. `owns_account(account_id, owner)` is the
+same check for routes that do not need the bot object. When adding a route:
+
+- reads/writes inside one space → `@space_required`, then `g.owner`
+- user management (`/api/users*`) and `/api/debug*` → `@admin_required`
+- writing the true global `config/settings.json` (`?global=true`) → `@admin_required`
+- called from the bot loop, not a request → there is no session, so take the owner from the account:
+  `state.owner_of(account_id)`
+
+Every non-GET `/api/*` request needs an `X-CSRF-Token` header matching the per-session token; the
+`window.fetch` wrapper in `dashboard/static/js/core.js` attaches it to same-origin calls, so individual
+call sites do not. Per-space caps live in `MAX_ACCOUNTS_PER_SPACE` / `MAX_PROXIES_PER_SPACE`
+(`dashboard/app.py`, overridable via `LAZYFARMERS_MAX_ACCOUNTS` / `LAZYFARMERS_MAX_PROXIES`).
+
+The Flask signing secret is `config/secret.key` (generated with `secrets.token_hex(32)` at mode 0600 on
+first boot). There is **no constant fallback** — do not add one; a known secret means anyone can sign a
+cookie carrying `is_admin: True`.
 
 ### Command pipeline (the core abstraction)
 
@@ -86,8 +136,13 @@ Details that matter when adding a command module:
 
 ### Config layering and live reload
 
-`config/settings.json` is the global default. On first ready, each account writes and thereafter reads
-`config/settings_<user_id>.json`, deep-merged **over** the global (`NeuraBot._load_config`).
+Three layers, deep-merged in this order by `NeuraBot._load_config`:
+
+1. `config/settings.json` — the shipped global default (admin-only to write)
+2. `data/users/<owner>/settings.json` — one space's default for every account in it
+3. `data/users/<owner>/settings_<discord_id>.json` — the per-account override, written on first ready
+
+Paths come from `core.spaces.settings_path(owner, discord_id=None)`; never build one by hand.
 
 `POST /api/settings` writes the file(s) then calls `bot.sync_settings(new_config)`, which diffs dotted
 paths and refreshes *only* the affected cogs. Three maps in `core/bot.py` drive that:
@@ -107,9 +162,11 @@ use `state.CONFIG_DIR` / `state.DATA_DIR` — hardcoding `config/` writes to the
 instead of the volume.
 
 `core/state.py` holds the shared mutable state: `bot_instances`, `account_stats` (keyed by Discord user
-id **string**), the `command_logs` deque the dashboard renders, and the `checking_gems` /
-`missing_gems_cache` coordination dicts. `utils/history_tracker.py` persists sessions and cash to SQLite
-at `DATA_DIR/neura_history.db` (it migrates a legacy `history.json` on import).
+id **string**), the `command_logs` deque the dashboard renders, the `account_owners` map (Discord id →
+space) and the `checking_gems` / `missing_gems_cache` coordination dicts. `utils/history_tracker.py`
+persists sessions and cash to a **per-space** SQLite db at `spaces.history_path(owner)`; every public
+function takes `owner=None` (None means the admin space, which keeps the legacy
+`DATA_DIR/neura_history.db` file so no history is lost).
 
 **`state.log_command` is load-bearing.** It is both the log sink and the stats counter: it parses log
 *message text* (`"Sent: owo hunt"`, `"captcha solved"`, `"ban detected"`, …) to increment counters and
@@ -163,9 +220,13 @@ parser; a rejected click un-deduped so the next card retries. Gate: `commands.qu
 
 ### Accounts and proxies
 
-`config/accounts.json` is `{"accounts": [{name, token, channels, enabled, proxy_id, status, ...}]}`.
-`utils/proxy_manager.py` is the single reader/writer for it *and* the proxy pool (`config/proxies.json`,
-parse/bulk-import/test/auto-assign). `bot.flag_account(status, reason)` writes back
+`data/users/<owner>/accounts.json` is `{"accounts": [{name, token, channels, enabled, proxy_id, status,
+...}]}`. `utils/proxy_manager.py` is the single reader/writer for it *and* the proxy pool
+(`data/users/<owner>/proxies.json`, parse/bulk-import/test/auto-assign) — **every public function takes
+the owner as its first argument**: `load_accounts(owner)`, `save_proxies(owner, proxies)`,
+`resolve_account_proxy(owner, account)`, `bulk_import(owner, text, limit=None)`, and so on. The pure
+helpers (`parse_proxy_line`, `build_proxy_url`, `get_proxy_auth`, `test_proxy`, `mask_token`) take no
+owner. `bot.flag_account(status, reason)` writes back
 `invalid_token` / `needs_verification` / `cannot_send` so the dashboard can group broken accounts and
 `/api/accounts/export?only=problem` can dump them. SOCKS proxies get an `aiohttp_socks.ProxyConnector`.
 
@@ -180,14 +241,14 @@ user id token after the trigger (`farmers acc2 bal`) narrows it to one account.
 
 Every `NeuraBot` shares **one** asyncio loop (`neura.py` binds it, `supervisor.start_account` creates each
 runner as a task on it), so `await peer.neura_enqueue(...)` across instances is safe — no
-`run_coroutine_threadsafe`. `neura_engines/coop.py` is the single place that decides whether a sibling may
+`run_coroutine_threadsafe`. `lazy_engines/coop.py` is the single place that decides whether a sibling may
 be leaned on: `peers(bot)` returns live accounts that are ready, unpaused, past warmup, not sitting on an
 unsolved captcha (`throttle_until == inf`) **and** sharing a channel with the asker (`shared_channel` —
 OwO only credits a social interaction it can see both sides of). `is_initiator(bot, peer)` compares user
 ids so exactly one side of a two-sided action starts it, and `may_ask`/`note_ask` hold a
 process-wide `(giver, receiver, action)` cooldown table.
 
-`cogs/coop.py` schedules the periodic friendly battle (`coop_offer`); `neura_engines/quest_engine.py`
+`cogs/coop.py` schedules the periodic friendly battle (`coop_offer`); `lazy_engines/quest_engine.py`
 routes social quests (pray/curse/cookie/emote/battle-with-a-friend) through `coop.ask_peer`.
 `cogs/response_handler.py` already auto-accepts any duel it is mentioned in and stamps
 `bot.last_duel_accept`, which `Coop.arm_accept_fallback` checks before sending a backup `owo ab`.
@@ -225,15 +286,18 @@ new settings key appears without frontend work; only its hint text (`CONFIG_CATE
 
 ## Conventions
 
-- Every source file starts with the GPL header block and an `Author: Routo` docstring; copy that when
-  adding files.
+- Every source file starts with the 10-line GPL header block (including its
+  `Copyright (c) 2025-Present Routo` licence line); copy that when adding files. Do **not** add author,
+  Discord, YouTube or upstream-repo links — those were stripped deliberately.
 - New cogs are auto-discovered: `NeuraBot._load_cogs` loads every `cogs/*.py`. Provide
   `async def setup(bot)`; add `register_actions()` if the cog schedules commands (it is re-run on every
   ready and on relevant config changes, so it must be idempotent).
 - Log through `bot.log(TYPE, message)`, not `print`. Types in use: `SYS`, `CMD`, `INFO`, `SUCCESS`,
   `COOLDOWN`, `STEALTH`, `GAMBLING`, `SECURITY`, `ALARM`, `WARN`, `ERROR`, `DEBUG`; colors come from
   `config/logmisc.json`.
-- `NeuraBot.check_version` compares the hardcoded `CURRENT_VERSION` in `core/bot.py` against a remote
-  `version.json` and calls `sys.exit(0)` on mismatch — bots refuse to start when it disagrees.
-- Secrets live in `config/auth.json`, `config/accounts.json` and the generated
-  `config/settings_<user_id>.json`; none of these are gitignored, so don't commit a populated copy.
+- `CURRENT_VERSION` in `core/bot.py` is a display string only. `check_version` used to fetch a remote
+  `version.json` and `sys.exit(0)` on mismatch — a kill-switch pointed at someone else's repo. It is
+  gone; do not reintroduce a remote version gate.
+- Secrets live in `config/auth.json`, `config/secret.key`, `config/dashboard_users.json` and every
+  `data/users/<owner>/{accounts.json,settings_*.json}`. The first three are gitignored; keep it that
+  way and never commit a populated copy.

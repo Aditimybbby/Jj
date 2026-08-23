@@ -51,16 +51,12 @@ window.nav = function(id, el) {
             toggleMobileMenu();
         }
     }
-    const isAdmin = !window.sessionInfo || window.sessionInfo.is_admin;
     if (id === 'accounts') {
         renderAccountGrid();
-        // account config and proxies are admin-only endpoints
-        if (isAdmin) {
-            fetchAccountConfig();
-            if (typeof fetchProxies === 'function') fetchProxies();
-        }
+        fetchAccountConfig();
+        if (typeof fetchProxies === 'function') fetchProxies();
     }
-    if (id === 'proxies' && isAdmin && typeof fetchProxies === 'function') fetchProxies();
+    if (id === 'proxies' && typeof fetchProxies === 'function') fetchProxies();
     if (id === 'config') loadConfig();
     if (id === 'history') loadHistory();
     if (id === 'security') {

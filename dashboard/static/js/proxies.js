@@ -65,14 +65,14 @@ function renderProxyTable() {
     body.innerHTML = proxyList.map((p, i) => `
         <tr>
             <td>${i + 1}</td>
-            <td>${p.label || '-'}</td>
-            <td>${p.type || 'socks5'}</td>
-            <td class="mono">${p.host}:${p.port}</td>
+            <td>${escHtml(p.label || '-')}</td>
+            <td>${escHtml(p.type || 'socks5')}</td>
+            <td class="mono">${escHtml(p.host)}:${escHtml(p.port)}</td>
             <td>${statusBadge(p.status || 'unknown')}</td>
-            <td>${p.assigned_to || '-'}</td>
+            <td>${escHtml(p.assigned_to || '-')}</td>
             <td class="proxy-actions">
-                <button class="btn-proxy-sm" onclick="testProxy('${p.id}')">Test</button>
-                <button class="btn-proxy-sm danger" onclick="deleteProxy('${p.id}')">Del</button>
+                <button class="btn-proxy-sm" onclick="testProxy('${jsArg(p.id)}')">Test</button>
+                <button class="btn-proxy-sm danger" onclick="deleteProxy('${jsArg(p.id)}')">Del</button>
             </td>
         </tr>
     `).join('');
@@ -100,7 +100,7 @@ window.bulkImportProxies = async function() {
             let msg = `Added ${data.added} proxies.`;
             if (data.errors && data.errors.length) {
                 msg += ` ${data.errors.length} line(s) skipped.`;
-                const errLines = data.errors.slice(0, 5).map(e => `Line ${e.line}: ${e.error}`).join('<br>');
+                const errLines = data.errors.slice(0, 5).map(e => `Line ${escHtml(e.line)}: ${escHtml(e.error)}`).join('<br>');
                 resultEl.innerHTML = `<div class="proxy-bulk-ok">${msg}</div><div class="proxy-bulk-err">${errLines}</div>`;
             } else {
                 resultEl.innerHTML = `<div class="proxy-bulk-ok">${msg}</div>`;
@@ -256,7 +256,7 @@ function populateAccountProxyDropdown() {
     const current = sel.value;
     sel.innerHTML = '<option value="">None (direct)</option>' +
         proxyList.filter(p => p.enabled !== false).map(p =>
-            `<option value="${p.id}">${p.label || p.host + ':' + p.port} [${p.type || 'socks5'}]</option>`
+            `<option value="${escAttr(p.id)}">${escHtml(p.label || p.host + ':' + p.port)} [${escHtml(p.type || 'socks5')}]</option>`
         ).join('');
     if (current) sel.value = current;
 }

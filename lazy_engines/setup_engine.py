@@ -10,13 +10,6 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
-"""
-Author: Routo
-LazyFarmers - https://github.com/routo-loop/neura-self
-"""
-
-
-
 import asyncio
 import json
 import os
@@ -30,6 +23,7 @@ from datetime import datetime
 from importlib.metadata import distributions, version, PackageNotFoundError
 
 import core.state as state
+from core import spaces
 from utils import proxy_manager
 from utils.platform import is_termux
 
@@ -49,10 +43,9 @@ except ImportError:
 
 console = Console()
 SETUP_LOG = os.path.join(state.DATA_DIR, "setup.log")
-DEFAULT_PASSWORD = "lazyfarmers_default_password_change_me"
 REQUIRED_VERSION_SUFFIX = "+g20ae80b3"
 
-class NeuraSetupEngine:
+class LazySetupEngine:
     def __init__(self):
         self._log_lines = []
         self._ready = False
@@ -168,31 +161,27 @@ class NeuraSetupEngine:
         return True
 
     def ensure_config_files(self):
-        accounts_path = os.path.join(state.CONFIG_DIR, "accounts.json")
-        if not os.path.exists(accounts_path):
-            with open(accounts_path, "w", encoding="utf-8") as f:
-                json.dump({"accounts": []}, f, indent=4)
-            self._console_log("ok", "created config/accounts.json")
-
-        proxies_path = os.path.join(state.CONFIG_DIR, "proxies.json")
-        if not os.path.exists(proxies_path):
-            with open(proxies_path, "w", encoding="utf-8") as f:
-                json.dump({"proxies": []}, f, indent=4)
-            self._console_log("ok", "created config/proxies.json")
+        # the terminal menu is the operator's tool, so it works on the admin space
+        spaces.ensure_space(spaces.ADMIN_SPACE)
 
         auth_path = os.path.join(state.CONFIG_DIR, "auth.json")
         if not os.path.exists(auth_path):
+            # a constant default password in a public repo is a free admin login,
+            # so mint a random one and show it once
+            password = secrets.token_urlsafe(12)
             with open(auth_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "username": "admin",
-                        "password": DEFAULT_PASSWORD,
-                        "secret_key": secrets.token_hex(32),
-                    },
-                    f,
-                    indent=4,
-                )
-            self._console_log("warn", "default dashboard password set – change it in config/auth.json")
+                json.dump({"username": "admin", "password": password}, f, indent=4)
+            try:
+                os.chmod(auth_path, 0o600)
+            except OSError:
+                pass
+            self._console_log("warn", "generated a dashboard password – see config/auth.json")
+            console.print(Panel(
+                f"Dashboard login\n\n  user: [bold]admin[/bold]\n  pass: [bold]{password}[/bold]\n\n"
+                "Saved to config/auth.json. Change it there if you like.",
+                title="[bold yellow]save this[/bold yellow]",
+                border_style="yellow",
+            ))
 
         settings_path = os.path.join(state.CONFIG_DIR, "settings.json")
         if not os.path.exists(settings_path):
@@ -415,20 +404,20 @@ class NeuraSetupEngine:
         return self.check_python() and self.verify_imports()
 
     def load_accounts(self):
-        return proxy_manager.load_accounts()
+        return proxy_manager.load_accounts(spaces.ADMIN_SPACE)
 
     def save_accounts(self, accounts):
-        proxy_manager.save_accounts(accounts)
-        proxy_manager.sync_proxy_assignments()
+        proxy_manager.save_accounts(spaces.ADMIN_SPACE, accounts)
+        proxy_manager.sync_proxy_assignments(spaces.ADMIN_SPACE)
 
     def load_proxies(self):
-        return proxy_manager.load_proxies()
+        return proxy_manager.load_proxies(spaces.ADMIN_SPACE)
 
     def save_proxies(self, proxies):
-        proxy_manager.save_proxies(proxies)
+        proxy_manager.save_proxies(spaces.ADMIN_SPACE, proxies)
 
     def remove_proxy(self, proxy_id):
-        proxy_manager.remove_proxy(proxy_id)
+        proxy_manager.remove_proxy(spaces.ADMIN_SPACE, proxy_id)
 
     async def verify_token(self, token, channel_ids=None, proxy_url=None, proxy_auth=None):
         if not token or "." not in token:
@@ -472,16 +461,16 @@ class NeuraSetupEngine:
         return proxy_manager.parse_proxy_line(line)
 
     def bulk_import_proxies(self, text):
-        return proxy_manager.bulk_import(text)
+        return proxy_manager.bulk_import(spaces.ADMIN_SPACE, text)
 
     async def test_proxy(self, proxy):
         return await proxy_manager.test_proxy(proxy)
 
     async def test_all_proxies(self):
-        return await proxy_manager.test_all_proxies()
+        return await proxy_manager.test_all_proxies(spaces.ADMIN_SPACE)
 
     def auto_assign_proxies(self):
-        return proxy_manager.auto_assign()
+        return proxy_manager.auto_assign(spaces.ADMIN_SPACE)
 
     def resolve_account_proxy(self, account):
-        return proxy_manager.resolve_account_proxy(account)
+        return proxy_manager.resolve_account_proxy(spaces.ADMIN_SPACE, account)
