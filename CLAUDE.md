@@ -104,8 +104,7 @@ effect on restart.
 `core/paths.py` resolves `DATA_ROOT` (env volume or repo root), derives `CONFIG_DIR` / `DATA_DIR`, and
 copies bundled `config/*` defaults into the volume on first boot. Re-exported through `core.state`, so
 use `state.CONFIG_DIR` / `state.DATA_DIR` — hardcoding `config/` writes to the ephemeral repo copy
-instead of the volume. (A few older call sites still do this: `accounts.json` / `shortform.json` /
-`cmd_priorities.json` reads in `core/bot.py`, `logmisc.json` in `modules/neura_logs.py`.)
+instead of the volume.
 
 `core/state.py` holds the shared mutable state: `bot_instances`, `account_stats` (keyed by Discord user
 id **string**), the `command_logs` deque the dashboard renders, and the `checking_gems` /
@@ -149,12 +148,18 @@ IP.
 
 ### Components V2
 
-OwO now sends "components v2" messages that `discord.py-self` does not model. `cogs/quest.py` therefore
-listens on `on_socket_raw_receive` and walks the raw payload with `component_v2_neura/parser.py`
-(`parse_v2_message` → flat `V2Component` list). Clicking those buttons goes through
-`component_v2_neura/interactions.py`, which hand-builds a `POST /api/v9/interactions` with spoofed
-`X-Super-Properties` (it scrapes Discord's current build number). Quest parsing has both a V2 path and a
-legacy embed path.
+OwO now sends "components v2" messages that `discord.py-self` does not model (`message.content` is
+empty). `cogs/quest.py` and `cogs/others.py` therefore listen on `on_socket_raw_receive` and walk the raw
+payload with `component_v2_neura/parser.py` (`parse_v2_message` → flat `V2Component` list). Clicking those
+buttons goes through `component_v2_neura/interactions.py`, which hand-builds a
+`POST /api/v9/interactions` with spoofed `X-Super-Properties` (it scrapes Discord's current build number).
+Quest and zoo/team/level parsing each have both a V2 path and a legacy embed path.
+
+`buttons(components)` **excludes disabled buttons**, and OwO only enables a quest claim button while the
+reward is actually waiting — so quest claiming is driven off "is there an enabled claim button" rather
+than re-deriving completion from the `N/M` progress text (`Quest._claim_targets`). Claims are deduped per
+`(message_id, custom_id)` because OwO edits the card after each claim and MESSAGE_UPDATE re-enters the
+parser; a rejected click un-deduped so the next card retries. Gate: `commands.quest.auto_claim`.
 
 ### Accounts and proxies
 
@@ -171,14 +176,52 @@ section `owner` (`enabled`, `user_id`, `trigger` — default `farmers`). `farmer
 `showbal` are special-cased; anything else is forwarded verbatim as an OwO command. An account name or
 user id token after the trigger (`farmers acc2 bal`) narrows it to one account.
 
+### Cross-account coop
+
+Every `NeuraBot` shares **one** asyncio loop (`neura.py` binds it, `supervisor.start_account` creates each
+runner as a task on it), so `await peer.neura_enqueue(...)` across instances is safe — no
+`run_coroutine_threadsafe`. `neura_engines/coop.py` is the single place that decides whether a sibling may
+be leaned on: `peers(bot)` returns live accounts that are ready, unpaused, past warmup, not sitting on an
+unsolved captcha (`throttle_until == inf`) **and** sharing a channel with the asker (`shared_channel` —
+OwO only credits a social interaction it can see both sides of). `is_initiator(bot, peer)` compares user
+ids so exactly one side of a two-sided action starts it, and `may_ask`/`note_ask` hold a
+process-wide `(giver, receiver, action)` cooldown table.
+
+`cogs/coop.py` schedules the periodic friendly battle (`coop_offer`); `neura_engines/quest_engine.py`
+routes social quests (pray/curse/cookie/emote/battle-with-a-friend) through `coop.ask_peer`.
+`cogs/response_handler.py` already auto-accepts any duel it is mentioned in and stamps
+`bot.last_duel_accept`, which `Coop.arm_accept_fallback` checks before sending a backup `owo ab`.
+Config section `coop` (`enabled`, `quests.enabled`, `battle.{enabled,interval_min,min_gap_s,arbitrate}`,
+`fallback_targets`). `fallback_targets` is a *list* of user ids — it is in `isListField` in
+`dashboard/static/js/config.js` so the UI writes an array, not a comma string.
+
+### Zoo team watcher
+
+`cogs/others.py` owns both the OwO level sync and the battle team. `parse_zoo` reads the zoo card (v2 or
+legacy), ranks every owned animal, and `_apply_team_upgrade` swaps in anything rarer — with hysteresis so
+a same-tier tie does not churn the team every scan. `_watch_hunt` is the watcher: a hunt result is the
+moment the zoo changes, so a catch rarer than the weakest team slot triggers `request_team_check`
+immediately instead of waiting for the `team_scan` timer. Config: `commands.team.{enabled,slots,watch_zoo,
+min_action_gap_s}`.
+
+When OwO answers `owo level` with a rendered image card, `_note_level_unreadable()` sets
+`stats['level_source'] = 'image'` and leaves level/xp blank; the dashboard renders "image card ·
+unreadable" rather than a stale number. Do not reintroduce a guess here.
+
 ### Dashboard frontend
 
 `dashboard/templates/index.html` is a single page of `.view` divs toggled by `window.nav()`. Plain
 global-function JS, **load order matters**: `core.js` declares the shared globals (`currentConfig`,
 `currentAccountId`, chart handles), feature files follow, `init.js` is last and wires
 `DOMContentLoaded` plus the polling intervals (1 s stats, 2 s captcha, 5 s accounts). CSS is split
-`base/layout/components/responsive` + `pages/*.css`, both linked with `?v=` cache-busting. No bundler —
+`base/layout/components/responsive` + `pages/*.css`. Every css *and* js tag carries
+`?v={{ asset_v }}`, injected by the `inject_asset_version` context processor in `dashboard/app.py` from
+the newest mtime under `static/` — so an edited file busts the cache on the next reload. No bundler —
 edit and reload.
+
+The config view is generated from the config object itself (`buildConfigCategories` in `config.js`), so a
+new settings key appears without frontend work; only its hint text (`CONFIG_CATEGORY_HINTS` /
+`CONFIG_CMD_HINTS` in `core.js`) and any list/select special-casing need adding.
 
 ## Conventions
 

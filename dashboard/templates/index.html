@@ -27,17 +27,17 @@
         rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
-    <link rel="stylesheet" href="/static/css/base.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/layout.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/components.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/accounts.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/dashboard.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/config.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/proxies.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/security.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/history.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/pages/users.css?v=2.4.1.0">
-    <link rel="stylesheet" href="/static/css/responsive.css?v=2.4.1.0">
+    <link rel="stylesheet" href="/static/css/base.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/layout.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/components.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/accounts.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/dashboard.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/config.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/proxies.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/security.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/history.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/pages/users.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/responsive.css?v={{ asset_v }}">
 </head>
 
 <body>
@@ -373,6 +373,21 @@
                         style="display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:15px;">
                     </div>
                 </div>
+                <div id="team-section" class="panel-card">
+                    <div class="panel-head">
+                        <h2><span class="icon-svg"
+                                style="--icon: url('/static/assets/neura_icons/battle-net.svg');"></span> Battle Team
+                        </h2>
+                        <div id="teamMeta" class="team-meta"></div>
+                    </div>
+                    <div id="teamSlots" class="team-slots">
+                        <div class="team-empty">No battle team read yet</div>
+                    </div>
+                    <div class="team-actions">
+                        <button class="btn-control" onclick="sendQuickCommand('owo zoo')">RE-READ ZOO</button>
+                        <button class="btn-control" onclick="sendQuickCommand('owo team')">RE-READ TEAM</button>
+                    </div>
+                </div>
                 <div id="custom-cmd-section"
                     style="margin-top:20px; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:20px;">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
@@ -638,17 +653,17 @@
         </button>
     </div>
 
-    <script src="/static/js/core.js"></script>
-    <script src="/static/js/navigation.js"></script>
-    <script src="/static/js/accounts.js"></script>
-    <script src="/static/js/proxies.js"></script>
-    <script src="/static/js/security.js"></script>
-    <script src="/static/js/config.js"></script>
-    <script src="/static/js/dashboard.js"></script>
-    <script src="/static/js/custom_commands.js"></script>
-    <script src="/static/js/users.js"></script>
-    <script src="/static/js/history.js"></script>
-    <script src="/static/js/init.js"></script>
+    <script src="/static/js/core.js?v={{ asset_v }}"></script>
+    <script src="/static/js/navigation.js?v={{ asset_v }}"></script>
+    <script src="/static/js/accounts.js?v={{ asset_v }}"></script>
+    <script src="/static/js/proxies.js?v={{ asset_v }}"></script>
+    <script src="/static/js/security.js?v={{ asset_v }}"></script>
+    <script src="/static/js/config.js?v={{ asset_v }}"></script>
+    <script src="/static/js/dashboard.js?v={{ asset_v }}"></script>
+    <script src="/static/js/custom_commands.js?v={{ asset_v }}"></script>
+    <script src="/static/js/users.js?v={{ asset_v }}"></script>
+    <script src="/static/js/history.js?v={{ asset_v }}"></script>
+    <script src="/static/js/init.js?v={{ asset_v }}"></script>
 </body>
 
 </html>

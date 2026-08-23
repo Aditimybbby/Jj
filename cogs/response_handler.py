@@ -88,6 +88,8 @@ class ResponseHandler(commands.Cog):
             if not accepted_via_button:
                 self.bot.log("INFO", "Fallback: Accepting battle challenge via owo ab command...")
                 await self.bot.neura_enqueue("owo ab", priority=4)
+            # the coop cog watches this so it does not send a second `owo ab` on top
+            self.bot.last_duel_accept = time.time()
 
         await self._handle_battle_results(full_content, message)
 

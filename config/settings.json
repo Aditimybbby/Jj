@@ -8,6 +8,19 @@
         "user_id": "put-owner-user-id-here",
         "trigger": "farmers"
     },
+    "coop": {
+        "enabled": true,
+        "quests": {
+            "enabled": true
+        },
+        "battle": {
+            "enabled": true,
+            "interval_min": 20,
+            "min_gap_s": 120,
+            "arbitrate": true
+        },
+        "fallback_targets": []
+    },
     "commands": {
         "owo": {
             "enabled": true,
@@ -154,6 +167,7 @@
         "quest": {
             "enabled": true,
             "auto_solve": true,
+            "auto_claim": true,
             "use_alt_account": true,
             "interval_h": 6
         },
@@ -175,6 +189,8 @@
             "enabled": true,
             "check_interval_min": 45,
             "slots": 3,
+            "watch_zoo": true,
+            "min_action_gap_s": 45,
             "add_template": "team add {animal}",
             "remove_template": "team remove {slot}"
         },

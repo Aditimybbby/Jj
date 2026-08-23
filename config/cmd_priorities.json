@@ -22,5 +22,7 @@
     "team": 5,
     "weapon_scan": 5,
     "weapon": 5,
+    "coop_offer": 5,
+    "coop_battle": 5,
     "custom": 5
 }

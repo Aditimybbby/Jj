@@ -28,7 +28,10 @@ from component_v2_neura import parse_v2_message, collect_text, buttons
 
 QUEST_TITLE_RE = re.compile(r'^\W{0,4}(\d{1,2})\s*[.)\-]\s*(.+)$')
 PROGRESS_RE = re.compile(r'\b(\d+)\s*/\s*(\d+)\b')
-CLAIM_SLOT_RE = re.compile(r'(\d+)')
+# words owo puts on a claim control, on the custom_id or on the visible label
+CLAIM_HINTS = ("claim", "reward")
+# owo swaps the "N/M" counter for a tick once a quest is finished
+DONE_MARKERS = ("✅", "☑", "✔", "🎉", "completed!", "quest complete")
 
 class Quest(commands.Cog):
     def __init__(self, bot):
@@ -36,6 +39,9 @@ class Quest(commands.Cog):
         self.active = True
         self.task = None
         self.engine = NeuraQuestEngine(self.bot)
+        self._claimed = {}
+        self._claim_lock = asyncio.Lock()
+        self._last_recheck = 0.0
 
     async def register_actions(self):
         cfg = self.bot.config.get('commands', {}).get('quest', {})
@@ -89,7 +95,7 @@ class Quest(commands.Cog):
             if not self._v2_text_is_mine(full_text):
                 return
 
-            self._parse_quests_v2(components, data, v2_text)
+            await self._parse_quests_v2(components, data, v2_text)
 
     def _v2_text_is_mine(self, full_text):
         """components v2 messages are invisible to discord.py-self, so match by name."""
@@ -100,25 +106,10 @@ class Quest(commands.Cog):
             idents.add(ident.replace("<@", "").replace("!", "").replace(">", "").lower())
         return any(ident and len(ident) >= 2 and ident in full_text for ident in idents)
 
-    def _parse_quests_v2(self, components, message_data, v2_text=None):
+    async def _parse_quests_v2(self, components, message_data, v2_text=None):
         text = v2_text if v2_text is not None else collect_text(components)
         text = text.replace('*', '').replace('`', '')
         text_lines = [line.strip().lower() for line in text.split('\n') if line.strip()]
-
-        claim_buttons = {}
-        loose_claims = []
-        for comp in buttons(components):
-            cid = comp.custom_id.lower()
-            if "claim" not in cid and "claim" not in (comp.label or "").lower():
-                continue
-            slots = CLAIM_SLOT_RE.findall(cid)
-            if slots:
-                # owo numbers the claim buttons from 0, the quest list from 1
-                slot = int(slots[-1])
-                claim_buttons.setdefault(slot, comp.custom_id)
-                claim_buttons.setdefault(slot + 1, comp.custom_id)
-            else:
-                loose_claims.append(comp.custom_id)
 
         quests = []
         current_quest = None
@@ -174,42 +165,112 @@ class Quest(commands.Cog):
                 st['next_quest_timer'] = timer_match.group(1).upper()
                 break
 
+        await self._claim_rewards(components, message_data, sum(1 for q in quests if q['completed']))
+
+    @staticmethod
+    def _claim_targets(components):
+        """Every *enabled* claim control on the card.
+
+        `buttons()` already drops the disabled ones and owo only enables a claim
+        button while the reward is actually waiting, so this is a far better signal
+        than re-deriving completion from the "N/M" text. Claiming used to be gated on
+        that text plus a slot number scraped out of the custom_id, and when either
+        guess missed - a finished quest rendered with a tick instead of a counter, a
+        custom_id whose trailing digits were not the slot - the reward was left
+        sitting there. That is the "completes but never claims" bug.
+        """
+        found = []
+        for comp in buttons(components):
+            haystack = f"{comp.custom_id} {comp.label or ''}".lower()
+            if any(hint in haystack for hint in CLAIM_HINTS):
+                found.append((comp.custom_id, comp.label or comp.custom_id))
+        return found
+
+    async def _claim_rewards(self, components, message_data, completed_count):
         cfg = self.bot.config.get('commands', {}).get('quest', {})
         if not cfg.get('auto_claim', True):
             return
 
         channel_id = message_data.get("channel_id")
-        if not channel_id:
+        message_id = str(message_data.get("id") or "")
+        if not channel_id or not message_id:
             return
 
-        done = [q for q in quests if q['completed']]
-        for q in done:
-            custom_id = claim_buttons.get(q['slot'])
-            if not custom_id and len(loose_claims) == 1 and len(done) == 1:
-                custom_id = loose_claims[0]
-            if not custom_id:
+        targets = self._claim_targets(components)
+        if not targets:
+            if completed_count:
+                await self._recheck_for_claim(completed_count)
+            return
+
+        for custom_id, label in targets:
+            key = f"{message_id}:{custom_id}"
+            # owo edits the quest card after every claim and MESSAGE_UPDATE brings us
+            # straight back here, so without this the same button is clicked on a loop
+            if key in self._claimed:
                 continue
-            self.bot.log("SUCCESS", f"Quest Engine: Auto-claiming completed quest slot {q['slot']}...")
-            asyncio.create_task(self.bot.interactions.click_button_raw(
-                custom_id=custom_id,
-                message_id=message_data.get("id"),
-                channel_id=int(channel_id),
-                author_id=(message_data.get("author") or {}).get("id"),
-                guild_id=message_data.get("guild_id"),
-                flags=message_data.get("flags", 0)
-            ))
+            self._claimed[key] = time.time()
+
+            async with self._claim_lock:
+                # awaited, not fire-and-forget: click_button_raw returns whether discord
+                # accepted the interaction, and throwing that away meant a rejected claim
+                # looked identical to a successful one
+                try:
+                    ok = await self.bot.interactions.click_button_raw(
+                        custom_id=custom_id,
+                        message_id=message_data.get("id"),
+                        channel_id=int(channel_id),
+                        author_id=(message_data.get("author") or {}).get("id"),
+                        guild_id=message_data.get("guild_id"),
+                        flags=message_data.get("flags", 0)
+                    )
+                except Exception as e:
+                    ok = False
+                    self.bot.log("ERROR", f"Quest claim raised: {e}")
+
+                if ok:
+                    self.bot.log("SUCCESS", f"Quest reward claimed ({label}).")
+                else:
+                    # forget the key so the next card retries instead of skipping forever
+                    self._claimed.pop(key, None)
+                    self.bot.log("ERROR", f"Quest reward claim rejected ({label}) - retrying on the next quest card.")
+
+                await asyncio.sleep(random.uniform(1.1, 2.2))
+
+        if len(self._claimed) > 200:
+            self._claimed.clear()
+
+    async def _recheck_for_claim(self, completed_count):
+        """Finished quests, but the card carried no claim button - ask for a fresh one.
+
+        Deliberately enqueued under its own id: the scheduled `quest` slot sits on a
+        six-hour cooldown, and waiting that long to collect a finished reward is the
+        very thing being fixed here.
+        """
+        if time.time() - self._last_recheck < 300:
+            return
+        self._last_recheck = time.time()
+        self.bot.log(
+            "WARN",
+            f"{completed_count} quest(s) finished but the card had no claim button - "
+            "requesting a fresh quest log."
+        )
+        await self.bot.neura_enqueue("owo quest", priority=4, _cmd_id="quest_claim_recheck")
 
     @staticmethod
     def _apply_progress(quest, line):
         progress_match = PROGRESS_RE.search(line)
         if not progress_match:
+            if any(marker in line for marker in DONE_MARKERS):
+                quest['current'] = quest['total']
+                quest['completed'] = True
+                return True
             return False
         current, total = int(progress_match.group(1)), int(progress_match.group(2))
         if total <= 0:
             return False
         quest['current'] = current
         quest['total'] = total
-        quest['completed'] = current >= total
+        quest['completed'] = current >= total or any(marker in line for marker in DONE_MARKERS)
         return True
 
     @commands.Cog.listener()
@@ -226,11 +287,48 @@ class Quest(commands.Cog):
             return
 
         full_text = self.bot.get_full_content(message)
-        if ("quest log" in full_text or "checklist" in full_text) and not message.components:
-            is_for_me = self.bot.is_message_for_me(message, role="header")
-            if not is_for_me:
+        if "quest log" not in full_text and "checklist" not in full_text:
+            return
+        if not self.bot.is_message_for_me(message, role="header"):
+            return
+
+        completed = self._parse_quests_legacy(full_text)
+
+        # a legacy embed can still carry real buttons, and the old code skipped the
+        # whole message whenever it did - so a claimable reward on an embed card was
+        # never even looked at
+        if message.components:
+            await self._claim_legacy(message, completed)
+
+    async def _claim_legacy(self, message, completed_count):
+        """Claim from an embed-style card using discord.py-self's own button click."""
+        cfg = self.bot.config.get('commands', {}).get('quest', {})
+        if not cfg.get('auto_claim', True):
+            return
+
+        for row in message.components:
+            for btn in getattr(row, 'children', []):
+                if getattr(btn, 'disabled', False):
+                    continue
+                haystack = f"{getattr(btn, 'custom_id', '') or ''} {getattr(btn, 'label', '') or ''}".lower()
+                if not any(hint in haystack for hint in CLAIM_HINTS):
+                    continue
+
+                key = f"{message.id}:{getattr(btn, 'custom_id', '') or haystack}"
+                if key in self._claimed:
+                    continue
+                self._claimed[key] = time.time()
+                try:
+                    await asyncio.sleep(random.uniform(0.8, 1.8))
+                    await btn.click()
+                    self.bot.log("SUCCESS", f"Quest reward claimed ({getattr(btn, 'label', None) or 'claim'}).")
+                except Exception as e:
+                    self._claimed.pop(key, None)
+                    self.bot.log("ERROR", f"Quest reward claim failed: {e}")
                 return
-            self._parse_quests_legacy(full_text)
+
+        if completed_count:
+            await self._recheck_for_claim(completed_count)
 
     def _parse_quests_legacy(self, text):
         progress_pattern = r'progress:\s*\[(\d+)/(\d+)\]'
@@ -287,11 +385,12 @@ class Quest(commands.Cog):
         next_timer = timer_match.group(1).upper() if timer_match else None
         
         valid_quests = [q for q in new_quest_data if 'progress' not in q['description'].lower()]
-        
+
         if valid_quests or "quest log" in text.lower():
             st['quest_data'] = valid_quests
-            
+
         st['next_quest_timer'] = next_timer
+        return sum(1 for q in valid_quests if q.get('completed'))
 
 async def setup(bot):
     cog = Quest(bot)

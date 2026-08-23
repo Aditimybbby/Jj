@@ -426,8 +426,22 @@ class Security(commands.Cog):
             if answer:
                 self.bot.log("SUCCESS", f"AI Solver Answer: {answer}. Sending to OwO...")
 
-                await self.bot.send_message(answer, skip_typing=True, priority=True)
-                self._show_desktop_notification(f"Image captcha solved: {answer}")
+                # force=True: the account is paused and throttled to inf a few lines up,
+                # so a normal send is dropped and the answer never reaches OwO. Reply in
+                # the channel the captcha arrived in, not the configured grind channel.
+                sent = await self.bot.send_message(
+                    answer,
+                    skip_typing=True,
+                    priority=True,
+                    target_channel_id=message.channel.id,
+                    force=True,
+                )
+                if sent:
+                    self._show_desktop_notification(f"Image captcha solved: {answer}")
+                else:
+                    self.bot.log("ERROR", "Could not deliver the captcha answer. Solve manually.")
+                    self._show_desktop_notification("Captcha answer failed to send! Solve manually.")
+                    self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), "https://owobot.com/captcha")
             else:
                 self.bot.log("ERROR", "AI Solver failed to generate an answer for image captcha.")
                 self._show_desktop_notification("AI Solver failed! Solve manually.")

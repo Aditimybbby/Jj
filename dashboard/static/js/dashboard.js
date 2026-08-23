@@ -35,41 +35,48 @@ function initDashCharts() {
 function update() {
     const q = currentAccountId ? `?id=${currentAccountId}` : '';
     fetch(`/api/stats${q}`).then(r => r.json()).then(d => {
-        console.log('Logs received:', d.logs);
         if (!d || Object.keys(d).length === 0) return;
         if (d.bot) {
-            console.log(`[Stats Update] ${d.bot.username} (#${d.bot.user_id}): ${Object.keys(d.cmd_states || {}).length} commands in scheduler.`);
             const nameEl = document.getElementById('currentAccountName');
             if (nameEl) nameEl.innerText = `ACCOUNT: ${d.bot.username}`;
         }
-        if (d.cash) document.getElementById('cash').innerText = d.cash.toLocaleString();
-        if (d.uptime) document.getElementById('uptimeDisplay').innerText = d.uptime;
-        renderLevelKpi(d.level, d.xp, d.xp_needed);
+        // == 0 is a real balance and a real uptime, so test for presence, not truth -
+        // a broke account used to show whatever number was left over from last poll
+        setText('cash', d.cash === null || d.cash === undefined ? '—' : d.cash.toLocaleString());
+        if (d.uptime !== undefined && d.uptime !== null) setText('uptimeDisplay', d.uptime);
+        renderLevelKpi(d.level, d.xp, d.xp_needed, d.level_source);
+        renderTeam(d.team);
         if (d.logs) renderLogs(d.logs);
+
         const dot = document.getElementById('statusDot'), lbl = document.getElementById('botStatus');
-        lbl.innerText = d.status; dot.className = "ping-dot " + (d.status === "PAUSED" ? "paused" : "");
+        // guarded: an exception here used to abort the rest of this callback, so one
+        // missing element quietly froze the charts, quests and scheduler panels
+        if (lbl) lbl.innerText = d.status;
+        if (dot) dot.className = "ping-dot " + (d.status === "PAUSED" ? "paused" : "");
+
+        const alertEl = document.getElementById('securityAlert');
         if (d.status === "PAUSED" && d.security && d.security.last_message) {
-            document.getElementById('securityAlert').style.display = 'flex';
-            document.getElementById('captchaMsg').innerText = d.security.last_message;
+            if (alertEl) alertEl.style.display = 'flex';
+            setText('captchaMsg', d.security.last_message);
 
             const section = document.getElementById('captcha-solver-section');
             if (section && section.style.display !== 'block') {
                 const acc = accountsList.find(a => a.id === currentAccountId);
                 if (acc) openEmbeddedCaptcha(currentAccountId, acc.username);
             }
-        } else {
-            document.getElementById('securityAlert').style.display = 'none';
+        } else if (alertEl) {
+            alertEl.style.display = 'none';
         }
         if (d.chart_data) {
-            document.getElementById('huntsToday').innerHTML = `${d.chart_data.hunt} <span style="font-size:0.5em; color:var(--success);" id="huntsSession">(${d.chart_data.session_hunt} this session)</span>`;
-            document.getElementById('battlesToday').innerHTML = `${d.chart_data.battle} <span style="font-size:0.5em; color:#3b82f6;" id="battlesSession">(${d.chart_data.session_battle} this session)</span>`;
-            document.getElementById('cpm').innerText = d.chart_data.perf_bpm;
-            if (document.getElementById('totalOwO')) document.getElementById('totalOwO').innerHTML = `${d.chart_data.owo} <span style="font-size:0.5em; color:#a855f7;" id="owoSession">(${d.chart_data.session_owo} this session)</span>`;
+            setHtml('huntsToday', `${d.chart_data.hunt} <span style="font-size:0.5em; color:var(--success);" id="huntsSession">(${d.chart_data.session_hunt} this session)</span>`);
+            setHtml('battlesToday', `${d.chart_data.battle} <span style="font-size:0.5em; color:#3b82f6;" id="battlesSession">(${d.chart_data.session_battle} this session)</span>`);
+            setText('cpm', d.chart_data.perf_bpm);
+            setHtml('totalOwO', `${d.chart_data.owo} <span style="font-size:0.5em; color:#a855f7;" id="owoSession">(${d.chart_data.session_owo} this session)</span>`);
         }
         if (d.security) {
-            const sc = document.getElementById('sec-captchas'); if (sc) sc.innerText = d.security.captchas;
-            const sb = document.getElementById('sec-bans'); if (sb) sb.innerText = d.security.bans;
-            const sw = document.getElementById('sec-warns'); if (sw) sw.innerText = d.security.warnings;
+            setText('sec-captchas', d.security.captchas);
+            setText('sec-bans', d.security.bans);
+            setText('sec-warns', d.security.warnings);
         }
         if (lineChart && d.chart_data) {
             lineChart.data.datasets[0].data.push(d.chart_data.perf_bpm);
@@ -79,15 +86,35 @@ function update() {
         try { renderQuests(d.quest_data, d.next_quest_timer); } catch(e) { console.error("Quest Render Error:", e); }
         try { if (d.cmd_states) renderScheduler(d.cmd_states); } catch(e) { console.error("Scheduler Render Error in update():", e); }
         try { fetchSecuritySummary(); } catch(e) { console.error("Security Summary Error:", e); }
-    });
+    }).catch(e => console.error("Stats poll failed:", e));
+}
+
+// this runs once a second, so a missing element must not throw
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.innerText = value;
+}
+
+function setHtml(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = value;
 }
 
 
 // owo answers "owo level" with the level AND the xp pair in one message, so
 // both land in /api/stats - show them together
-function renderLevelKpi(level, xp, needed) {
+function renderLevelKpi(level, xp, needed, source) {
     const lvlEl = document.getElementById('owoLevel');
     if (!lvlEl) return;
+
+    // owo has started answering with a rendered image card. Say so rather than
+    // leaving the last known number sitting there looking freshly synced.
+    if (source === 'image' && (level === null || level === undefined)) {
+        lvlEl.innerHTML = `<span style="color:var(--text-muted);">—</span>` +
+            ` <span style="font-size:0.4em; color:var(--warning, #f59e0b);" title="OwO replied with an image card instead of text, so the level could not be read.">image card · unreadable</span>`;
+        return;
+    }
+
     let xpText = '';
     if (xp !== null && xp !== undefined) {
         if (needed) {
@@ -99,6 +126,30 @@ function renderLevelKpi(level, xp, needed) {
     }
     const lvlText = (level === null || level === undefined) ? '—' : level;
     lvlEl.innerHTML = `${lvlText} <span style="font-size:0.45em; color:var(--text-muted);" id="owoXp">${xpText}</span>`;
+}
+
+
+// the battle team the zoo watcher maintains, rarest slot first
+function renderTeam(team) {
+    const el = document.getElementById('teamSlots');
+    if (!el) return;
+
+    const slots = (team && team.slots) || [];
+    if (!slots.length) {
+        el.innerHTML = `<div class="team-empty">No battle team read yet</div>`;
+    } else {
+        el.innerHTML = slots.map(s =>
+            `<span class="team-chip rarity-${s.rarity}" title="${s.rarity}">${s.animal}</span>`
+        ).join('');
+    }
+
+    const meta = document.getElementById('teamMeta');
+    if (!meta) return;
+    if (!team) { meta.innerText = ''; return; }
+    const watching = team.watching
+        ? `<span class="team-watch on">zoo watcher on</span>`
+        : `<span class="team-watch off">zoo watcher off</span>`;
+    meta.innerHTML = `${watching} <span class="team-owned">${team.owned || 0} animals owned</span>`;
 }
 
 

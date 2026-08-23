@@ -56,7 +56,6 @@ class NeuraBot(commands.Bot):
         self.accounts = []
         self.token = token
         self.channels = channels or []
-        self.channels = channels or []
         self.proxy_url = proxy_url
         self.proxy_auth = proxy_auth
         self.proxy_label = proxy_label or "direct"
@@ -248,11 +247,53 @@ class NeuraBot(commands.Bot):
         if self.session is None:
             self.session = aiohttp.ClientSession()
     
-    async def _send_safe(self, content, skip_typing=False, target_channel_id=None, priority=False):
+    async def _resolve_channel(self, c_id):
+        channel = self.get_channel(c_id)
+        if not channel:
+            try:
+                channel = await self.fetch_channel(c_id)
+            except Exception as e:
+                self.log("ERROR", f"Failed to fetch channel {c_id}: {e}")
+                return None
+        return channel
+
+    async def _raw_send(self, content, channel, skip_typing=False):
+        """Put a message on the wire. Every safety gate is the caller's job."""
+        typing_enabled = self.config.get('stealth', {}).get('typing_enabled', False)
+        try:
+            if typing_enabled and not skip_typing:
+                sent_ok = await NeuraHuman.neura_send(self, channel, content)
+                if not sent_ok:
+                    return False
+            else:
+                await channel.send(content)
+
+            self.last_sent_time = time.time()
+            short_cmd = content[:30] + "..." if len(content) > 30 else content
+            typing_str = ""
+            if getattr(self, 'last_typing_time', None):
+                typing_str = f" ({self.last_typing_time}s)"
+                self.last_typing_time = None
+            self.log("CMD", f"Sent: {short_cmd}{typing_str}")
+            return True
+        except Exception as e:
+            self.note_send_failure(e)
+            return False
+
+    async def _send_safe(self, content, skip_typing=False, target_channel_id=None, priority=False, force=False):
         if not content or not self.is_ready:
             return False
-            
+
         content = self._fix_command(content)
+
+        # a captcha answer has to reach OwO *while* the account is paused, and it cannot
+        # wait for command_lock either: the send that tripped the captcha is usually still
+        # parked in the pause loop below, holding it until the captcha is solved
+        if force:
+            channel = await self._resolve_channel(target_channel_id or self.channel_id)
+            if not channel:
+                return False
+            return await self._raw_send(content, channel, skip_typing=skip_typing)
 
         async with self.command_lock:
             current_time = time.time()
@@ -295,37 +336,13 @@ class NeuraBot(commands.Bot):
                 return False
 
             c_id = target_channel_id or self.channel_id
-            channel = self.get_channel(c_id)
-            if not channel:
-                try:
-                    channel = await self.fetch_channel(c_id)
-                except Exception as e:
-                    self.log("ERROR", f"Failed to fetch channel {c_id}: {e}")
-                    return False
-            
+            channel = await self._resolve_channel(c_id)
+
             if not channel or not self.active or self.paused:
                 return False
-            
-            try:
-                if typing_enabled and not skip_typing:
-                    sent_ok = await NeuraHuman.neura_send(self, channel, content)
-                    if not sent_ok:
-                        return False
-                else:
-                    await channel.send(content)
-                    
-                self.last_sent_time = time.time()
-                short_cmd = content[:30] + "..." if len(content) > 30 else content
-                typing_str = ""
-                if getattr(self, 'last_typing_time', None):
-                    typing_str = f" ({self.last_typing_time}s)"
-                    self.last_typing_time = None
-                self.log("CMD", f"Sent: {short_cmd}{typing_str}")
-                return True
-            except Exception as e:
-                self.note_send_failure(e)
-                return False
-    
+
+            return await self._raw_send(content, channel, skip_typing=skip_typing)
+
     def _fix_command(self, command):
         cmd = command.strip()
         if cmd.lower() == "owo": return "owo"
@@ -360,13 +377,15 @@ class NeuraBot(commands.Bot):
             return f"{self.prefix}{cmd}"
         return cmd
     
-    async def send_message(self, content, skip_typing=False, priority=False, target_channel_id=None):
+    async def send_message(self, content, skip_typing=False, priority=False, target_channel_id=None, force=False):
         if not self.active:
             return False
-        if self.paused:
+        # force is for safety-critical replies (captcha answers): paused accounts still
+        # have to answer OwO or the pause never lifts
+        if self.paused and not force:
             return False
-        
-        if state.checking_gems.get(self.user_id):
+
+        if state.checking_gems.get(self.user_id) and not force:
             cmd_clean = content.lower().strip()
             if "hunt" in cmd_clean or "battle" in cmd_clean:
                 if "huntbot" not in cmd_clean and "autohunt" not in cmd_clean:
@@ -374,8 +393,8 @@ class NeuraBot(commands.Bot):
 
         fixed_content = self._fix_command(content)
         self.last_sent_command = fixed_content
-        
-        success = await self._send_safe(fixed_content, skip_typing=skip_typing, target_channel_id=target_channel_id, priority=priority)
+
+        success = await self._send_safe(fixed_content, skip_typing=skip_typing, target_channel_id=target_channel_id, priority=priority, force=force)
         return success
     
     @property
@@ -462,6 +481,10 @@ class NeuraBot(commands.Bot):
             "quest": "Quest", "rpp": "RPP", "cookie": "Cookie",
             "level_grind": "LevelQuotes",
             "team": "Others", "weapon": "Weapons", "custom": "CustomCommands",
+            # reactive cogs - they read self.bot.config on every event, so there is
+            # nothing to re-register. They are listed so an unknown key does not fall
+            # through to the Grinding default and pointlessly re-roll hunt/battle timers.
+            "gems": None, "sell_sac": None, "open": None, "giveaway": None,
         }
         top_to_cog = {
             "reactionBot": ["ReactionBot"],
@@ -469,14 +492,17 @@ class NeuraBot(commands.Bot):
             "boss": ["Boss"],
             "utilities": ["ChannelSwitch", "Others"],
             "level_grind": ["LevelQuotes"],
+            "coop": ["Coop", "Quest"],
         }
         for path in changed_paths:
             if path == "commands" or path.startswith("commands."):
                 parts = path.split(".")
                 if len(parts) >= 2:
-                    cog_names.add(cmd_to_cog.get(parts[1], "Grinding"))
+                    target = cmd_to_cog.get(parts[1], "Grinding")
+                    if target:
+                        cog_names.add(target)
                 else:
-                    cog_names.update(cmd_to_cog.values())
+                    cog_names.update(c for c in cmd_to_cog.values() if c)
             elif path.split(".")[0] in top_to_cog:
                 cog_names.update(top_to_cog[path.split(".")[0]])
         return cog_names
@@ -484,6 +510,7 @@ class NeuraBot(commands.Bot):
     def _prune_disabled_scheduler_cmds(self):
         """Remove scheduler entries for commands that are now disabled."""
         cmds = self.config.get("commands", {})
+        coop = self.config.get("coop", {})
 
         def enabled(name, default=False):
             return bool(cmds.get(name, {}).get("enabled", default))
@@ -509,6 +536,9 @@ class NeuraBot(commands.Bot):
             ("level_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("level", True)),
             ("team_scan", enabled("team", True)),
             ("weapon_scan", enabled("weapon", True)),
+            # the zoo watcher is event driven (it reacts to hunt results), so it owns no
+            # scheduler slot of its own - team_scan above is its periodic backstop
+            ("coop_offer", bool(coop.get("enabled", True)) and bool(coop.get("battle", {}).get("enabled", True))),
         ]
         for cmd_id, is_on in rules:
             if not is_on and cmd_id in self.cmd_states:
@@ -554,8 +584,8 @@ class NeuraBot(commands.Bot):
         scheduler_paths = {
             p for p in changed
             if p == "commands" or p.startswith("commands.")
-            or p.startswith("utilities.") or p in ("reactionBot", "level_grind")
-            or p.startswith("reactionBot.")
+            or p.startswith("utilities.") or p in ("reactionBot", "level_grind", "coop")
+            or p.startswith("reactionBot.") or p.startswith("coop.")
         }
 
         if scheduler_paths:
