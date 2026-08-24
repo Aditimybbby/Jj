@@ -257,6 +257,28 @@ class NeuraBot(commands.Bot):
         
         if self.session is None:
             self.session = aiohttp.ClientSession()
+
+    async def on_disconnect(self):
+        # The gateway dropped. While we are reconnecting the account is not
+        # farming, but it is also not gone - flip is_ready so the dashboard can
+        # show CONNECTING instead of dropping the card entirely (which made it
+        # look like the bot had "stopped by itself").
+        self.is_ready = False
+        self.log("WARN", "Gateway disconnected - attempting to resume/reconnect.")
+
+    async def on_resumed(self):
+        # A clean RESUME restores the session without a fresh on_ready, so
+        # re-arm is_ready ourselves - otherwise the card would stay stuck on
+        # CONNECTING even though the bot is live again.
+        if self.user:
+            self.is_ready = True
+            self.log("SYS", "Gateway session resumed.")
+
+    async def on_connect(self):
+        # The TCP/identify step succeeded but cogs may not be ready yet; leave
+        # is_ready to on_ready/on_resumed. This hook exists so discord.py does
+        # not warn about an unhandled event during reconnects.
+        pass
     
     async def _resolve_channel(self, c_id):
         channel = self.get_channel(c_id)
@@ -760,10 +782,18 @@ class NeuraBot(commands.Bot):
             if not self.active:
                 return
 
+            # A dropped gateway should look like a brief blip, not a 5-minute
+            # outage: the old backoff (15 * attempt, capped at 300s) made an
+            # account vanish from the dashboard for ages on a flaky proxy. Keep
+            # it short and gentle - Discord tolerates quick retries fine.
             attempt = 1 if time.time() - session_start > 300 else attempt + 1
-            delay = min(300, 15 * attempt) + random.uniform(0, 5)
+            delay = min(60, 5 * attempt) + random.uniform(0, 3)
             self.log("WARN", f"Reconnecting in {round(delay)}s (attempt {attempt})...")
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                # stop_account cancels the runner to break exactly this sleep
+                raise
 
     def set_cooldown(self, cmd, seconds):
         self.cmd_cooldowns[cmd.lower()] = time.time() + seconds

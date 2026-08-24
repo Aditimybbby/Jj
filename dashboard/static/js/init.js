@@ -48,14 +48,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.fetchAccounts();
     if (typeof fetchProxies === 'function') fetchProxies();
     fetchAccountConfig();
-    setInterval(fetchAccountConfig, 5000);
     loadConfig();
     if (typeof loadCustomCommands === 'function') loadCustomCommands();
     initDynamicTilt();
     initConfigSearch();
-    setInterval(window.fetchAccounts, 5000);
-    setInterval(update, 1000);
-    setInterval(window.pollForCaptchas, 2000);
+
+    // Polling intervals. The bots themselves run in the server's asyncio loop,
+    // so they keep farming even when this tab is closed - these polls only
+    // refresh what the dashboard *shows*. When the tab is hidden we slow them
+    // down (no point fetching a live chart nobody is looking at), and on focus
+    // we refresh immediately so a returning user sees the real, current state
+    // instead of a stale snapshot that made accounts look "stopped".
+    let configTimer = setInterval(fetchAccountConfig, 5000);
+    let accountsTimer = setInterval(window.fetchAccounts, 5000);
+    let statsTimer = setInterval(update, 1000);
+    let captchaTimer = setInterval(window.pollForCaptchas, 2000);
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            // slow down while hidden - keep a heartbeat so the session stays
+            // warm but stop refreshing charts every second
+            clearInterval(statsTimer);
+            statsTimer = setInterval(update, 10000);
+        } else {
+            // back to active: refresh now and restore the fast cadence
+            clearInterval(statsTimer);
+            statsTimer = setInterval(update, 1000);
+            window.fetchAccounts();
+            fetchAccountConfig();
+            update();
+        }
+    });
+
+    // If the browser discarded the page (bfcache) and restored it, re-sync.
+    window.addEventListener('pageshow', (event) => {
+        if (event.persisted) {
+            window.fetchAccounts();
+            fetchAccountConfig();
+            update();
+        }
+    });
+
     updateMobileControls();
     window.addEventListener('resize', updateMobileControls);
 });

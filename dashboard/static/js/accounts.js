@@ -19,12 +19,22 @@ window.fetchAccounts = async function() {
     console.log("Fetching accounts...");
     try {
         const res = await fetch('/api/accounts/list');
+        // 401 = session expired. The server returns an error object, not a
+        // list, so without this guard data.find() throws "find is not a
+        // function" and accountsList becomes a non-array, which blanks the
+        // panel ("everything disappears"). Send the user back to login.
+        if (res.status === 401) {
+            console.warn("Session expired - reloading to login");
+            window.location.href = '/login';
+            return;
+        }
         const data = await res.json();
-        console.log(`Fetched ${data.length} accounts`);
-        accountsList = data;
-        if (data.length > 0) {
-            if (!currentAccountId || !data.find(a => a.id === currentAccountId)) {
-                currentAccountId = data[0].id;
+        const list = Array.isArray(data) ? data : [];
+        console.log(`Fetched ${list.length} accounts`);
+        accountsList = list;
+        if (list.length > 0) {
+            if (!currentAccountId || !list.find(a => a.id === currentAccountId)) {
+                currentAccountId = list[0].id;
             }
         }
         renderAccountGrid();
@@ -32,14 +42,19 @@ window.fetchAccounts = async function() {
     } catch (e) {
         console.error("Failed to fetch accounts", e);
         const grid = document.getElementById('accounts-grid');
-        if (grid) grid.innerHTML = `<div class="no-data error">Error fetching accounts: ${e.message}</div>`;
+        // keep the last good list instead of clobbering it with an error that
+        // makes the cards vanish - a transient network blip should not wipe the
+        // panel
+        if (grid && (!accountsList || !accountsList.length)) {
+            grid.innerHTML = `<div class="no-data error">Error fetching accounts: ${e.message}</div>`;
+        }
     }
 };
 
 function updateGlobalAccountName() {
     const nameEl = document.getElementById('currentAccountName');
     if (!nameEl) return;
-    if (currentAccountId) {
+    if (currentAccountId && Array.isArray(accountsList)) {
         const acc = accountsList.find(a => a.id === currentAccountId);
         if (acc) {
             nameEl.innerText = `ACCOUNT: ${acc.username}`;
@@ -53,7 +68,7 @@ window.selectAccount = function(id) {
     console.log(`Selecting account: ${id}`);
     currentAccountId = id;
     renderAccountGrid();
-    const acc = accountsList.find(a => a.id === id);
+    const acc = Array.isArray(accountsList) ? accountsList.find(a => a.id === id) : null;
     if (acc) {
         showToast(`Switched to account: ${acc.username}`, 'success');
         updateGlobalAccountName(); 
@@ -70,14 +85,14 @@ window.selectAccount = function(id) {
 function renderAccountGrid() {
     const grid = document.getElementById('accounts-grid');
     if (!grid) return;
-    if (!accountsList || !accountsList.length) {
+    if (!Array.isArray(accountsList) || !accountsList.length) {
         grid.innerHTML = '<div class="no-data">No accounts online. Start the bot to see connected accounts here.</div>';
         return;
     }
     grid.innerHTML = accountsList.map(acc => {
         const isSelected = acc.id === currentAccountId;
-        const statusClass = acc.paused ? 'paused' : 'running';
-        const statusLabel = acc.paused ? 'Paused' : 'Running';
+        const statusClass = acc.connecting ? 'connecting' : (acc.paused ? 'paused' : 'running');
+        const statusLabel = acc.connecting ? 'Connecting' : (acc.paused ? 'Paused' : 'Running');
         const avatar = acc.avatar
             ? `<img src="${escAttr(acc.avatar)}" class="account-avatar-lg" alt="">`
             : `<span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url('/static/assets/neura_icons/discord.svg');"></span>`;
@@ -139,11 +154,21 @@ function renderXpBar(xp, needed) {
 window.fetchAccountConfig = async function() {
     try {
         const res = await fetch('/api/accounts/config');
+        if (res.status === 401) {
+            // session expired - the body is an error object, not {accounts:[]}.
+            // Bail to login instead of setting accountConfigList to an object,
+            // which would break renderAccountConfigList's .filter/.map calls.
+            window.location.href = '/login';
+            return;
+        }
         const data = await res.json();
-        accountConfigList = data.accounts || [];
+        const list = (data && Array.isArray(data.accounts)) ? data.accounts : [];
+        accountConfigList = list;
         renderAccountConfigList();
     } catch (e) {
         console.error('Failed to fetch account config', e);
+        // keep the last known config on a transient error so the cards do not
+        // blank out
     }
 };
 
@@ -194,7 +219,7 @@ function accountConfigCard(acc) {
 function renderAccountConfigList() {
     const el = document.getElementById('account-config-list');
     if (!el) return;
-    if (!accountConfigList.length) {
+    if (!Array.isArray(accountConfigList) || !accountConfigList.length) {
         el.innerHTML = '<div class="no-data">No accounts configured. Click Add Account.</div>';
         return;
     }
@@ -225,9 +250,16 @@ async function accountAction(url, body, successMsg) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body || {}),
         });
+        if (res.status === 401) {
+            window.location.href = '/login';
+            return { success: false };
+        }
         const data = await res.json();
         showToast(data.message || data.error || successMsg, data.success ? 'success' : 'error');
-        await fetchAccountConfig();
+        // Give the backend a beat to settle (start/stop touches the asyncio
+        // loop), then refresh both views so the cards reflect the real state
+        // instead of the stale snapshot from the instant reply.
+        setTimeout(() => { fetchAccountConfig(); window.fetchAccounts(); }, 600);
         return data;
     } catch (e) {
         showToast('Request failed', 'error');
