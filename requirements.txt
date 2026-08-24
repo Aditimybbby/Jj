@@ -1,7 +1,13 @@
 discord.py-self @ git+https://github.com/dolfies/discord.py-self@20ae80b398ec83fa272f0a96812140e14868c88
 Flask==2.3.0
+# Flask 2.3 declares no upper bound, so a bare install pulls Werkzeug 3.x and
+# drops APIs it still uses. Keep it on the line Flask 2.3 was built against.
+Werkzeug>=2.3.0,<3
 requests==2.31.0
-aiohttp==3.12.15
+# a hard == pin has no wheel on Python 3.13+ and the source build fails, so
+# `pip install -r requirements.txt` dies on any current interpreter. discord.py
+# needs <4; anything from here up is fine.
+aiohttp>=3.12.15,<4
 rich==14.2.0
 plyer==2.1.0
 playsound3==3.3.0

@@ -492,7 +492,9 @@ class NeuraBot(commands.Bot):
     async def _load_cogs(self):
         cogs_dir = os.path.join(self.base_dir, 'cogs')
         for filename in os.listdir(cogs_dir):
-            if filename.endswith('.py'):
+            # a leading underscore marks a non-cog helper; load_extension would
+            # raise NoEntryPointError on it and log a failure on every boot
+            if filename.endswith('.py') and not filename.startswith('_'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
                     self.log("SYS", f"Loaded {filename}")
