@@ -34,23 +34,24 @@
         }
 
         :root {
-            --accent: #7c6cff;
-            --accent-soft: rgba(124, 108, 255, 0.14);
-            --accent-glow: rgba(124, 108, 255, 0.45);
-            --accent-2: #22d3ee;
-            --bg-dark: #0b0c10;
-            --bg-card: #14161c;
-            --bg-elev: #1a1d25;
-            --text-main: #e7e9ee;
-            --text-muted: #8b90a0;
-            --text-dim: #5b6072;
-            --border: #232631;
-            --border-soft: #1c1f29;
-            --success: #34d399;
-            --danger: #f87171;
+            --accent: #10b981;
+            --accent-2: #06b6d4;
+            --accent-soft: rgba(16, 185, 129, 0.14);
+            --accent-glow: rgba(16, 185, 129, 0.45);
+            --accent-gradient: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
+            --bg-dark: #070810;
+            --bg-card: rgba(20, 24, 38, 0.6);
+            --bg-elev: rgba(30, 36, 54, 0.6);
+            --text-main: #eef1f8;
+            --text-muted: #8892a8;
+            --text-dim: #565f76;
+            --border: rgba(255, 255, 255, 0.08);
+            --border-soft: rgba(255, 255, 255, 0.05);
+            --success: #10b981;
+            --danger: #fb7185;
             --mono: 'JetBrains Mono', monospace;
             --sans: 'Inter', sans-serif;
-            --radius: 14px;
+            --radius: 20px;
         }
 
         html,
@@ -58,12 +59,39 @@
             min-height: 100%;
             width: 100%;
             background:
-                radial-gradient(900px 600px at 18% -10%, rgba(124, 108, 255, 0.10), transparent 60%),
-                radial-gradient(700px 500px at 100% 100%, rgba(34, 211, 238, 0.06), transparent 55%),
+                radial-gradient(900px 600px at 18% -10%, rgba(16, 185, 129, 0.10), transparent 60%),
+                radial-gradient(700px 500px at 100% 100%, rgba(6, 182, 212, 0.08), transparent 55%),
                 var(--bg-dark);
             font-family: var(--sans);
             color: var(--text-main);
             -webkit-font-smoothing: antialiased;
+        }
+
+        /* ── aurora orbs ── */
+        body::before,
+        body::after {
+            content: '';
+            position: fixed;
+            border-radius: 50%;
+            filter: blur(80px);
+            z-index: 0;
+            pointer-events: none;
+            animation: orbDrift 18s ease-in-out infinite alternate;
+        }
+        body::before {
+            width: 420px; height: 420px;
+            top: -120px; right: -100px;
+            background: rgba(16, 185, 129, 0.12);
+        }
+        body::after {
+            width: 380px; height: 380px;
+            bottom: -120px; left: -80px;
+            background: rgba(6, 182, 212, 0.10);
+            animation-delay: -9s;
+        }
+        @keyframes orbDrift {
+            0% { transform: translate(0, 0) scale(1); }
+            100% { transform: translate(40px, 30px) scale(1.15); }
         }
 
         .wrapper {
@@ -80,16 +108,25 @@
             width: 100%;
             max-width: 420px;
             padding: 42px 40px 34px;
-            background: rgba(20, 22, 28, 0.78);
+            background: var(--bg-card);
+            backdrop-filter: blur(24px) saturate(1.3);
+            -webkit-backdrop-filter: blur(24px) saturate(1.3);
             border: 1px solid var(--border);
             border-radius: var(--radius);
             position: relative;
             box-shadow:
                 0 24px 60px -20px rgba(0, 0, 0, 0.6),
                 0 2px 0 0 rgba(255, 255, 255, 0.03) inset;
-            backdrop-filter: blur(18px);
-            -webkit-backdrop-filter: blur(18px);
             transition: border-color 0.6s ease, box-shadow 0.6s ease;
+            overflow: hidden;
+        }
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: var(--accent-gradient);
+            opacity: 0.6;
         }
 
         .card .corner-br,
@@ -220,28 +257,28 @@
             width: 100%;
             padding: 13px;
             margin-top: 4px;
-            background: var(--accent);
+            background: var(--accent-gradient);
             color: #fff;
             border: none;
-            border-radius: 10px;
+            border-radius: 12px;
             font-family: var(--mono);
             font-size: 0.85rem;
             font-weight: 600;
             letter-spacing: 2px;
             text-transform: uppercase;
             cursor: pointer;
-            box-shadow: 0 6px 20px -8px var(--accent-glow);
-            transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+            box-shadow: 0 6px 24px -8px var(--accent-glow);
+            transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease, filter 0.2s ease;
         }
 
         #activateBtn:hover {
-            background: #6b5cf0;
-            box-shadow: 0 8px 26px -8px var(--accent-glow);
+            box-shadow: 0 10px 32px -8px var(--accent-glow);
+            filter: brightness(1.1);
         }
 
         #activateBtn:active {
             transform: scale(0.97);
-            background: #5a4de0;
+            filter: brightness(0.95);
         }
 
         .alt-link {
@@ -266,10 +303,10 @@
         }
 
         .card.success {
-            border-color: rgba(52, 211, 153, 0.4);
+            border-color: rgba(16, 185, 129, 0.45);
             box-shadow:
                 0 24px 60px -20px rgba(0, 0, 0, 0.6),
-                0 0 40px rgba(52, 211, 153, 0.12);
+                0 0 40px rgba(16, 185, 129, 0.15);
         }
 
         .card.success .corner-br,
@@ -386,10 +423,10 @@
                 .then(data => {
                     if (data.success) {
                         keyHint.textContent = `Valid key — ${data.days} day${data.days === 1 ? '' : 's'} of access`;
-                        keyHint.style.color = 'rgba(52, 211, 153, 0.85)';
+                        keyHint.style.color = 'rgba(16, 185, 129, 0.85)';
                     } else {
                         keyHint.textContent = data.error || 'Key not valid';
-                        keyHint.style.color = 'rgba(248, 113, 113, 0.85)';
+                        keyHint.style.color = 'rgba(251, 113, 133, 0.85)';
                     }
                 })
                 .catch(() => { });

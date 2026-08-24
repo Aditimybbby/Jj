@@ -1,4 +1,4 @@
-/* 
+/*
 
 # This file is part of LazyFarmers.
 # Copyright (c) 2025-Present Routo
@@ -15,25 +15,100 @@
 
 */
 
+/* ── Aurora Glass · History View ─────────────────────────────── */
+
 .analytics-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
-    gap: 20px;
-    padding: 0 20px 20px 20px;
+    gap: 18px;
+    padding: 0 0 20px 0;
     margin-bottom: 20px;
+}
+
+.analytics-card {
+    background: var(--bg-card);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--shadow-card);
+    transition: transform 0.2s, border-color 0.2s;
+}
+.analytics-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--accent-gradient);
+    opacity: 0.5;
+}
+.analytics-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--glass-border-strong);
+}
+.analytics-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-xs);
+    background: var(--accent-gradient-soft);
+    border: 1px solid var(--glass-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 14px;
+}
+.analytics-icon .icon-svg {
+    width: 22px;
+    height: 22px;
+    background-color: var(--accent);
+}
+.analytics-card .val {
+    font-family: var(--font-heading);
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.1;
+    margin-bottom: 4px;
+}
+.analytics-card .lbl {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
 }
 
 .history-date-picker {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
     margin-bottom: 20px;
 }
-
-.session-select {
-    background: rgba(255,255,255,0.05);
-    color: #fff;
-    border: 1px solid #333;
-    padding: 8px;
-    border-radius: 6px;
+.history-range-sep {
+    color: var(--text-muted);
     font-family: var(--font-mono);
+    font-size: 0.85rem;
+}
+
+.session-select,
+.field-input {
+    background: rgba(7, 8, 16, 0.6);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    border-radius: var(--radius-xs);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.session-select:focus,
+.field-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .chart-empty-msg {
@@ -41,24 +116,20 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: #555;
+    color: var(--text-muted);
     font-size: 0.9rem;
     font-family: var(--font-mono);
 }
-
 
 .chart-container {
     height: 250px;
     width: 100%;
     position: relative;
 }
-
 .chart-container canvas {
     width: 100% !important;
     height: 100% !important;
 }
-
-
 .chart-box {
     min-height: 320px;
 }
