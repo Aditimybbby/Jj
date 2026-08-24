@@ -362,11 +362,14 @@ class Others(commands.Cog):
         """Animals you actually own, rarest first, named the way owo team add wants them."""
         found = []
         for line in raw.splitlines():
-            # strip the custom emoji before looking for the tier word. The badge in
-            # front of a rare row is a long "<:legendaryTier:123...>" and the old code
-            # only looked at the first 24 characters, so the word was hidden behind it
-            # and the whole row - every rare animal in it - was skipped.
-            bare = CUSTOM_EMOJI_RE.sub(' ', line).replace('*', '').replace('`', '').lower()
+            # Keep the custom-emoji NAME when stripping the id, because OwO prints
+            # the tier badge as an emoji whose *name* carries the tier word -
+            # e.g. <:commonTier:123...>, <:legendaryTier:456...>. Replacing the
+            # whole emoji with a space (the old code) erased "commonTier" along
+            # with the id, so the tier word was gone and RARITY_RANK never matched,
+            # which silently dropped every single animal - the whole zoo read as
+            # empty and the dashboard showed "No zoo data yet".
+            bare = CUSTOM_EMOJI_RE.sub(r' \1 ', line).replace('*', '').replace('`', '').lower()
             match = next(((word, rank) for word, rank in RARITY_RANK if word in bare), None)
             if match is None:
                 continue
@@ -638,7 +641,17 @@ class Others(commands.Cog):
         discord.py-self models none of that, so message.content is empty and the
         on_message path below never sees them - hence reading the raw payload.
         """
-        if isinstance(msg, bytes) or not getattr(self.bot, 'is_ready', False):
+        # discord.py-self zlib-decompresses binary frames before dispatching
+        # socket_raw_receive, so we normally get a str. Decode defensively anyway -
+        # the old `isinstance(msg, bytes): return` would have silently thrown away
+        # every large V2 card (zoo/team/level) if a future change ever passed bytes
+        # through, which is exactly the "panels always empty" failure mode.
+        if isinstance(msg, (bytes, bytearray)):
+            try:
+                msg = msg.decode('utf-8', errors='replace')
+            except Exception:
+                return
+        if not getattr(self.bot, 'is_ready', False):
             return
         try:
             raw_data = json.loads(msg)

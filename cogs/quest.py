@@ -59,8 +59,14 @@ class Quest(commands.Cog):
         if not self.active or self.bot.paused:
             return
 
-        if isinstance(msg, bytes):
-            return
+        # discord.py-self hands us a str (it zlib-decompresses binary frames
+        # before dispatching socket_raw_receive), but decode defensively so a
+        # future change or an edge case can never silently drop quest cards.
+        if isinstance(msg, (bytes, bytearray)):
+            try:
+                msg = msg.decode('utf-8', errors='replace')
+            except Exception:
+                return
 
         try:
             raw_data = json.loads(msg)
@@ -85,7 +91,16 @@ class Quest(commands.Cog):
         content = data.get("content") or ""
         full_text = f"{content}\n{v2_text}".lower()
 
-        if "quest log" in full_text or "checklist" in full_text:
+        # OwO titles the quest card differently across updates ("Quest Log",
+        # "Quests", "Your Quests", "Daily Quests", "Checklist"...). Matching only
+        # the literal "quest log" used to miss the card entirely, leaving the
+        # dashboard on "No active quests tracked" forever. Recognise any of the
+        # known headers - the _v2_text_is_mine guard below still keeps us from
+        # grabbing another account's card in a shared channel.
+        if any(header in full_text for header in (
+            "quest log", "quest list", "your quest", "daily quest",
+            "active quest", "quest card", "checklist", "quests",
+        )):
             if not self._v2_text_is_mine(full_text):
                 return
 
