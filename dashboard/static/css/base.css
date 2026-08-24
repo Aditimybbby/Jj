@@ -1,55 +1,73 @@
-/* 
+/*
 
 # This file is part of LazyFarmers.
 # Copyright (c) 2025-Present Routo
 #
 # LazyFarmers is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Public License as published by
+# it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# You should have received a copy of the GNU Public License
+# You should have received a copy of the GNU General Public License
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
-
-
 
 */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@600;700;800&display=swap');
+/* ═══════════════════════════════════════════════════════════════
+   AURORA GLASS — Complete Redesign Design System
+   Deep navy + glassmorphism + emerald/cyan gradient accents
+   ═══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-    /* ── core surface palette (redesigned: refined slate + indigo accent) ── */
-    --accent: #7c6cff;
-    --accent-soft: rgba(124, 108, 255, 0.12);
-    --accent-glow: rgba(124, 108, 255, 0.35);
-    --accent-2: #22d3ee;
+    /* ── Aurora Glass core palette ── */
+    --accent: #10b981;
+    --accent-2: #06b6d4;
+    --accent-soft: rgba(16, 185, 129, 0.12);
+    --accent-glow: rgba(16, 185, 129, 0.35);
+    --accent-gradient: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
+    --accent-gradient-soft: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(6,182,212,0.15));
 
-    /* keep the legacy var names the JS / inline styles reference */
-    --primary: #7c6cff;
-    --primary-dim: rgba(124, 108, 255, 0.12);
+    --amber: #f59e0b;
+    --rose: #fb7185;
 
-    --bg-dark: #0b0c10;
-    --bg-card: #14161c;
-    --bg-elev: #1a1d25;
-    --text-main: #e7e9ee;
-    --text-muted: #8b90a0;
-    --text-dim: #5b6072;
-    --border: #232631;
-    --border-soft: #1c1f29;
-    --success: #34d399;
-    --warning: #fbbf24;
-    --danger: #f87171;
+    /* legacy var names the JS / inline styles reference — mapped to new accent */
+    --primary: #10b981;
+    --primary-dim: rgba(16, 185, 129, 0.12);
 
-    --font-heading: 'Inter', sans-serif;
+    /* ── surfaces — deep navy glass ── */
+    --bg-dark: #070810;
+    --bg-card: rgba(20, 24, 38, 0.55);
+    --bg-card-solid: #111521;
+    --bg-elev: rgba(30, 36, 54, 0.6);
+    --bg-glass: rgba(255, 255, 255, 0.04);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-border-strong: rgba(255, 255, 255, 0.14);
+
+    --text-main: #eef1f8;
+    --text-muted: #8892a8;
+    --text-dim: #565f76;
+    --border: rgba(255, 255, 255, 0.07);
+    --border-soft: rgba(255, 255, 255, 0.05);
+    --success: #10b981;
+    --warning: #f59e0b;
+    --danger: #fb7185;
+    --info: #06b6d4;
+
+    --font-heading: 'Space Grotesk', 'Inter', sans-serif;
     --font-body: 'Inter', sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
-    --font-brand: 'Orbitron', sans-serif;
+    --font-brand: 'Space Grotesk', sans-serif;
 
-    --radius: 14px;
-    --radius-sm: 9px;
-    --radius-xs: 6px;
-    --shadow-card: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px var(--border-soft);
-    --shadow-hover: 0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px var(--accent-soft);
+    --radius: 20px;
+    --radius-sm: 14px;
+    --radius-xs: 10px;
+    --radius-pill: 999px;
+    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
+    --shadow-hover: 0 16px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--accent-soft);
+    --shadow-glow: 0 0 32px rgba(16, 185, 129, 0.15);
+    --glass-blur: blur(20px) saturate(1.3);
 
     /* ── rarity tiers (unchanged values — zoo/team chips depend on these) ── */
     --common: #d97706;
@@ -88,76 +106,119 @@
 
 body {
     margin: 0;
-    background:
-        radial-gradient(1200px 600px at 80% -10%, rgba(124,108,255,0.08), transparent 60%),
-        radial-gradient(900px 500px at -10% 110%, rgba(34,211,238,0.05), transparent 60%),
-        var(--bg-dark);
+    background: var(--bg-dark);
     color: var(--text-main);
     font-family: var(--font-body);
-    font-feature-settings: "cv02","cv03","cv04","cv11";
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     height: 100vh;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    position: relative;
 }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+/* ── animated aurora background orbs ── */
+body::before,
+body::after {
+    content: '';
+    position: fixed;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.35;
+    z-index: 0;
+    pointer-events: none;
+    animation: orbDrift 20s ease-in-out infinite alternate;
+}
+body::before {
+    width: 500px; height: 500px;
+    background: radial-gradient(circle, #10b981, transparent 70%);
+    top: -150px; right: -100px;
+}
+body::after {
+    width: 450px; height: 450px;
+    background: radial-gradient(circle, #06b6d4, transparent 70%);
+    bottom: -120px; left: 200px;
+    animation-delay: -10s;
+}
+
+@keyframes orbDrift {
+    0% { transform: translate(0, 0) scale(1); }
+    50% { transform: translate(60px, 40px) scale(1.15); }
+    100% { transform: translate(-30px, -50px) scale(0.9); }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-    background: #2a2e3b;
+    background: rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     border: 2px solid transparent;
     background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover { background: #3a3f50; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(16, 185, 129, 0.4); background-clip: content-box; }
 
 ::selection { background: var(--accent-soft); color: #fff; }
 
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
-}
-
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
+/* ── animations ── */
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes pulseGlow {
-    from { text-shadow: 0 0 10px rgba(124, 108, 255, 0.3); }
-    to { text-shadow: 0 0 18px rgba(124, 108, 255, 0.6); }
+    from { text-shadow: 0 0 10px rgba(16, 185, 129, 0.3); }
+    to { text-shadow: 0 0 18px rgba(16, 185, 129, 0.6); }
 }
-
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(8px); }
+    from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: translateY(0); }
 }
-
+@keyframes slideInRight {
+    from { opacity: 0; transform: translateX(30px); }
+    to { opacity: 1; transform: translateX(0); }
+}
 @keyframes pulseInput {
     0% { box-shadow: 0 0 0 1px var(--accent), 0 0 12px var(--accent-glow); }
     100% { box-shadow: 0 0 0 1px var(--accent), 0 0 22px var(--accent-glow); }
 }
-
 @keyframes legendary-pulse {
     0% { box-shadow: 0 0 16px var(--legendary-glow); }
     50% { box-shadow: 0 0 30px var(--legendary-glow); }
     100% { box-shadow: 0 0 16px var(--legendary-glow); }
 }
-
 @keyframes fabled-glow {
     from { box-shadow: 0 0 24px var(--fabled-glow), inset 0 0 10px var(--fabled-glow); }
     to { box-shadow: 0 0 48px var(--fabled-glow), inset 0 0 18px var(--fabled-glow); }
 }
-
 @keyframes borderBlink { 50% { border-color: transparent; } }
-
-@keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+@keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.2); }
+    50% { box-shadow: 0 0 40px rgba(16, 185, 129, 0.4); }
 }
 
 .glowing-text {
     color: var(--accent);
-    text-shadow: 0 0 12px rgba(124, 108, 255, 0.5);
+    text-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
     animation: pulseGlow 2.4s infinite alternate;
+}
+
+/* ── icon-svg mask system (preserved) ── */
+.icon-svg {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    background-color: currentColor;
+    -webkit-mask-image: var(--icon);
+    mask-image: var(--icon);
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    flex-shrink: 0;
+    vertical-align: middle;
 }

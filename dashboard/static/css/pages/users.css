@@ -15,15 +15,20 @@
 
 */
 
+/* ── Aurora Glass · Users View ───────────────────────────────── */
+
 .users-genbar {
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
     align-items: flex-end;
-    background: rgba(0, 0, 0, 0.25);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
+    background: var(--bg-card);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    padding: 18px;
+    box-shadow: var(--shadow-card);
 }
 .users-field {
     display: flex;
@@ -36,17 +41,18 @@
     min-width: 200px;
 }
 .users-field span {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 1.2px;
+    font-weight: 600;
 }
 
 .users-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    margin-top: 12px;
+    margin-top: 14px;
 }
 .users-card {
     display: flex;
@@ -54,14 +60,20 @@
     align-items: center;
     gap: 16px;
     flex-wrap: wrap;
-    background: linear-gradient(145deg, #1a1a20 0%, #0f0f12 100%);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 16px;
+    background: var(--bg-card);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-xs);
+    padding: 14px 18px;
+    transition: border-color 0.2s, transform 0.15s;
+    box-shadow: var(--shadow-card);
 }
-.users-card.off {
-    opacity: 0.55;
+.users-card:hover {
+    border-color: var(--glass-border-strong);
+    transform: translateY(-1px);
 }
+.users-card.off { opacity: 0.55; }
 .users-card-info {
     display: flex;
     flex-direction: column;
@@ -71,7 +83,7 @@
 }
 .users-card-info strong {
     font-size: 0.95rem;
-    color: var(--text);
+    color: var(--text-main);
     display: flex;
     align-items: center;
     gap: 8px;
@@ -91,31 +103,34 @@
     font-family: var(--font-mono);
     font-size: 0.62rem;
     letter-spacing: 1px;
-    padding: 2px 7px;
-    border-radius: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
     text-transform: uppercase;
+    font-weight: 600;
 }
 .users-badge.fresh {
-    background: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.4);
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--success);
+    border: 1px solid rgba(16, 185, 129, 0.4);
 }
 .users-badge.used {
-    background: rgba(148, 163, 184, 0.12);
-    color: #94a3b8;
-    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(136, 146, 168, 0.12);
+    color: var(--text-muted);
+    border: 1px solid rgba(136, 146, 168, 0.3);
 }
 .users-badge.revoked {
-    background: rgba(239, 68, 68, 0.14);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: rgba(251, 113, 133, 0.14);
+    color: var(--rose);
+    border: 1px solid rgba(251, 113, 133, 0.4);
 }
 
 .users-link {
     font-size: 0.72rem;
-    color: var(--primary);
+    color: var(--accent);
     word-break: break-all;
+    text-decoration: none;
 }
+.users-link:hover { text-decoration: underline; }
 .users-secret {
     font-size: 0.76rem;
     color: var(--text-muted);
@@ -125,7 +140,7 @@
     flex-wrap: wrap;
 }
 .users-pw {
-    color: var(--text);
+    color: var(--text-main);
     letter-spacing: 1px;
 }
 
