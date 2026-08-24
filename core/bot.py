@@ -193,7 +193,14 @@ class NeuraBot(commands.Bot):
 
     async def on_ready(self):
         if getattr(self, '_already_ready', False):
-            _log.info(f"Reconnected as {self.user.name}")
+            # A full re-IDENTIFY (RESUME failed) lands us here. on_disconnect
+            # already flipped is_ready to False, so we must re-arm it - the old
+            # code returned without doing so, leaving the bot stuck "CONNECTING"
+            # and silently refusing to send (send_message gates on is_ready).
+            if self.user:
+                self.is_ready = True
+                self.flag_account("ok", None)
+            _log.info(f"Reconnected as {self.user.name if self.user else 'unknown'}")
             return
 
         self.user_id = str(self.user.id)
