@@ -52,10 +52,31 @@ function jsArg(s) {
 // CSRF, once, instead of at ~60 fetch() call sites. The server requires
 // X-CSRF-Token on every non-GET /api/ request; this attaches it to same-origin
 // calls and leaves cross-origin ones (hcaptcha, discord) untouched.
+//
+// Session expiry is handled here too, for the same reason: the server answers
+// every expired-session /api/ call with a 401 + {success:false, error:'Session
+// expired'} body (see _reject_session). Dozens of feature fetches do
+// `data.proxies || []` / `data.commands || []` / `data.users || []`, so a 401
+// silently turned each panel empty (proxies vanished, custom commands cleared,
+// users list blanked, config broke) instead of sending the operator back to
+// login - the exact "everything disappears" symptom. Catching the 401 once,
+// at the shared fetch seam, fixes all of them without touching every caller.
 (function installCsrf() {
     const meta = document.querySelector('meta[name="csrf-token"]');
     let token = meta ? meta.getAttribute('content') : '';
     const nativeFetch = window.fetch.bind(window);
+    // A single in-flight redirect guard: many polls fire concurrently (accounts
+    // 5s, stats 1s, captcha 2s, config 5s), and on expiry they all return 401 at
+    // once. Without this, every one of them would race to set location.href.
+    let redirectingToLogin = false;
+
+    function bailToLogin() {
+        if (redirectingToLogin) return;
+        redirectingToLogin = true;
+        // /login is a GET page; appending a return hint lets it bounce back after
+        // a fresh sign-in. href (not replace) so a back-button still works.
+        window.location.href = '/login?expired=1';
+    }
 
     window.setCsrfToken = function (value) {
         if (value) token = value;
@@ -72,7 +93,16 @@ function jsArg(s) {
             if (!headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', token);
             init = Object.assign({}, init, { headers: headers });
         }
-        return nativeFetch(input, init);
+        return nativeFetch(input, init).then(function (res) {
+            // Only same-origin /api/ calls can carry our session; a 401 there is
+            // always _reject_session. Leave cross-origin (hcaptcha/discord) and
+            // non-api responses untouched so legitimate 401s elsewhere still
+            // reach their callers.
+            if (res.status === 401 && sameOrigin && /\/api\//.test(url)) {
+                bailToLogin();
+            }
+            return res;
+        });
     };
 })();
 

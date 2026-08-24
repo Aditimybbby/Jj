@@ -22,11 +22,32 @@ async function loadConfig() {
         showToast('Alt Account feature requires multiple accounts. Currently only one account is connected.', 'info');
     }
     const q = currentAccountId ? `?id=${currentAccountId}` : '';
-    const r = await fetch(`/api/settings${q}`);
-    currentConfig = await r.json();
-    originalConfig = JSON.parse(JSON.stringify(currentConfig));
-    renderSettings(currentConfig);
-    checkDirty();
+    try {
+        const r = await fetch(`/api/settings${q}`);
+        if (!r.ok) {
+            // A 401 is handled globally by the fetch wrapper (redirect to
+            // /login); any other non-2xx leaves the last good config in place
+            // instead of clobbering it with an error body that breaks every
+            // .commands/.core lookup in renderSettings.
+            console.warn('loadConfig: non-OK response', r.status);
+            return;
+        }
+        const data = await r.json();
+        // Guard against a non-object body (error dict, null) so buildConfigCategories
+        // does not iterate a string/null and throw mid-render.
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            console.warn('loadConfig: ignoring non-object settings payload');
+            return;
+        }
+        currentConfig = data;
+        originalConfig = JSON.parse(JSON.stringify(currentConfig));
+        renderSettings(currentConfig);
+        checkDirty();
+    } catch (e) {
+        // A transient network blip or a non-JSON error page should not wipe the
+        // config the operator is mid-edit on - keep the last good currentConfig.
+        console.error('Failed to load config', e);
+    }
 }
 
 function buildConfigCategories(cfg) {

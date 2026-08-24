@@ -20,6 +20,11 @@ class CooldownManager:
         self.bot = bot
         
     async def on_message(self, message):
+        # self.bot.user is None before the first READY; guard so a pre-ready
+        # dispatch does not raise AttributeError on None.id and take down the
+        # cooldown tracker.
+        if self.bot.user is None:
+            return
         if message.author.id == self.bot.user.id:
             content = message.content.lower().strip()
             prefix = self.bot.prefix.lower().strip()
