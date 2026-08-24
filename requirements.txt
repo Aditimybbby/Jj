@@ -11,3 +11,4 @@ nopecha
 numpy
 pillow
 onnxruntime
+pytesseract

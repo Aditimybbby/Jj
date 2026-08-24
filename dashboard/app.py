@@ -705,7 +705,7 @@ def stats():
 
     # the battle team lives on the cog, not in stats, because it is rebuilt from
     # whatever owo last showed us rather than persisted
-    team_info = {'slots': [], 'watching': False, 'owned': 0}
+    team_info = {'slots': [], 'watching': False, 'owned': 0, 'zoo': []}
     if is_active:
         others = bot.get_cog('Others')
         if others:
@@ -717,6 +717,7 @@ def stats():
                 ],
                 'watching': bool(team_cfg.get('enabled', True) and team_cfg.get('watch_zoo', True)),
                 'owned': others.owned_count,
+                'zoo': others.zoo_data,
             }
 
     response_data = {
@@ -725,6 +726,7 @@ def stats():
         'level': st.get('level'),
         'xp': st.get('xp'),
         'xp_needed': st.get('xp_needed'),
+        'rank': st.get('rank'),
         # "image" means owo answered with a rendered card we cannot read - the UI shows
         # that instead of leaving a stale number looking freshly synced
         'level_source': st.get('level_source'),

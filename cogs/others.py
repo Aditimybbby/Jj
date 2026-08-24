@@ -11,6 +11,7 @@
 
 
 import asyncio
+import io
 import json
 import time
 import re
@@ -18,6 +19,7 @@ import random
 import core.state as state
 from discord.ext import commands
 from component_v2_neura import parse_v2_message, collect_text
+from cogs.level_ocr import parse_level_card
 
 # ── level ────────────────────────────────────────────────────────────────────
 # owo prints the word "level" in hunt results, battle logs, quest lines, weapon
@@ -59,7 +61,7 @@ BAD_ANIMAL_PHRASES = ("invalid animal", "could not find that animal", "is not a 
 
 # every zoo row lists the whole tier in a fixed order, with a question mark holding
 # the slot of an animal you have never caught - so the slot index gives us the name
-# owo expects in "owo team add <name>" (names from the owo wiki)
+# owo expects in "owo team add <name>" (names + order from the owo wiki "All Animals")
 ZOO_TIERS = {
     "common": ("bee", "bug", "snail", "beetle", "butterfly"),
     "uncommon": ("chick", "mouse", "chicken", "rabbit", "chipmunk"),
@@ -67,17 +69,48 @@ ZOO_TIERS = {
     "epic": ("crocodile", "tiger", "penguin", "elephant", "whale"),
     "mythic": ("dragon", "unicorn", "snowman", "ghost", "dove"),
     "mythical": ("dragon", "unicorn", "snowman", "ghost", "dove"),
+    "patreon": ("pbird", "pdolphin", "pogre", "pscorpion", "ptiger"),
+    "gem": ("camel", "fish", "panda", "shrimp", "spider"),
+    "legendary": ("deer", "fox", "lion", "owl", "squid"),
+    "fabled": ("boar", "eagle", "frog", "gorilla", "wolf"),
+    "bot": ("dinobot", "giraffbot", "slothbot", "hedgebot", "lobbot"),
+    "hidden": ("koala", "lizard", "monkey", "snake", "octopus"),
+    "distorted": ("glitchparrot", "glitchotter", "glitchraccoon", "glitchflamingo", "glitchzebra"),
+    # special/event animals are dynamic (e.g. 2026july_pecan) - no fixed slot list,
+    # so the parser falls back to the custom-emoji name, which is exactly what
+    # `owo team add` accepts for them.
+    "special": (),
 }
 CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):\d+>')
 
 # unicode fallbacks for the same lists. A zoo row drawn with plain emoji used to be
 # thrown away, which is the main reason rare animals never made it onto the team.
+# OwO renders every animal as a *custom* server emoji (named after the animal), so
+# the custom-emoji-name path in ``_name_for`` is the one that actually fires for the
+# higher tiers; these unicode maps are a safety net for the handful of clients /
+# embeds that fall back to standard emoji. Names follow the OwO wiki "All Animals"
+# page (https://owobot.fandom.com/wiki/All_Animals) so `owo team add <name>` works.
+# Note: octopus has no single-codepoint unicode glyph, so it relies on the custom
+# emoji path (or the ZOO_TIERS slot index) - that is intentional.
 UNICODE_ANIMALS = {
+    # common
     "🐝": "bee", "🐛": "bug", "🐌": "snail", "🪲": "beetle", "🦋": "butterfly",
+    # uncommon
     "🐤": "chick", "🐭": "mouse", "🐔": "chicken", "🐰": "rabbit", "🐿": "chipmunk",
+    # rare
     "🐑": "sheep", "🐷": "pig", "🐮": "cow", "🐶": "dog", "🐱": "cat",
+    # epic
     "🐊": "crocodile", "🐯": "tiger", "🐧": "penguin", "🐘": "elephant", "🐳": "whale",
+    # mythical
     "🐲": "dragon", "🦄": "unicorn", "⛄": "snowman", "👻": "ghost", "🕊": "dove",
+    # gem
+    "🐫": "camel", "🐟": "fish", "🐼": "panda", "🦐": "shrimp", "🕷": "spider",
+    # legendary
+    "🦌": "deer", "🦊": "fox", "🦁": "lion", "🦉": "owl", "🐙": "squid",
+    # fabled
+    "🐗": "boar", "🦅": "eagle", "🐸": "frog", "🦍": "gorilla", "🐺": "wolf",
+    # hidden (octopus has no plain glyph - handled by custom emoji / slot index)
+    "🐨": "koala", "🦎": "lizard", "🐵": "monkey", "🐍": "snake",
 }
 # selectors and joiners that ride along with an emoji but are not part of its identity
 EMOJI_MODIFIERS = ("️", "︎", "‍", "⃣")
@@ -90,13 +123,17 @@ ZOO_TOKEN_RE = re.compile(
 )
 SUPERSCRIPTS = {'⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
                 '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'}
-# rarest first so "uncommon" is never matched as "common"
+# rarest first so "uncommon" is never matched as "common", and so a tier word that
+# contains another (e.g. "mythical" vs "mythic") is tried in the right order.
+# Ranks are ordered by rarity (higher = rarer); values only need to be monotonic.
 RARITY_RANK = (
-    ("distorted", 8), ("hidden", 7), ("fabled", 6), ("legendary", 5),
-    ("mythical", 4), ("mythic", 4), ("epic", 3), ("uncommon", 1), ("rare", 2), ("common", 0),
+    ("distorted", 12), ("hidden", 11), ("special", 10), ("fabled", 9),
+    ("bot", 8), ("legendary", 7), ("gem", 6), ("mythical", 5), ("mythic", 5),
+    ("patreon", 4), ("epic", 3), ("rare", 2), ("uncommon", 1), ("common", 0),
 )
-RANK_NAMES = {0: "common", 1: "uncommon", 2: "rare", 3: "epic", 4: "mythical",
-              5: "legendary", 6: "fabled", 7: "hidden", 8: "distorted"}
+RANK_NAMES = {0: "common", 1: "uncommon", 2: "rare", 3: "epic", 4: "patreon",
+              5: "mythical", 6: "gem", 7: "legendary", 8: "bot", 9: "fabled",
+              10: "special", 11: "hidden", 12: "distorted"}
 UNOWNED = ("❓", "❔", "question")
 
 # animals whose tier we know without ever reading the zoo
@@ -180,7 +217,7 @@ class Others(commands.Cog):
 
     # ── level ────────────────────────────────────────────────────────────────
 
-    def _store_level(self, level, xp, xp_needed, source="text"):
+    def _store_level(self, level, xp, xp_needed, source="text", rank=None):
         st = self.bot.stats
         changed = []
         if level is not None and st.get('level') != level:
@@ -192,6 +229,9 @@ class Others(commands.Cog):
             changed.append(f"{xp:,}/{xp_needed:,} xp" if xp_needed else f"{xp:,} xp")
         elif xp_needed is not None:
             st['xp_needed'] = xp_needed
+        if rank is not None:
+            st['rank'] = rank
+            changed.append(f"rank #{rank:,}")
         if level is not None or xp is not None:
             st['level_source'] = source
         if changed:
@@ -199,8 +239,34 @@ class Others(commands.Cog):
             state.save_account_stats()
             self.bot.log("INFO", f"OwO level synced: {', '.join(changed)}")
 
+    async def _read_level_image(self, url):
+        """OwO drew the level as a picture - OCR it instead of giving up.
+
+        Downloads the attachment through the bot's own (proxy-aware) session and
+        runs the multi-pass Tesseract reader in ``cogs.level_ocr``. Returns
+        ``(level, xp, xp_needed, rank)`` with any field that could not be read
+        left as ``None``.
+        """
+        if not url:
+            return None, None, None, None
+        session = getattr(self.bot, 'session', None)
+        if session is None or getattr(session, 'closed', True):
+            return None, None, None, None
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None, None, None, None
+                data = await resp.read()
+        except Exception as e:
+            self.bot.log("ERROR", f"Level image download failed: {e}")
+            return None, None, None, None
+        level, xp, xp_needed, rank = parse_level_card(data)
+        if level is not None or xp is not None:
+            self._level_image_warned = False
+        return level, xp, xp_needed, rank
+
     def _note_level_unreadable(self):
-        """owo drew the level as a picture - say so instead of inventing a number."""
+        """last-resort: the image could not be OCRed either. Say so, don't guess."""
         self._want_level_until = 0.0
         self.bot.stats['level_source'] = 'image'
         if self._level_image_warned:
@@ -208,8 +274,8 @@ class Others(commands.Cog):
         self._level_image_warned = True
         self.bot.log(
             "WARN",
-            "OwO answered `owo level` with an image card and no readable text. Level and "
-            "xp stay blank on the dashboard rather than showing a guessed number."
+            "OwO answered `owo level` with an image card that OCR could not read. "
+            "Level and xp stay blank on the dashboard rather than showing a guessed number."
         )
 
     # ── zoo / team ───────────────────────────────────────────────────────────
@@ -229,6 +295,14 @@ class Others(commands.Cog):
     @property
     def owned_count(self):
         return len(self._owned)
+
+    @property
+    def zoo_data(self):
+        """Owned animals with their rarity tier, rarest-first, for the dashboard."""
+        return [
+            {'animal': animal, 'rarity': RANK_NAMES.get(rank, 'unknown'), 'rank': rank}
+            for animal, rank in self._owned
+        ]
 
     def rarity_name(self, animal):
         return RANK_NAMES.get(self.rank_of(animal), 'unknown')
@@ -345,6 +419,10 @@ class Others(commands.Cog):
         seen = []
         for name in names:
             if name in UNOWNED or name in seen:
+                continue
+            # the rarity badge owo prints in front of a team row (<:LegendaryTier:..>)
+            # is not an animal - drop it so `team add` never gets handed "legendarytier"
+            if self._is_tier_badge(f"<:{name}:0>"):
                 continue
             seen.append(name)
         return seen
@@ -603,7 +681,15 @@ class Others(commands.Cog):
                     self._want_level_until = 0.0
                     self._store_level(level, xp, xp_needed, source="v2")
                 elif data.get("attachments"):
-                    self._note_level_unreadable()
+                    # OwO rendered the level as an image card - download and OCR it
+                    att = data["attachments"][0]
+                    img_url = att.get("proxy_url") or att.get("url")
+                    lvl, xpv, xpn, rank = await self._read_level_image(img_url)
+                    if lvl is not None or xpv is not None:
+                        self._want_level_until = 0.0
+                        self._store_level(lvl, xpv, xpn, source="image", rank=rank)
+                    else:
+                        self._note_level_unreadable()
         except Exception as e:
             self.bot.log("ERROR", f"V2 card handling failed: {e}")
 
@@ -659,11 +745,18 @@ class Others(commands.Cog):
             self._store_level(level, xp, xp_needed)
             return
 
-        # `owo level` answered, but with nothing we can read - do not leave the old
-        # number sitting there as if it were fresh
+        # `owo level` answered with an image card - OCR it instead of leaving the
+        # old number sitting there as if it were fresh
         if (time.time() <= self._want_level_until and message.attachments
                 and self.bot.is_message_for_me(message, role="header")):
-            self._note_level_unreadable()
+            att = message.attachments[0]
+            img_url = getattr(att, 'proxy_url', None) or getattr(att, 'url', None)
+            lvl, xpv, xpn, rank = await self._read_level_image(img_url)
+            if lvl is not None or xpv is not None:
+                self._want_level_until = 0.0
+                self._store_level(lvl, xpv, xpn, source="image", rank=rank)
+            else:
+                self._note_level_unreadable()
             return
 
         if any(phrase in content for phrase in HUNT_PHRASES):
