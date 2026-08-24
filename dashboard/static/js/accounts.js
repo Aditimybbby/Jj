@@ -162,7 +162,9 @@ function accountConfigCard(acc) {
     const name = acc.name || 'Unnamed';
     const health = acc.status || 'ok';
     const runState = acc.running
-        ? '<span class="acct-state running">RUNNING</span>'
+        ? (acc.ready
+            ? '<span class="acct-state running">RUNNING</span>'
+            : '<span class="acct-state connecting">CONNECTING</span>')
         : '<span class="acct-state stopped">STOPPED</span>';
     const healthState = health === 'ok' ? '' :
         `<span class="acct-state problem">${escHtml(ACCOUNT_STATUS_LABELS[health] || String(health).toUpperCase())}</span>`;

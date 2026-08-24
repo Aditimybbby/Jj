@@ -896,11 +896,13 @@ def accounts_config_api():
 
     try:
         accounts = proxy_manager.load_accounts(g.owner)
-        running = supervisor.running_names(g.owner)
+        running = supervisor.running_states(g.owner)
         for acc in accounts:
             if acc.get('token'):
                 acc['token_masked'] = proxy_manager.mask_token(acc['token'])
             acc['running'] = acc.get('name') in running
+            # False while the instance exists but has not logged in yet
+            acc['ready'] = bool(running.get(acc.get('name')))
         return jsonify({'accounts': accounts})
     except Exception:
         return jsonify({'accounts': []})

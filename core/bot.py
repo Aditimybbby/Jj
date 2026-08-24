@@ -47,13 +47,17 @@ CURRENT_VERSION = "2.5.0"
 
 class NeuraBot(commands.Bot):
     def __init__(self, token=None, channels=None, proxy_url=None, proxy_auth=None, proxy_label="direct",
-                 owner_id=spaces.ADMIN_SPACE):
+                 space_owner=spaces.ADMIN_SPACE):
         self.session = None
         self.base_dir = state.BASE_DIR
         # the shared defaults; the per-account override lives in this bot's space
         self.config_file = os.path.join(state.CONFIG_DIR, 'settings.json')
-        self.owner_id = spaces.normalise_owner(owner_id)
-        
+        # NOT self.owner_id: commands.Bot.__init__ owns that name (it is discord.py's
+        # "which user owns this bot" option) and unconditionally overwrites it with
+        # options.get('owner_id') -> None, which silently detached every bot from its
+        # space. Keep the space id on its own attribute.
+        self.space_owner = spaces.normalise_owner(space_owner)
+
         self.console = Console()
         self.aliases = {}
         self.config = {}
@@ -142,7 +146,7 @@ class NeuraBot(commands.Bot):
         
         try:
             history = state.ht.load_history()
-            state.ht.start_session(history, owner=self.owner_id)
+            state.ht.start_session(history, owner=self.space_owner)
         except Exception as e:
             self.log("ERROR", f"Failed to start history session: {e}")
 
@@ -198,7 +202,7 @@ class NeuraBot(commands.Bot):
         self.user_display_name = self.display_name
 
         # so the dashboard can tell which space a running account belongs to
-        state.account_owners[self.user_id] = self.owner_id
+        state.account_owners[self.user_id] = self.space_owner
         
         self.identifiers = [
             self.username.lower(),
@@ -423,7 +427,7 @@ class NeuraBot(commands.Bot):
             return
         try:
             from utils import proxy_manager
-            proxy_manager.set_account_status(self.owner_id, name, status, reason)
+            proxy_manager.set_account_status(self.space_owner, name, status, reason)
         except Exception as e:
             _log.warning("could not record account status: %s", e)
 
@@ -626,6 +630,9 @@ class NeuraBot(commands.Bot):
                 base[key] = value
 
     def _load_config(self):
+        # a mid-way failure must not leave the bot with an empty config - that would
+        # silently drop every command gate down to its hardcoded default
+        previous_config = self.config if isinstance(getattr(self, 'config', None), dict) else {}
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r') as f:
@@ -639,7 +646,7 @@ class NeuraBot(commands.Bot):
 
             # three layers: the shipped defaults, then whatever this space chose
             # for all of its accounts, then this one account's overrides
-            space_config_file = spaces.settings_path(self.owner_id)
+            space_config_file = spaces.settings_path(self.space_owner)
             if os.path.exists(space_config_file):
                 try:
                     with open(space_config_file, 'r') as f:
@@ -648,7 +655,7 @@ class NeuraBot(commands.Bot):
                     self.log("ERROR", f"Failed to load space settings.json: {e}")
 
             if uid:
-                user_config_file = spaces.settings_path(self.owner_id, uid)
+                user_config_file = spaces.settings_path(self.space_owner, uid)
                 
                 if os.path.exists(user_config_file):
                     try:
@@ -668,7 +675,7 @@ class NeuraBot(commands.Bot):
             else:
                 self.log("SYS", "Using global settings: settings.json")
 
-            account_file = spaces.accounts_path(self.owner_id)
+            account_file = spaces.accounts_path(self.space_owner)
             if os.path.exists(account_file):
                 try:
                     with open(account_file, 'r') as f:
@@ -717,7 +724,7 @@ class NeuraBot(commands.Bot):
 
         except Exception as e:
             print(f"Error loading config: {e}")
-            self.config = {}
+            self.config = previous_config
 
 
     def check_version(self):

@@ -81,8 +81,11 @@ Everything downstream carries the owner explicitly:
   `stop_account(owner, name)`, `start_all(accounts, owner)`, `stop_all(owner=None)`,
   `running_names(owner=None)`. Keying on `(owner, name)` is what stops two tenants who both named an
   account `acc1` from stopping each other's bot.
-- `NeuraBot` — `self.owner_id`, set from the supervisor; `bot.log`/`flag_account`/`_load_config` all
-  route through it.
+- `NeuraBot` — `self.space_owner`, set from the supervisor; `bot.log`/`flag_account`/`_load_config` all
+  route through it. It is deliberately **not** called `owner_id`: `commands.Bot.__init__` assigns
+  `self.owner_id = options.get('owner_id')`, so a space id parked there is overwritten with `None` the
+  moment `super().__init__()` runs, which detaches every bot from its space (no profile cards, and
+  stop reporting "no accounts are running" while the accounts keep farming).
 - `core/state.py` — `account_owners` (Discord id string → owner), `owner_of(id)`, `bots_for(owner)`,
   `owns_bot(owner, id)`, `visible_logs(owner)`, and `log_command(..., owner=None)`.
 
