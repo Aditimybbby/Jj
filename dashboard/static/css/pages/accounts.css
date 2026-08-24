@@ -101,6 +101,11 @@
     background: rgba(255, 204, 0, 0.1);
     border: 1px solid rgba(255, 204, 0, 0.25);
 }
+.account-card-status.connecting {
+    color: #ffc861;
+    background: rgba(255, 200, 97, 0.1);
+    border: 1px solid rgba(255, 200, 97, 0.25);
+}
 .account-selected-badge {
     flex-shrink: 0;
     font-size: 0.65rem;
