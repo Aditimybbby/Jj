@@ -20,12 +20,25 @@ from discord.ext import commands
 from lazy_engines.quest_engine import LazyQuestEngine
 from component_v2_neura import parse_v2_message, collect_text, buttons
 
-QUEST_TITLE_RE = re.compile(r'^\W{0,4}(\d{1,2})\s*[.)\-]\s*(.+)$')
+# a quest line owo numbers itself. The separator is not always a dot: cards in the
+# wild use "1) ", "1- " and "quest 1: ", and the leading \W run absorbs any markdown
+# or bullet emoji owo puts in front of the number.
+QUEST_TITLE_RE = re.compile(r'^\W{0,4}(?:quest\s*)?(\d{1,2})\s*[.):\-]\s*(.+)$', re.I)
 PROGRESS_RE = re.compile(r'\b(\d+)\s*/\s*(\d+)\b')
 # words owo puts on a claim control, on the custom_id or on the visible label
 CLAIM_HINTS = ("claim", "reward")
 # owo swaps the "N/M" counter for a tick once a quest is finished
 DONE_MARKERS = ("✅", "☑", "✔", "🎉", "completed!", "quest complete")
+# OwO titles the quest card differently across updates ("Quest Log", "Quests",
+# "Your Quests", "Daily Quests", "Checklist"...). Matching only the literal
+# "quest log" used to miss the card entirely, leaving the dashboard on
+# "No active quests tracked" forever. Both listeners share this list so the legacy
+# embed path cannot recognise fewer cards than the v2 path; the identity guard that
+# follows each match is what keeps another account's card out.
+QUEST_HEADERS = (
+    "quest log", "quest list", "your quest", "daily quest",
+    "active quest", "quest card", "checklist", "quests",
+)
 
 class Quest(commands.Cog):
     def __init__(self, bot):
@@ -56,7 +69,11 @@ class Quest(commands.Cog):
 
     @commands.Cog.listener()
     async def on_socket_raw_receive(self, msg):
-        if not self.active or self.bot.paused:
+        # deliberately not gated on bot.paused: reading a card is passive, and an
+        # unsolved captcha holds `paused` for as long as it takes the operator to
+        # answer it - dropping quest cards for that whole stretch is exactly when the
+        # dashboard went stale. The outgoing side (_claim_rewards) checks paused itself.
+        if not self.active:
             return
 
         # discord.py-self hands us a str (it zlib-decompresses binary frames
@@ -91,16 +108,10 @@ class Quest(commands.Cog):
         content = data.get("content") or ""
         full_text = f"{content}\n{v2_text}".lower()
 
-        # OwO titles the quest card differently across updates ("Quest Log",
-        # "Quests", "Your Quests", "Daily Quests", "Checklist"...). Matching only
-        # the literal "quest log" used to miss the card entirely, leaving the
-        # dashboard on "No active quests tracked" forever. Recognise any of the
-        # known headers - the _v2_text_is_mine guard below still keeps us from
-        # grabbing another account's card in a shared channel.
-        if any(header in full_text for header in (
-            "quest log", "quest list", "your quest", "daily quest",
-            "active quest", "quest card", "checklist", "quests",
-        )):
+        # OwO titles the quest card differently across updates - see QUEST_HEADERS.
+        # The _v2_text_is_mine guard below still keeps us from grabbing another
+        # account's card in a shared channel.
+        if any(header in full_text for header in QUEST_HEADERS):
             if not self._v2_text_is_mine(full_text):
                 return
 
@@ -165,6 +176,17 @@ class Quest(commands.Cog):
         if cleaned_quests:
             st['quest_data'] = cleaned_quests
             self.bot.log("SYS", f"Dashboard synced: {len(cleaned_quests)} V2 quests tracked.")
+        else:
+            # the card was recognised as a quest log of ours, yet not one line parsed.
+            # This used to fall through in silence, so the panel kept showing stale (or
+            # no) quests with nothing in the log to point at the real cause. Print a
+            # sample of what owo actually sent so the shape can be matched.
+            sample = " | ".join(line.strip() for line in text_lines if line.strip())[:300]
+            self.bot.log(
+                "WARN",
+                f"Quest card recognised but no quest lines parsed - dashboard left unchanged. "
+                f"Card text: {sample}"
+            )
 
         #  global timer in v2 text lines
         timer_pattern = r'next quest.*?\bin\s*(\d+\w+(?:\s*\d+\w+)*)'
@@ -198,6 +220,10 @@ class Quest(commands.Cog):
     async def _claim_rewards(self, components, message_data, completed_count):
         cfg = self.bot.config.get('commands', {}).get('quest', {})
         if not cfg.get('auto_claim', True):
+            return
+        # reading the card is passive, clicking a claim button is not. `paused` covers an
+        # unsolved captcha and an operator stop, and neither should produce traffic.
+        if self.bot.paused:
             return
 
         channel_id = message_data.get("channel_id")
@@ -296,7 +322,7 @@ class Quest(commands.Cog):
             return
 
         full_text = self.bot.get_full_content(message)
-        if "quest log" not in full_text and "checklist" not in full_text:
+        if not any(header in full_text for header in QUEST_HEADERS):
             return
         if not self.bot.is_message_for_me(message, role="header"):
             return
@@ -313,6 +339,9 @@ class Quest(commands.Cog):
         """Claim from an embed-style card using discord.py-self's own button click."""
         cfg = self.bot.config.get('commands', {}).get('quest', {})
         if not cfg.get('auto_claim', True):
+            return
+        # same rule as the v2 claim path: no outgoing clicks while paused
+        if self.bot.paused:
             return
 
         for row in message.components:
