@@ -112,6 +112,12 @@ class NeuraBot(commands.Bot):
         self.cmd_states = {}
         self.neura_queue = asyncio.PriorityQueue()
         self.neura_scheduler_task = None
+        # Every background worker this bot spawns, so stop_account can cancel
+        # the lot instead of only neura_scheduler_task. The others loop on
+        # `while self.active` and would wind down on their own, but cancelling
+        # them explicitly closes the small window where a worker wakes between
+        # active=False and bot.close() and tries to send on a closing gateway.
+        self.worker_tasks = []
         self.is_busy = False
         self.grind_active_time = 0.0
         self.last_break_check = 0.0
@@ -150,10 +156,13 @@ class NeuraBot(commands.Bot):
         except Exception as e:
             self.log("ERROR", f"Failed to start history session: {e}")
 
-        asyncio.create_task(self._process_pending_commands())
-        asyncio.create_task(self.neura_queue_worker())
-        asyncio.create_task(self._track_active_time())
+        self.worker_tasks = [
+            asyncio.create_task(self._process_pending_commands()),
+            asyncio.create_task(self.neura_queue_worker()),
+            asyncio.create_task(self._track_active_time()),
+        ]
         self.neura_scheduler_task = asyncio.create_task(self.neura_scheduler_worker())
+        self.worker_tasks.append(self.neura_scheduler_task)
         await self._load_cogs()
     
     async def _track_active_time(self):

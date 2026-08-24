@@ -434,6 +434,20 @@
 
         let successTriggered = false;
 
+        // If the dashboard's shared fetch wrapper bounced us here because the
+        // session lapsed mid-use, tell the operator why instead of a bare login
+        // screen that looks like a random redirect.
+        (function () {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('expired') === '1') {
+                const err = document.getElementById('error-display');
+                if (err) {
+                    err.textContent = 'Your session expired. Please sign in again.';
+                    err.style.display = 'block';
+                }
+            }
+        })();
+
         document.getElementById('loginForm').addEventListener('submit', function (e) {
             e.preventDefault();
             const u = document.getElementById('username').value;

@@ -43,6 +43,13 @@ class ResponseHandler(commands.Cog):
         await self._process_response(after)
 
     async def _process_response(self, message):
+        # discord.py-self sets self.user from the READY event, and MESSAGE_CREATE
+        # only arrives after READY - but a reconnect race or a stray dispatch
+        # before the first on_ready can leave self.bot.user None here. Without
+        # this guard the very first line below would raise AttributeError on
+        # None.id and kill the response pipeline for the whole session.
+        if self.bot.user is None:
+            return
         if message.author.id == self.bot.user.id:
             content_clean = (message.content or "").lower().strip()
             prefix = self.bot.prefix.lower().strip()

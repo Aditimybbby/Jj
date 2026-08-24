@@ -161,10 +161,12 @@ async def stop_account(owner, name):
         state.bot_instances.remove(bot)
 
     # Belt and suspenders: cancel any stray background workers the bot spawned
-    # (_track_active_time, _process_pending_commands, neura workers) so they do
-    # not keep firing after the account is gone.
-    for attr in ('neura_scheduler_task',):
-        task = getattr(bot, attr, None)
+    # (_track_active_time, _process_pending_commands, neura_queue_worker,
+    # neura_scheduler_worker) so they do not keep firing after the account is
+    # gone. They loop on `while self.active` and would exit on their own, but
+    # cancelling closes the race where a worker wakes between active=False and
+    # close() and tries to send on a shutting gateway.
+    for task in (getattr(bot, 'worker_tasks', None) or []):
         if task is not None and not task.done():
             task.cancel()
     return True, f"{name} stopped"
