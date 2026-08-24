@@ -19,7 +19,7 @@ import random
 import core.state as state
 from discord.ext import commands
 from component_v2_neura import parse_v2_message, collect_text
-from cogs.level_ocr import parse_level_card
+from modules.level_ocr import parse_level_card
 
 # ── level ────────────────────────────────────────────────────────────────────
 # owo prints the word "level" in hunt results, battle logs, quest lines, weapon
@@ -255,7 +255,7 @@ class Others(commands.Cog):
         """OwO drew the level as a picture - OCR it instead of giving up.
 
         Downloads the attachment through the bot's own (proxy-aware) session and
-        runs the multi-pass Tesseract reader in ``cogs.level_ocr``. Returns
+        runs the multi-pass Tesseract reader in ``modules.level_ocr``. Returns
         ``(level, xp, xp_needed, rank)`` with any field that could not be read
         left as ``None``.
         """

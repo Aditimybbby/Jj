@@ -92,7 +92,17 @@ def start_dashboard():
         _dashboard_thread.start()
 
 def load_enabled_accounts(owner):
-    return [a for a in proxy_manager.load_accounts(owner) if a.get('enabled', True)]
+    """Accounts this space wants running right now.
+
+    `enabled` is "this account is part of my farm"; `autostart` is "and it should
+    be up". The dashboard's Stop button clears autostart, so an account the
+    operator stopped stays stopped through a restart or a redeploy instead of
+    quietly coming back and farming behind their back.
+    """
+    return [
+        a for a in proxy_manager.load_accounts(owner)
+        if a.get('enabled', True) and proxy_manager.wants_autostart(a)
+    ]
 
 
 _started_spaces = set()
@@ -110,6 +120,11 @@ def spaces_with_accounts():
         if accounts or owner == spaces.ADMIN_SPACE:
             out.append((owner, accounts))
     return out
+
+
+def configured_account_count():
+    """How many accounts exist across every space, autostart or not."""
+    return sum(len(proxy_manager.load_accounts(owner)) for owner in spaces.list_owners())
 
 async def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -143,7 +158,11 @@ async def main():
         # operator's (see core/spaces.py)
         pending = spaces_with_accounts()
         total = sum(len(accounts) for _owner, accounts in pending)
-        if not total and not HEADLESS:
+        # Only re-prompt when there is genuinely nothing configured. Accounts that
+        # exist but were stopped from the dashboard must not send us back around
+        # the menu loop - that would keep the process from ever reaching the idle
+        # state where the dashboard can start them again.
+        if not total and not configured_account_count() and not HEADLESS:
             console.print("[bold red]No active accounts? Add some in the Account Manager (Option 2).[/bold red]")
             time.sleep(2)
             continue
@@ -160,7 +179,12 @@ async def main():
             for ok, message in start_result.get('results', start_result if isinstance(start_result, list) else []):
                 console.print(f"[green]{message}[/green]" if ok else f"[bold red]{message}[/bold red]")
         if not total:
-            console.print("[bold yellow]No enabled accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
+            configured = configured_account_count()
+            if configured:
+                console.print(f"[bold yellow]{configured} account(s) configured, none set to autostart - "
+                              f"start them from the dashboard Accounts page.[/bold yellow]")
+            else:
+                console.print("[bold yellow]No enabled accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
         console.print("[bold green]Dashboard is in control. Start, stop and verify accounts from the Accounts page.[/bold green]")
         while True:
             await asyncio.sleep(60)

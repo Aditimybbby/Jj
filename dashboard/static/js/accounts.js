@@ -191,6 +191,10 @@ function accountConfigCard(acc) {
             ? '<span class="acct-state running">RUNNING</span>'
             : '<span class="acct-state connecting">CONNECTING</span>')
         : '<span class="acct-state stopped">STOPPED</span>';
+    // an account stopped from here stays stopped through a restart, so say so
+    const autostartState = (!acc.running && acc.autostart === false)
+        ? '<span class="acct-state stopped" title="Stopped on purpose - it will not come back on its own when the process restarts">NO AUTOSTART</span>'
+        : '';
     const healthState = health === 'ok' ? '' :
         `<span class="acct-state problem">${escHtml(ACCOUNT_STATUS_LABELS[health] || String(health).toUpperCase())}</span>`;
     const reason = health === 'ok' || !acc.status_reason ? '' :
@@ -201,7 +205,7 @@ function accountConfigCard(acc) {
     return `
         <div class="account-config-card">
             <div class="account-config-info">
-                <strong>${escHtml(name)} ${runState}${healthState}</strong>
+                <strong>${escHtml(name)} ${runState}${autostartState}${healthState}</strong>
                 <span class="mono">${escHtml(token)}</span>
                 <span class="dim">${escHtml(proxy)} · ${status} · Channels: ${escHtml(channels)}</span>
                 ${reason}
@@ -372,38 +376,47 @@ window.saveAccountForm = async function() {
         showToast('Account name is required', 'error');
         return;
     }
-    const entry = { name, channels, enabled, proxy_id };
     const duplicate = accountConfigList.some((acc, i) => i !== index && (acc.name || '') === name);
     if (duplicate) {
         showToast('Another account already uses that name', 'error');
         return;
     }
     if (index >= 0 && accountConfigList[index]) {
-        entry.token = accountConfigList[index].token;
-        if (token) entry.token = token;
-        if (!entry.token) {
-            showToast('Token is required for new accounts', 'error');
-            return;
-        }
+        // Keep every field the server tracks (health status, autostart) and only
+        // overwrite what this form owns. The real token never reaches the browser,
+        // so a blank token box means "keep the stored one"; orig_name lets the
+        // server still find that row after a rename.
+        const prev = accountConfigList[index];
+        const entry = Object.assign({}, prev, { name, channels, enabled, proxy_id });
+        entry.orig_name = prev.name || name;
+        if (token) entry.token = token; else delete entry.token;
         accountConfigList[index] = entry;
     } else {
         if (!token) {
             showToast('Token is required', 'error');
             return;
         }
-        entry.token = token;
-        accountConfigList.push(entry);
+        accountConfigList.push({ name, channels, enabled, proxy_id, token, autostart: true });
     }
     await saveAccountConfigList();
     hideAccountForm();
 };
 
 async function saveAccountConfigList() {
+    // running/ready/token_masked are rendering aids the GET adds, not settings -
+    // don't write them back into accounts.json
+    const payload = accountConfigList.map(acc => {
+        const clean = Object.assign({}, acc);
+        delete clean.token_masked;
+        delete clean.running;
+        delete clean.ready;
+        return clean;
+    });
     try {
         const res = await fetch('/api/accounts/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ accounts: accountConfigList }),
+            body: JSON.stringify({ accounts: payload }),
         });
         const data = await res.json();
         if (data.status === 'success') {

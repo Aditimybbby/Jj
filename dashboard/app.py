@@ -455,7 +455,7 @@ def login():
         if not allowed:
              return jsonify({'success': False, 'error': f'Too many failed attempts. Try again in {wait_time}s'})
 
-        data = request.json or {}
+        data = _payload()
         identifier = data.get('username') or data.get('email') or ''
         password = data.get('password') or ''
         cfg = load_auth_config()
@@ -503,7 +503,7 @@ def activate():
     if request.method == 'GET':
         return render_template('activate.html')
 
-    data = request.json or {}
+    data = _payload()
     ip = client_ip()
     allowed, wait_time = check_rate_limit(ip)
     if not allowed:
@@ -844,7 +844,11 @@ def settings():
                        else spaces.settings_path(g.owner))
 
     if request.method == 'POST':
-        new_config = request.json
+        new_config = _payload()
+        if not new_config:
+            # a null/empty body used to be written straight through, leaving
+            # settings.json holding "null" and every account unable to boot
+            return jsonify({"status": "error", "message": "settings body must be a JSON object"}), 400
         try:
             save_to_all = request.args.get('all_accounts') == 'true' or request.args.get('all') == 'true'
 
@@ -904,13 +908,30 @@ def accounts_config_api():
     from utils import proxy_manager
     from core import supervisor
     if request.method == 'POST':
-        payload = request.json or {}
-        accounts = payload.get('accounts', payload if isinstance(payload, list) else [])
+        payload = _payload() or {}
+        if isinstance(payload, list):
+            accounts = payload
+        elif 'accounts' in payload:
+            accounts = payload.get('accounts')
+        else:
+            # A body with no 'accounts' key used to fall through as "save zero
+            # accounts", and save_accounts would then wipe every account and
+            # every stored token with no undo - so an empty or malformed request
+            # destroyed the whole farm. Deleting the last account still works:
+            # that sends an explicit {"accounts": []}.
+            return jsonify({"status": "error",
+                            "message": "Missing 'accounts' in request body"}), 400
         if not isinstance(accounts, list):
             return jsonify({"status": "error", "message": "accounts must be a list"}), 400
         if len(accounts) > MAX_ACCOUNTS_PER_SPACE:
             return jsonify({"status": "error",
                             "message": f"At most {MAX_ACCOUNTS_PER_SPACE} accounts per space"}), 400
+
+        # The browser is never given the real tokens (see the GET below), so the
+        # stored ones are the only copy. Anything the client left out is carried
+        # over from disk rather than dropped.
+        existing = proxy_manager.load_accounts(g.owner)
+        by_name = {str(a.get('name')): a for a in existing}
 
         # an account name reaches the admin's browser inside an account card, and
         # it is also matched against by supervisor - so keep it boring
@@ -930,6 +951,22 @@ def accounts_config_api():
             if pid and not proxy_manager.valid_proxy_id(pid):
                 return jsonify({"status": "error", "message": f"Invalid proxy id: {pid!r}"}), 400
 
+            # orig_name lets a rename still find its old row, so editing the name
+            # of an account does not lose its token or its health history
+            prior = by_name.get(str(account.pop('orig_name', '') or '')) or by_name.get(name)
+            # display-only fields the GET adds; they are not configuration
+            for transient in ('token_masked', 'running', 'ready'):
+                account.pop(transient, None)
+            if not str(account.get('token') or '').strip():
+                if not prior or not prior.get('token'):
+                    return jsonify({"status": "error",
+                                    "message": f"Token is required for {name!r}"}), 400
+                account['token'] = prior['token']
+            if prior:
+                for carried in ('status', 'status_reason', 'status_at', 'autostart'):
+                    if carried not in account and carried in prior:
+                        account[carried] = prior[carried]
+
         try:
             proxy_manager.save_accounts(g.owner, accounts)
             proxy_manager.sync_proxy_assignments(g.owner)
@@ -943,13 +980,21 @@ def accounts_config_api():
     try:
         accounts = proxy_manager.load_accounts(g.owner)
         running = supervisor.running_states(g.owner)
+        out = []
         for acc in accounts:
+            # A Discord user token is full account access. The accounts page only
+            # ever renders the masked form, so the real one never leaves the
+            # server - not into the DOM, not into a browser cache, not into an
+            # extension reading XHR bodies. POST above fills it back in.
+            safe = {k: v for k, v in acc.items() if k != 'token'}
             if acc.get('token'):
-                acc['token_masked'] = proxy_manager.mask_token(acc['token'])
-            acc['running'] = acc.get('name') in running
+                safe['token_masked'] = proxy_manager.mask_token(acc['token'])
+            safe['autostart'] = proxy_manager.wants_autostart(acc)
+            safe['running'] = acc.get('name') in running
             # False while the instance exists but has not logged in yet
-            acc['ready'] = bool(running.get(acc.get('name')))
-        return jsonify({'accounts': accounts})
+            safe['ready'] = bool(running.get(acc.get('name')))
+            out.append(safe)
+        return jsonify({'accounts': out})
     except Exception:
         return jsonify({'accounts': []})
 
@@ -989,7 +1034,7 @@ def _find_account(accounts, name):
 def account_launch():
     from utils import proxy_manager
     from core import supervisor
-    name = (request.json or {}).get('name')
+    name = _payload().get('name')
     # the lookup is inside the caller's space, so one tenant cannot start another
     # tenant's account by guessing its name
     account = _find_account(proxy_manager.load_accounts(g.owner), name)
@@ -1000,6 +1045,9 @@ def account_launch():
     if error:
         return jsonify({'success': False, 'error': error}), 503
     ok, message = result
+    if ok:
+        # remember the operator wants this one up, so a restart brings it back
+        proxy_manager.set_account_autostart(g.owner, name, True)
     state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
     return jsonify({'success': ok, 'message': message})
 
@@ -1007,8 +1055,15 @@ def account_launch():
 @app.route('/api/accounts/stop', methods=['POST'])
 @space_required
 def account_stop():
+    from utils import proxy_manager
     from core import supervisor
-    name = (request.json or {}).get('name')
+    name = _payload().get('name')
+    # Clear autostart first, and whether or not a live instance was found. The
+    # point of Stop is "stay stopped": if this only cancelled the running task,
+    # the next process start (redeploy, crash, plain restart) would bring the
+    # account straight back and it would keep farming.
+    if _find_account(proxy_manager.load_accounts(g.owner), name):
+        proxy_manager.set_account_autostart(g.owner, name, False)
     result, error = _bot_loop_call(supervisor.stop_account(g.owner, name))
     if error:
         return jsonify({'success': False, 'error': error}), 503
@@ -1041,6 +1096,11 @@ def account_launch_all():
 
     started = result.get('started', 0) if isinstance(result, dict) else 0
     total = result.get('total', len(pending)) if isinstance(result, dict) else len(pending)
+    # Start All is an explicit "bring the farm up", so it re-arms autostart for
+    # everything it managed to start - including accounts stopped earlier.
+    for account in pending:
+        if supervisor.find_bot(g.owner, account.get('name')):
+            proxy_manager.set_account_autostart(g.owner, account.get('name'), True)
     state.log_command("SYS", f"Started {started}/{total} accounts from dashboard",
                       "success" if started else "error", owner=g.owner)
     if started == 0:
@@ -1051,10 +1111,15 @@ def account_launch_all():
 @app.route('/api/accounts/stop_all', methods=['POST'])
 @space_required
 def account_stop_all():
+    from utils import proxy_manager
     from core import supervisor
     names = supervisor.running_names(g.owner)
     if not names:
         return jsonify({'success': False, 'error': 'No accounts are running'})
+
+    # same "stay stopped" contract as the single-account stop above
+    for name in names:
+        proxy_manager.set_account_autostart(g.owner, name, False)
 
     # Await stop_all so the response only returns once every account has been
     # torn down (runner cancelled, gateway closed, instance removed). The old
@@ -1104,7 +1169,7 @@ async def _verify_accounts(owner, accounts, targets):
 @space_required
 def account_verify():
     from utils import proxy_manager
-    payload = request.json or {}
+    payload = _payload()
     names = payload.get('names')
     accounts = proxy_manager.load_accounts(g.owner)
 
@@ -1157,7 +1222,7 @@ def account_export():
 @space_required
 def account_bulk_import():
     from utils import proxy_manager
-    payload = request.json or {}
+    payload = _payload()
     tokens = [t.strip().strip('"\'') for t in (payload.get('tokens') or '').splitlines() if t.strip()]
     channels = [c for c in (payload.get('channels') or '').split() if c]
     proxy_id = payload.get('proxy_id') or None
@@ -1197,46 +1262,12 @@ def account_bulk_import():
     return jsonify({'success': True, 'message': f'Imported {len(tokens)} accounts'})
 
 
-@app.route('/api/accounts', methods=['GET', 'POST'])
-@space_required
-def accounts_api():
-    from utils import proxy_manager
-    if request.method == 'POST':
-        new_accounts = request.json
-        try:
-            accounts = new_accounts.get('accounts', []) if isinstance(new_accounts, dict) else (new_accounts or [])
-            if not isinstance(accounts, list):
-                return jsonify({"status": "error", "message": "accounts must be a list"}), 400
-            if len(accounts) > MAX_ACCOUNTS_PER_SPACE:
-                return jsonify({"status": "error",
-                                "message": f"At most {MAX_ACCOUNTS_PER_SPACE} accounts per space"}), 400
-            for account in accounts:
-                if not isinstance(account, dict) or not proxy_manager.valid_account_name(account.get('name')):
-                    return jsonify({"status": "error",
-                                    "message": f"Invalid account name: {(account or {}).get('name')!r}"}), 400
-
-            proxy_manager.save_accounts(g.owner, accounts)
-
-            for bot in state.bots_for(g.owner):
-                bot.accounts = accounts
-
-            state.log_command("SYS", "Accounts updated successfully. Restart recommended.", "success", owner=g.owner)
-            return jsonify({"status": "success"})
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
-    else:
-        try:
-            return jsonify({'accounts': proxy_manager.load_accounts(g.owner)})
-        except Exception:
-            return jsonify([])
-
-
 @app.route('/api/proxies', methods=['GET', 'POST'])
 @space_required
 def proxies_api():
     from utils import proxy_manager
     if request.method == 'POST':
-        payload = request.json or {}
+        payload = _payload()
         proxies = payload.get('proxies', [])
         if not isinstance(proxies, list):
             return jsonify({"status": "error", "message": "proxies must be a list"}), 400
@@ -1254,7 +1285,7 @@ def proxies_api():
 @space_required
 def proxies_bulk():
     from utils import proxy_manager
-    text = (request.json or {}).get('text', '')
+    text = _payload().get('text', '')
     existing = len(proxy_manager.load_proxies(g.owner))
     if existing >= MAX_PROXIES_PER_SPACE:
         return jsonify({"status": "error",
@@ -1273,7 +1304,7 @@ def proxies_bulk():
 @space_required
 def proxies_test():
     from utils import proxy_manager
-    payload = request.json or {}
+    payload = _payload()
     proxy_id = payload.get('id')
     owner = g.owner
     if proxy_id and not proxy_manager.valid_proxy_id(proxy_id):
@@ -1357,7 +1388,7 @@ def test_security():
 @app.route('/api/control', methods=['POST'])
 @space_required
 def control():
-    data = request.json or {}
+    data = _payload()
     action = (data.get('action') or '').lower()
     account_id = data.get('id')
     bot = get_bot(account_id, g.owner)
@@ -1390,7 +1421,7 @@ def control():
 @app.route('/api/security', methods=['POST'])
 @space_required
 def security():
-    data = request.json
+    data = _payload()
     action = data.get('action')
     account_id = data.get('id')
     bot = get_bot(account_id, g.owner)
@@ -1433,8 +1464,9 @@ def captcha_current():
 @app.route('/api/captcha/submit', methods=['POST'])
 @space_required
 def captcha_submit():
-    data = request.json
-    code = data.get('code', '').strip()
+    data = _payload()
+    # a JSON null here (rather than a missing key) used to reach .strip() on None
+    code = str(data.get('code') or '').strip()
     account_id = data.get('id')
     bot = get_bot(account_id, g.owner)
 
@@ -1479,7 +1511,7 @@ def captcha_balance():
     api_key = ''
     
     if request.method == 'POST':
-        data = request.json or {}
+        data = _payload()
         if 'service' in data:
             service = data['service']
         if 'api_key' in data:
@@ -1536,7 +1568,7 @@ def captcha_stats():
 @app.route('/api/bot/command', methods=['POST'])
 @space_required
 def bot_command():
-    data = request.json or {}
+    data = _payload()
     command = (data.get('command') or '').strip()
     account_id = data.get('id')
     send_to_all = bool(data.get('all'))
@@ -1638,7 +1670,7 @@ def custom_commands_api():
             'commands': _normalise_custom_commands(custom.get('commands')),
         })
 
-    payload = request.json or {}
+    payload = _payload()
     commands_list = _normalise_custom_commands(payload.get('commands'))
     block = {'enabled': bool(payload.get('enabled', True)), 'commands': commands_list}
     save_to_all = bool(payload.get('all'))
@@ -1701,7 +1733,7 @@ def submit_captcha_solution():
     import socket
     import requests
 
-    data = request.get_json()
+    data = _payload()
     account_id = data.get('account_id', '')
     token = data.get('token', '')
 
@@ -1760,7 +1792,7 @@ def captcha_oauth_url():
     The URL is signed by the account's own token, so resolving the id inside the
     caller's space is the whole security boundary here.
     """
-    data = request.get_json() or {}
+    data = _payload()
     account_id = data.get('account_id')
     if not account_id:
         return jsonify({'success': False, 'error': 'Missing account_id'})
@@ -1846,7 +1878,7 @@ def user_keys_api():
         keys.sort(key=lambda k: k.get('created_at') or 0, reverse=True)
         return jsonify({'success': True, 'keys': keys})
 
-    data = request.json or {}
+    data = _payload()
     created, error = dash_users.generate_keys(
         data.get('days'),
         data.get('count', 1),
@@ -1900,7 +1932,7 @@ def user_detail_api(user_id):
             return jsonify({'success': True})
         return jsonify({'success': False, 'error': 'No such user'}), 404
 
-    data = request.json or {}
+    data = _payload()
     action = (data.get('action') or '').lower()
 
     if action == 'revoke':
@@ -1929,7 +1961,7 @@ def user_key_status():
     if not allowed:
         return jsonify({'success': False, 'error': f'Too many attempts. Try again in {wait_time}s'})
 
-    data = request.json or {}
+    data = _payload()
     entry, error = dash_users.key_status(data.get('key'))
     if error:
         # rate limited like a login so the endpoint cannot be used to brute-force keys

@@ -210,7 +210,11 @@ class LazySetupEngine:
         for line in content.splitlines():
             line = line.strip().replace("\x00", "")
             if line and not line.startswith("#"):
-                pkg = line.split("@")[0].split("==")[0].strip()
+                # split off every PEP 508 decoration, not just "@" and "==" - a
+                # range pin like "aiohttp>=3.12.15,<4" otherwise yields the whole
+                # spec as the package name, which matches nothing in the installed
+                # set and makes the bootstrap reinstall it on every single boot
+                pkg = re.split(r"[@=<>!~;\[\s]", line, maxsplit=1)[0].strip()
                 needed.append((pkg, line))
         heavy = [("numpy", "numpy"), ("pillow", "pillow"), ("onnxruntime", "onnxruntime")]
         for p, full in heavy:
@@ -235,6 +239,7 @@ class LazySetupEngine:
     def _package_import_ok(self, name):
         import_map = {
             "flask": "flask",
+            "werkzeug": "werkzeug",
             "requests": "requests",
             "aiohttp": "aiohttp",
             "rich": "rich",

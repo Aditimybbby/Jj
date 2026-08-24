@@ -97,6 +97,37 @@ def save_accounts(owner, accounts):
     _write_json(spaces.accounts_path(owner), {"accounts": accounts})
 
 
+def wants_autostart(account):
+    """True when this account should come up by itself when the process starts.
+
+    A missing flag means yes: configs written before autostart existed, and every
+    freshly added account, are expected to farm without being told twice.
+    """
+    return bool(account.get("autostart", True))
+
+
+def set_account_autostart(owner, name, autostart):
+    """Persist whether an account comes back up on the next process start.
+
+    The dashboard's Start/Stop buttons are the operator stating intent, not just
+    poking the current process - so an account they stopped has to stay stopped
+    across a redeploy, a crash or a plain restart.
+    """
+    if not name:
+        return False
+    accounts = load_accounts(owner)
+    changed = False
+    for account in accounts:
+        if str(account.get("name")) != str(name):
+            continue
+        if wants_autostart(account) != bool(autostart):
+            account["autostart"] = bool(autostart)
+            changed = True
+    if changed:
+        save_accounts(owner, accounts)
+    return changed
+
+
 def set_account_status(owner, name, status, reason=None):
     """Record why an account is unusable so the dashboard can group it separately."""
     if not name:

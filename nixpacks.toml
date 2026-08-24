@@ -1,8 +1,8 @@
 # git: discord.py-self installs from a pinned commit
 # libgomp1: onnxruntime needs it at runtime
 # tesseract-ocr: pytesseract is only a wrapper - without the binary the level-card
-#                OCR fallback in cogs/level_ocr.py can never run, so an image level
-#                card leaves the dashboard blank
+#                OCR fallback in modules/level_ocr.py can never run, so an image
+#                level card leaves the dashboard blank
 # "..." keeps the packages Nixpacks picks by itself
 [phases.setup]
 nixPkgs = ["...", "git"]

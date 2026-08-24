@@ -48,7 +48,7 @@ class RPP(commands.Cog):
             def rpp_dispatch():
                 return self.trigger_action()
                 
-            await self.bot.neura_register_command("rpp", rpp_dispatch, priority=3, delay=interval, initial_offset=15)
+            await self.bot.neura_register_command("rpp", rpp_dispatch, priority=self.bot.get_cmd_priority("rpp", 3), delay=interval, initial_offset=15)
 
     @commands.Cog.listener()
     async def on_message(self, message):
