@@ -563,26 +563,70 @@ def logout():
 @app.route('/api/accounts/list')
 @space_required
 def account_list():
+    # Always a JSON array. The frontend indexes .find()/.map() on this, so an
+    # error dict here used to throw "find is not a function" and blank the whole
+    # accounts panel whenever the session lapsed or a bot was mid-reconnect.
     accounts = []
-    for bot in state.bots_for(g.owner):
-        if not bot.user or not bot.is_ready: continue
-        uid = str(bot.user.id)
-        st = state.account_stats.get(uid, {})
-        session_total = st.get('session_hunt_count', 0) + st.get('session_battle_count', 0) + st.get('session_owo_count', 0) + st.get('session_other_count', 0)
+    try:
+        for bot in state.bots_for(g.owner):
+            # A bot with no user is still connecting (or reconnecting after a
+            # gateway drop). Keep it in the list as a connecting card instead of
+            # hiding it - hiding it is what made accounts "disappear" and look
+            # like they had stopped on their own.
+            if not bot.user:
+                accounts.append({
+                    'id': getattr(bot, 'account_name', '') or '',
+                    'username': getattr(bot, 'account_name', 'Connecting…') or 'Connecting…',
+                    'avatar': None,
+                    'paused': bot.paused,
+                    'connecting': True,
+                    'cash': 0,
+                    'level': None,
+                    'xp': None,
+                    'xp_needed': None,
+                    'level_source': None,
+                    'session_total': 0,
+                    'gems_used': 0,
+                })
+                continue
+            if not bot.is_ready:
+                # Logged in but cogs not yet armed - show it as connecting.
+                accounts.append({
+                    'id': str(bot.user.id),
+                    'username': bot.username,
+                    'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
+                    'paused': bot.paused,
+                    'connecting': True,
+                    'cash': state.account_stats.get(str(bot.user.id), {}).get('current_cash', 0),
+                    'level': state.account_stats.get(str(bot.user.id), {}).get('level'),
+                    'xp': state.account_stats.get(str(bot.user.id), {}).get('xp'),
+                    'xp_needed': state.account_stats.get(str(bot.user.id), {}).get('xp_needed'),
+                    'level_source': state.account_stats.get(str(bot.user.id), {}).get('level_source'),
+                    'session_total': 0,
+                    'gems_used': state.account_stats.get(str(bot.user.id), {}).get('gems_used', 0),
+                })
+                continue
+            uid = str(bot.user.id)
+            st = state.account_stats.get(uid, {})
+            session_total = st.get('session_hunt_count', 0) + st.get('session_battle_count', 0) + st.get('session_owo_count', 0) + st.get('session_other_count', 0)
 
-        accounts.append({
-            'id': uid,
-            'username': bot.username,
-            'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
-            'paused': bot.paused,
-            'cash': st.get('current_cash', 0),
-            'level': st.get('level'),
-            'xp': st.get('xp'),
-            'xp_needed': st.get('xp_needed'),
-            'level_source': st.get('level_source'),
-            'session_total': session_total,
-            'gems_used': st.get('gems_used', 0)
-        })
+            accounts.append({
+                'id': uid,
+                'username': bot.username,
+                'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
+                'paused': bot.paused,
+                'connecting': False,
+                'cash': st.get('current_cash', 0),
+                'level': st.get('level'),
+                'xp': st.get('xp'),
+                'xp_needed': st.get('xp_needed'),
+                'level_source': st.get('level_source'),
+                'session_total': session_total,
+                'gems_used': st.get('gems_used', 0)
+            })
+    except Exception as e:
+        # Never let a stale bot.user / stats lookup turn this into a 500 dict.
+        state.log_command("SYS", f"account_list error: {e}", "error", owner=g.owner)
     return jsonify(accounts)
 
 def get_bot(account_id, owner=None):
@@ -983,11 +1027,23 @@ def account_launch_all():
     if not pending:
         return jsonify({'success': False, 'error': 'No enabled accounts left to start'})
 
-    error = _bot_loop_fire(supervisor.start_all(pending, g.owner))
+    # Wait for start_all to actually spin every account up (with a generous
+    # timeout) so the response tells the truth. The old fire-and-forget version
+    # returned "Starting N accounts" while most were still queued behind the
+    # stagger sleep, so the dashboard's immediate re-fetch showed them all as
+    # stopped - which looked like "start doesn't start all of them".
+    timeout = 20 + 5 * len(pending)
+    result, error = _bot_loop_call(supervisor.start_all(pending, g.owner), timeout=timeout)
     if error:
         return jsonify({'success': False, 'error': error}), 503
-    state.log_command("SYS", f"Starting {len(pending)} accounts from dashboard", "success", owner=g.owner)
-    return jsonify({'success': True, 'message': f'Starting {len(pending)} accounts'})
+
+    started = result.get('started', 0) if isinstance(result, dict) else 0
+    total = result.get('total', len(pending)) if isinstance(result, dict) else len(pending)
+    state.log_command("SYS", f"Started {started}/{total} accounts from dashboard",
+                      "success" if started else "error", owner=g.owner)
+    if started == 0:
+        return jsonify({'success': False, 'error': 'No accounts could be started (check tokens/channels in the logs)'})
+    return jsonify({'success': True, 'message': f'Started {started}/{total} accounts'})
 
 
 @app.route('/api/accounts/stop_all', methods=['POST'])
@@ -998,11 +1054,16 @@ def account_stop_all():
     if not names:
         return jsonify({'success': False, 'error': 'No accounts are running'})
 
-    error = _bot_loop_fire(supervisor.stop_all(g.owner))
+    # Await stop_all so the response only returns once every account has been
+    # torn down (runner cancelled, gateway closed, instance removed). The old
+    # fire-and-forget version replied instantly while bots were still shutting
+    # down, so a follow-up fetch still listed them as running.
+    result, error = _bot_loop_call(supervisor.stop_all(g.owner), timeout=30)
     if error:
         return jsonify({'success': False, 'error': error}), 503
-    state.log_command("SYS", f"Stopping {len(names)} accounts from dashboard", "success", owner=g.owner)
-    return jsonify({'success': True, 'message': f'Stopping {len(names)} accounts'})
+    stopped = sum(1 for ok, _msg in (result or []) if ok) if isinstance(result, list) else len(names)
+    state.log_command("SYS", f"Stopped {stopped}/{len(names)} accounts from dashboard", "success", owner=g.owner)
+    return jsonify({'success': True, 'message': f'Stopped {stopped}/{len(names)} accounts'})
 
 
 async def _verify_accounts(owner, accounts, targets):

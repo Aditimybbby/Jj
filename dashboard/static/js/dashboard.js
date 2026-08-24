@@ -61,7 +61,7 @@ function update() {
 
             const section = document.getElementById('captcha-solver-section');
             if (section && section.style.display !== 'block') {
-                const acc = accountsList.find(a => a.id === currentAccountId);
+                const acc = Array.isArray(accountsList) ? accountsList.find(a => a.id === currentAccountId) : null;
                 if (acc) openEmbeddedCaptcha(currentAccountId, acc.username);
             }
         } else if (alertEl) {

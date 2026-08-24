@@ -155,7 +155,9 @@ async def main():
             _started_spaces.add(owner)
             label = "operator" if owner == spaces.ADMIN_SPACE else owner
             console.print(f"[bold yellow]Initializing {len(accounts)} accounts for {label}...[/bold yellow]")
-            for ok, message in await supervisor.start_all(accounts, owner):
+            start_result = await supervisor.start_all(accounts, owner)
+            # start_all now returns {'results': [(ok,msg),...], 'started': n, 'total': m}
+            for ok, message in start_result.get('results', start_result if isinstance(start_result, list) else []):
                 console.print(f"[green]{message}[/green]" if ok else f"[bold red]{message}[/bold red]")
         if not total:
             console.print("[bold yellow]No enabled accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
