@@ -159,7 +159,7 @@ window.renderCharts = function renderCharts() {
                             return `S${s.id}`;
                         }),
                         datasets: [
-                            { label: 'Hunts', data: revSessions.map(s => s.stats?.hunts || 0), backgroundColor: '#ff1f1f', borderRadius: 4 },
+                            { label: 'Hunts', data: revSessions.map(s => s.stats?.hunts || 0), backgroundColor: '#7c6cff', borderRadius: 4 },
                             { label: 'Battles', data: revSessions.map(s => s.stats?.battles || 0), backgroundColor: '#3b82f6', borderRadius: 4 },
                             { label: 'Captchas', data: revSessions.map(s => s.stats?.captchas || 0), backgroundColor: '#00d16e', borderRadius: 4 }
                         ]
@@ -257,7 +257,7 @@ window.renderCharts = function renderCharts() {
                         labels: ['Hunts', 'Battles', 'Captchas', 'Other'],
                         datasets: [{
                             data: [totalHunts, totalBattles, totalCaptchas, totalOther],
-                            backgroundColor: ['#ff1f1f', '#3b82f6', '#00d16e', '#888'],
+                            backgroundColor: ['#7c6cff', '#22d3ee', '#34d399', '#5b6072'],
                             borderWidth: 0
                         }]
                     },

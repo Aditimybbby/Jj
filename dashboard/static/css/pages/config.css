@@ -109,8 +109,8 @@
 }
 .cfg-nav-item:active { transform: scale(0.98); }
 .cfg-nav-item.active {
-    background: rgba(255,62,62,0.12);
-    border-color: rgba(255,62,62,0.35);
+    background: rgba(124, 108, 255,0.12);
+    border-color: rgba(124, 108, 255,0.35);
     color: #fff;
 }
 .cfg-nav-item .cfg-nav-hint {
@@ -174,8 +174,8 @@
     transition: border-color 0.2s, box-shadow 0.2s;
 }
 .cfg-search-input:focus {
-    border-color: rgba(255,62,62,0.5);
-    box-shadow: 0 0 0 3px rgba(255,62,62,0.12);
+    border-color: rgba(124, 108, 255,0.5);
+    box-shadow: 0 0 0 3px rgba(124, 108, 255,0.12);
 }
 .cfg-search-input::placeholder { color: #555; text-align: center; }
 .cfg-search-clear {
@@ -193,7 +193,7 @@
     transition: background 0.15s, transform 0.1s;
 }
 .cfg-search-clear:hover {
-    background: rgba(255,62,62,0.2);
+    background: rgba(124, 108, 255,0.2);
     color: #fff;
 }
 .cfg-search-clear:active { transform: scale(0.92); }
@@ -248,7 +248,7 @@
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: var(--primary);
-    background: rgba(255,62,62,0.06);
+    background: rgba(124, 108, 255,0.06);
     border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 .cfg-section-rows {
@@ -281,7 +281,7 @@
 .cfg-row:hover { background: rgba(255,255,255,0.02); }
 .cfg-row-hidden { display: none !important; }
 .cfg-row-highlight {
-    background: rgba(255,62,62,0.08);
+    background: rgba(124, 108, 255,0.08);
     box-shadow: inset 3px 0 0 var(--primary);
 }
 .cfg-row-label {
@@ -342,13 +342,13 @@
     transition: filter 0.3s, transform 0.25s;
 }
 #config .cfg-ring-block .ring-item:hover {
-    background: rgba(255,31,31,0.08);
+    background: rgba(124, 108, 255,0.08);
     transform: translateY(-2px);
 }
 #config .cfg-ring-block .ring-item.selected {
-    border-color: #ff1f1f;
-    background: rgba(255,31,31,0.15);
-    box-shadow: 0 0 16px rgba(255,31,31,0.45);
+    border-color: #7c6cff;
+    background: rgba(124, 108, 255,0.15);
+    box-shadow: 0 0 16px rgba(124, 108, 255,0.45);
 }
 #config .cfg-ring-block .ring-item.selected img {
     filter: grayscale(0) opacity(1) brightness(1.15);
@@ -370,14 +370,14 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #fff;
-    background: rgba(255,62,62,0.08);
+    background: rgba(124, 108, 255,0.08);
 }
 .cfg-search-group-hint {
     margin: 0;
     padding: 0 16px 12px;
     font-size: 0.8rem;
     color: var(--text-muted);
-    background: rgba(255,62,62,0.08);
+    background: rgba(124, 108, 255,0.08);
     border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 .cfg-tier-locked, .cfg-ring-locked {
@@ -391,7 +391,7 @@
     font-size: 0.9rem;
 }
 .cfg-empty mark {
-    background: rgba(255,62,62,0.25);
+    background: rgba(124, 108, 255,0.25);
     color: #fff;
     padding: 0 4px;
     border-radius: 4px;
@@ -487,7 +487,7 @@
     transition: all 0.2s;
 }
 .csw-refresh-btn:hover {
-    background: rgba(255,62,62,0.2);
+    background: rgba(124, 108, 255,0.2);
     border-color: var(--primary);
 }
 .csw-refresh-btn:active { transform: scale(0.94); }
@@ -520,11 +520,11 @@
     transition: border-color 0.2s, box-shadow 0.2s;
 }
 .cfg-select-wrap:hover {
-    border-color: rgba(255,62,62,0.4);
+    border-color: rgba(124, 108, 255,0.4);
 }
 .cfg-select-wrap:focus-within {
-    border-color: rgba(255,62,62,0.6);
-    box-shadow: 0 0 0 3px rgba(255,62,62,0.12);
+    border-color: rgba(124, 108, 255,0.6);
+    box-shadow: 0 0 0 3px rgba(124, 108, 255,0.12);
 }
 .cfg-select-arrow {
     position: absolute;
@@ -582,8 +582,8 @@
     flex-shrink: 0;
     padding: 0 16px;
     border-radius: 10px;
-    border: 1px solid rgba(255,62,62,0.45);
-    background: linear-gradient(180deg, rgba(255,62,62,0.2) 0%, rgba(255,62,62,0.08) 100%);
+    border: 1px solid rgba(124, 108, 255,0.45);
+    background: linear-gradient(180deg, rgba(124, 108, 255,0.2) 0%, rgba(124, 108, 255,0.08) 100%);
     color: #fff;
     font-family: var(--font-body);
     font-size: 0.8rem;
@@ -592,7 +592,7 @@
     transition: background 0.2s, border-color 0.2s, transform 0.1s;
 }
 .cfg-add-btn:hover {
-    background: rgba(255,62,62,0.28);
+    background: rgba(124, 108, 255,0.28);
     border-color: var(--primary);
 }
 .cfg-add-btn:active { transform: scale(0.96); }

@@ -169,7 +169,7 @@
     left: 0;
     right: 0;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255, 62, 62, 0.2), transparent);
+    background: linear-gradient(90deg, transparent, rgba(124, 108, 255, 0.2), transparent);
 }
 #hcaptcha-container {
     margin-bottom: 20px;
@@ -189,7 +189,7 @@
     transition: background 0.2s;
 }
 .notification-bell:hover {
-    background: rgba(255, 62, 62, 0.1);
+    background: rgba(124, 108, 255, 0.1);
 }
 .notification-bell.has-alert .icon-svg {
     background-color: var(--warning) !important;
@@ -252,7 +252,7 @@
     margin: 0 12px;
 }
 .solve-btn {
-    background: rgba(255, 62, 62, 0.15);
+    background: rgba(124, 108, 255, 0.15);
     border-color: var(--primary);
     color: var(--primary);
     padding: 4px 12px;

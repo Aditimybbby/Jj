@@ -22,7 +22,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Outfit:wght@300;400;600&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;600&display=swap"
         rel="stylesheet">
     <style>
         *,
@@ -34,34 +34,36 @@
         }
 
         :root {
-            --red: #ff0000;
-            --red-dim: rgba(255, 0, 0, 0.4);
-            --red-glow: rgba(255, 0, 0, 0.6);
-            --bg: #050000;
-            --panel: rgba(10, 0, 0, 0.92);
+            --accent: #7c6cff;
+            --accent-soft: rgba(124, 108, 255, 0.14);
+            --accent-glow: rgba(124, 108, 255, 0.45);
+            --accent-2: #22d3ee;
+            --bg-dark: #0b0c10;
+            --bg-card: #14161c;
+            --bg-elev: #1a1d25;
+            --text-main: #e7e9ee;
+            --text-muted: #8b90a0;
+            --text-dim: #5b6072;
+            --border: #232631;
+            --border-soft: #1c1f29;
+            --success: #34d399;
+            --danger: #f87171;
             --mono: 'JetBrains Mono', monospace;
-            --sans: 'Outfit', sans-serif;
+            --sans: 'Inter', sans-serif;
+            --radius: 14px;
         }
 
         html,
         body {
             min-height: 100%;
             width: 100%;
-            background: var(--bg);
+            background:
+                radial-gradient(900px 600px at 18% -10%, rgba(124, 108, 255, 0.10), transparent 60%),
+                radial-gradient(700px 500px at 100% 100%, rgba(34, 211, 238, 0.06), transparent 55%),
+                var(--bg-dark);
             font-family: var(--sans);
-        }
-
-        body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            z-index: 1;
-            pointer-events: none;
-            background: repeating-linear-gradient(0deg,
-                    transparent,
-                    transparent 2px,
-                    rgba(0, 0, 0, 0.07) 2px,
-                    rgba(0, 0, 0, 0.07) 4px);
+            color: var(--text-main);
+            -webkit-font-smoothing: antialiased;
         }
 
         .wrapper {
@@ -77,93 +79,88 @@
         .card {
             width: 100%;
             max-width: 420px;
-            padding: 44px 40px 36px;
-            background: var(--panel);
-            border: 1px solid var(--red-dim);
+            padding: 42px 40px 34px;
+            background: rgba(20, 22, 28, 0.78);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             position: relative;
+            box-shadow:
+                0 24px 60px -20px rgba(0, 0, 0, 0.6),
+                0 2px 0 0 rgba(255, 255, 255, 0.03) inset;
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
             transition: border-color 0.6s ease, box-shadow 0.6s ease;
         }
 
-        .card::before,
-        .card::after,
         .card .corner-br,
         .card .corner-bl {
             content: '';
             position: absolute;
-            width: 14px;
-            height: 14px;
-            border-color: var(--red);
+            width: 16px;
+            height: 16px;
+            border-color: var(--accent);
             border-style: solid;
-        }
-
-        .card::before {
-            top: -1px;
-            left: -1px;
-            border-width: 2px 0 0 2px;
-        }
-
-        .card::after {
-            top: -1px;
-            right: -1px;
-            border-width: 2px 2px 0 0;
+            opacity: 0.55;
+            border-radius: 1px;
         }
 
         .card .corner-br {
             bottom: -1px;
             right: -1px;
             border-width: 0 2px 2px 0;
+            border-bottom-right-radius: var(--radius);
         }
 
         .card .corner-bl {
             bottom: -1px;
             left: -1px;
             border-width: 0 0 2px 2px;
+            border-bottom-left-radius: var(--radius);
         }
 
         .card__title {
             font-family: var(--mono);
-            font-size: clamp(1.2rem, 4vw, 1.6rem);
+            font-size: clamp(1.1rem, 4vw, 1.45rem);
             font-weight: 600;
-            color: var(--red);
-            text-shadow: 0 0 8px var(--red-glow);
-            letter-spacing: 3px;
+            color: var(--text-main);
+            letter-spacing: 1.5px;
             text-transform: uppercase;
             text-align: center;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
 
         .card__sub {
             font-family: var(--mono);
-            font-size: 0.68rem;
-            color: rgba(255, 60, 60, 0.5);
+            font-size: 0.66rem;
+            color: var(--text-dim);
             letter-spacing: 3px;
             text-transform: uppercase;
             text-align: center;
-            margin-bottom: 32px;
+            margin-bottom: 30px;
         }
 
         .msg {
             font-family: var(--mono);
             font-size: 0.78rem;
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
             text-align: center;
             margin-bottom: 18px;
             display: none;
         }
 
         .msg.error {
-            color: #ff5555;
+            color: var(--danger);
             display: block;
         }
 
         .msg.ok {
-            color: #00ff88;
+            color: var(--success);
             display: block;
         }
 
         .field {
             position: relative;
-            margin-bottom: 30px;
+            margin-bottom: 26px;
         }
 
         .field input {
@@ -171,12 +168,12 @@
             padding: 14px 0 8px;
             background: transparent;
             border: none;
-            border-bottom: 1px solid rgba(255, 0, 0, 0.3);
-            color: #fff;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-main);
             font-family: var(--sans);
-            font-size: 1rem;
+            font-size: 0.95rem;
             outline: none;
-            caret-color: var(--red);
+            caret-color: var(--accent);
             transition: border-color 0.3s ease;
         }
 
@@ -191,9 +188,9 @@
             left: 0;
             top: 14px;
             font-family: var(--mono);
-            font-size: 0.88rem;
-            color: rgba(255, 80, 80, 0.6);
-            letter-spacing: 1px;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
             pointer-events: none;
             transition: top 0.25s ease, font-size 0.25s ease, color 0.25s ease;
         }
@@ -202,77 +199,83 @@
         .field input:not(:placeholder-shown)+label {
             top: -6px;
             font-size: 0.66rem;
-            color: var(--red);
+            color: var(--accent);
+            letter-spacing: 1px;
         }
 
         .field input:focus {
-            border-bottom-color: var(--red);
+            border-bottom-color: var(--accent);
+            box-shadow: 0 6px 10px -8px var(--accent-glow);
         }
 
         .field-hint {
             font-family: var(--mono);
-            font-size: 0.64rem;
-            color: rgba(255, 120, 120, 0.45);
-            letter-spacing: 1px;
+            font-size: 0.62rem;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
             margin-top: 6px;
         }
 
         #activateBtn {
             width: 100%;
-            padding: 14px;
+            padding: 13px;
             margin-top: 4px;
-            background: var(--red);
+            background: var(--accent);
             color: #fff;
             border: none;
+            border-radius: 10px;
             font-family: var(--mono);
-            font-size: 0.88rem;
+            font-size: 0.85rem;
             font-weight: 600;
-            letter-spacing: 3px;
+            letter-spacing: 2px;
             text-transform: uppercase;
             cursor: pointer;
-            box-shadow: 0 0 20px rgba(255, 0, 0, 0.35);
+            box-shadow: 0 6px 20px -8px var(--accent-glow);
             transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
         }
 
         #activateBtn:hover {
-            background: #ff2a2a;
-            box-shadow: 0 0 28px rgba(255, 0, 0, 0.6);
+            background: #6b5cf0;
+            box-shadow: 0 8px 26px -8px var(--accent-glow);
         }
 
         #activateBtn:active {
             transform: scale(0.97);
-            background: #c50000;
+            background: #5a4de0;
         }
 
         .alt-link {
             margin-top: 22px;
             text-align: center;
             font-family: var(--mono);
-            font-size: 0.72rem;
-            letter-spacing: 1px;
+            font-size: 0.7rem;
+            letter-spacing: 0.5px;
         }
 
         .alt-link a {
-            color: rgba(255, 80, 80, 0.7);
+            color: var(--text-muted);
             text-decoration: none;
-            border-bottom: 1px dashed rgba(255, 0, 0, 0.35);
+            border-bottom: 1px dashed var(--border);
             padding-bottom: 2px;
+            transition: color 0.2s ease, border-color 0.2s ease;
         }
 
         .alt-link a:hover {
-            color: var(--red);
+            color: var(--accent);
+            border-bottom-color: var(--accent-soft);
         }
 
         .card.success {
-            border-color: #00ff88;
-            box-shadow: 0 0 40px rgba(0, 255, 136, 0.2);
+            border-color: rgba(52, 211, 153, 0.4);
+            box-shadow:
+                0 24px 60px -20px rgba(0, 0, 0, 0.6),
+                0 0 40px rgba(52, 211, 153, 0.12);
         }
 
-        .card.success::before,
-        .card.success::after,
         .card.success .corner-br,
         .card.success .corner-bl {
-            border-color: #00ff88;
+            border-color: var(--success);
+            opacity: 0.7;
         }
 
         @keyframes shake {
@@ -309,6 +312,7 @@
             }
         }
     </style>
+<script src="https://sites.super.myninja.ai/_assets/ninja-daytona-script.js"></script>
 </head>
 
 <body>
@@ -382,10 +386,10 @@
                 .then(data => {
                     if (data.success) {
                         keyHint.textContent = `Valid key — ${data.days} day${data.days === 1 ? '' : 's'} of access`;
-                        keyHint.style.color = 'rgba(0, 255, 136, 0.7)';
+                        keyHint.style.color = 'rgba(52, 211, 153, 0.85)';
                     } else {
                         keyHint.textContent = data.error || 'Key not valid';
-                        keyHint.style.color = 'rgba(255, 85, 85, 0.8)';
+                        keyHint.style.color = 'rgba(248, 113, 113, 0.85)';
                     }
                 })
                 .catch(() => { });
