@@ -54,13 +54,13 @@ def owner_of(bot_id):
 
 def bots_for(owner):
     """Live bots inside one space."""
-    return [b for b in bot_instances if getattr(b, 'owner_id', spaces.ADMIN_SPACE) == owner]
+    return [b for b in bot_instances if getattr(b, 'space_owner', spaces.ADMIN_SPACE) == owner]
 
 
 def owns_bot(owner, bot):
     if bot is None:
         return False
-    return getattr(bot, 'owner_id', spaces.ADMIN_SPACE) == owner
+    return getattr(bot, 'space_owner', spaces.ADMIN_SPACE) == owner
 
 
 def visible_logs(entries, owner, limit=None):

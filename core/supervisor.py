@@ -44,7 +44,8 @@ def account_name(bot):
 
 
 def bot_owner(bot):
-    return getattr(bot, 'owner_id', spaces.ADMIN_SPACE)
+    # the space id lives on space_owner, never on owner_id - commands.Bot owns that name
+    return getattr(bot, 'space_owner', spaces.ADMIN_SPACE)
 
 
 def running_names(owner=None):
@@ -52,6 +53,20 @@ def running_names(owner=None):
         account_name(bot) for bot in state.bot_instances
         if account_name(bot) and (owner is None or bot_owner(bot) == owner)
     ]
+
+
+def running_states(owner=None):
+    """name -> True once the account reached READY, False while it is still connecting.
+
+    "has an instance" and "is logged in" are different things: a bot with a dead
+    proxy sits in the reconnect loop forever, so the UI needs to say CONNECTING
+    rather than claim it is farming.
+    """
+    return {
+        account_name(bot): bool(getattr(bot, 'is_ready', False))
+        for bot in state.bot_instances
+        if account_name(bot) and (owner is None or bot_owner(bot) == owner)
+    }
 
 
 def find_bot(owner, name):
@@ -87,7 +102,7 @@ async def start_account(account, owner=spaces.ADMIN_SPACE):
         proxy_url=proxy_url,
         proxy_auth=proxy_auth,
         proxy_label=proxy_label,
-        owner_id=owner,
+        space_owner=owner,
     )
     bot.account_name = name
     state.bot_instances.append(bot)

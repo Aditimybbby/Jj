@@ -84,6 +84,10 @@ class NeuraLogs:
 
         import core.state as state
         bot_id = str(bot.user.id) if (hasattr(bot, '_connection') and bot.user) else (getattr(bot, 'user_id', None))
-        state.log_command(log_type, message, "info", bot_name=username, bot_id=bot_id)
+        # pass the space explicitly: before the first READY there is no bot_id for
+        # log_command to resolve an owner from, so "Starting bot...", "Login failed"
+        # and every other startup line would only ever reach the admin's log view
+        state.log_command(log_type, message, "info", bot_name=username, bot_id=bot_id,
+                          owner=getattr(bot, 'space_owner', None))
 
 neura_logger = NeuraLogs()
