@@ -32,8 +32,14 @@ SELF_LEVEL_PHRASES = (
     "you reached level", "you leveled up", "you levelled up",
     "you are lvl", "you're lvl", "your lvl is",
 )
-# a level that belongs to an animal, a weapon, a pet or another player
-LEVEL_NOISE = ("'s level", "s' level", "weapon level", "your pet", "battle log")
+# a level that belongs to an animal, a weapon or a pet.
+#
+# "'s level" is deliberately NOT here: `owo level` answers with a card headed
+# "<username>'s Level", so treating a possessive as foreign-player noise aborted the
+# parse of our own card and the dashboard level stayed blank forever. Another player's
+# card cannot reach the parser anyway - both callers gate on identity first
+# (_v2_is_mine in the v2 path, is_message_for_me(role="header") in the legacy one).
+LEVEL_NOISE = ("weapon level", "your pet", "battle log")
 
 # xp has to be spelled out. The old pattern had "(?:xp|exp)?" optional, so any
 # "12/20" - quest progress, battle hp, an inventory count - was read as an xp bar,
@@ -116,10 +122,15 @@ UNICODE_ANIMALS = {
 EMOJI_MODIFIERS = ("️", "︎", "‍", "⃣")
 
 # a zoo row looks like:  common   🐝¹⁰  🐛⁰⁵  ❓⁰⁰ ...
-# the superscript is how many you own, and ❓ is a slot you have never caught
+# the count is how many you own, and ❓ is a slot you have never caught.
+#
+# owo does not always render the count as superscript - components v2 cards put it in
+# an inline code span (`🐝`10``) and some rows use plain trailing digits. A
+# superscript-only group read those as "no count", which fell through to owned=1 and
+# invented one of every animal in the row.
 ZOO_TOKEN_RE = re.compile(
     r'(?P<emoji><a?:\w+:\d+>|[\U0001F000-\U0001FAFF☀-➿⬀-⯿][️‍\U0001F000-\U0001FAFF]*)'
-    r'(?P<count>[⁰¹²³⁴-⁹]*)'
+    r'(?:(?P<sup>[⁰¹²³⁴-⁹]+)|`\s*(?P<code>\d{1,4})\s*`|(?P<plain>\d{1,4})(?!\d))?'
 )
 SUPERSCRIPTS = {'⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
                 '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'}
@@ -213,6 +224,7 @@ class Others(commands.Cog):
         self._team = []
         self._want_level_until = 0.0
         self._level_image_warned = False
+        self._level_parse_warned = 0.0
         self._handled_v2 = {}
 
     # ── level ────────────────────────────────────────────────────────────────
@@ -276,6 +288,23 @@ class Others(commands.Cog):
             "WARN",
             "OwO answered `owo level` with an image card that OCR could not read. "
             "Level and xp stay blank on the dashboard rather than showing a guessed number."
+        )
+
+    def _note_level_unparsed(self, raw_text):
+        """The reply is clearly a level card, but no number came out of it.
+
+        The v2 path used to just fall through here, so a card owo had worded in a way
+        the regexes miss left the dashboard blank with nothing in the log to say why.
+        The window is deliberately left armed - this may be an unrelated card that
+        merely mentions "level", and dropping the latch would lose the real reply.
+        """
+        if time.time() - self._level_parse_warned < 300:
+            return
+        self._level_parse_warned = time.time()
+        sample = " ".join(raw_text.split())[:200]
+        self.bot.log(
+            "WARN",
+            f"Could not read a level out of OwO's reply - dashboard left unchanged. Card text: {sample}"
         )
 
     # ── zoo / team ───────────────────────────────────────────────────────────
@@ -378,18 +407,25 @@ class Others(commands.Cog):
 
             tokens = []
             for token in ZOO_TOKEN_RE.finditer(line):
+                # normalise the count to plain ascii digits here, whichever way owo
+                # rendered it, so everything downstream (including _drop_tier_icon's
+                # "did this token carry a count" test) sees one shape
+                sup = token.group('sup')
+                if sup:
+                    count = ''.join(SUPERSCRIPTS[ch] for ch in sup)
+                else:
+                    count = token.group('code') or token.group('plain') or ''
                 # keep what owo printed straight after the emoji: an unowned marker can
                 # sit there rather than replacing the animal, and under "no superscript
                 # means one copy" that slot would otherwise read as an animal we own
                 tail = line[token.end():token.end() + 2]
-                tokens.append((token.group('emoji'), token.group('count'), tail))
+                tokens.append((token.group('emoji'), count, tail))
             tokens = self._drop_tier_icon(tokens, tier, tier_names)
 
             for slot, (emoji, count, tail) in enumerate(tokens):
-                digits = ''.join(SUPERSCRIPTS[c] for c in count) if count else ''
-                # no superscript at all means owo printed a single copy, not zero.
+                # no count at all means owo printed a single copy, not zero.
                 # Requiring one is what made whole rows vanish from the parse.
-                owned = int(digits) if digits else 1
+                owned = int(count) if count else 1
                 if owned == 0 or any(marker in emoji or marker in tail for marker in UNOWNED):
                     continue
 
@@ -573,7 +609,11 @@ class Others(commands.Cog):
         self._owned_at = time.time()
 
         if not self._owned:
-            self.bot.log("WARN", "Zoo has no animals we can read - team not built")
+            self.bot.log(
+                "WARN",
+                f"Zoo read but no animals could be parsed out of it - zoo panel and team "
+                f"left unchanged. Card text: {' '.join(str(raw).split())[:200]}"
+            )
             self._want_team_check = False
             return
 
@@ -703,6 +743,9 @@ class Others(commands.Cog):
                         self._store_level(lvl, xpv, xpn, source="image", rank=rank)
                     else:
                         self._note_level_unreadable()
+                elif ("level" in content or "lvl" in content) and not any(
+                        noise in content for noise in LEVEL_NOISE):
+                    self._note_level_unparsed(raw_text)
         except Exception as e:
             self.bot.log("ERROR", f"V2 card handling failed: {e}")
 
@@ -789,7 +832,10 @@ class Others(commands.Cog):
         if "'s zoo!" in content and self.zoo:
             if not self.bot.is_message_for_me(message, role="header"):
                 return
-            await self._handle_zoo(message.content, content)
+            # `content` (get_full_content) not message.content: owo renders the zoo as an
+            # embed, so message.content is an empty string and the parser was handed
+            # nothing to read - every legacy-path zoo scan found zero animals.
+            await self._handle_zoo(content, content)
             return
 
         # the old "add not in content" guard skipped a legitimate team listing whenever
@@ -797,7 +843,17 @@ class Others(commands.Cog):
         if self._want_team_check and ("'s team" in content or "battle team" in content):
             if not self.bot.is_message_for_me(message, role="header"):
                 return
-            await self._handle_team(message.content)
+            # same embed problem as the zoo card above
+            await self._handle_team(content)
+            return
+
+        # Last resort, and deliberately last: the level window is open and this reply
+        # mentions a level, yet none of the branches above claimed it. Say so instead of
+        # dropping it silently. Placed after hunt/zoo/team so it can never shadow them.
+        if (time.time() <= self._want_level_until and ("level" in content or "lvl" in content)
+                and not any(noise in content for noise in LEVEL_NOISE)
+                and self.bot.is_message_for_me(message, role="header")):
+            self._note_level_unparsed(content)
             return
 
     async def register_actions(self):
@@ -814,11 +870,21 @@ class Others(commands.Cog):
         if cfg.get('level', True):
             await self.bot.neura_register_command(
                 "level_sync",
-                self._level_sync_tick,
+                "owo level",
                 priority=self.bot.get_cmd_priority("level_sync", 4),
                 delay=max(600, int(cfg.get('level_interval_s', 3600))),
                 initial_offset=45,
             )
+        if cfg.get('zoo', True):
+            await self.bot.neura_register_command(
+                "zoo_sync",
+                self._zoo_sync_tick,
+                priority=self.bot.get_cmd_priority("zoo_sync", 5),
+                delay=max(600, int(cfg.get('zoo_interval_s', 1800))),
+                initial_offset=60,
+            )
+        else:
+            self.bot.cmd_states.pop('zoo_sync', None)
 
         team_cfg = self._team_cfg()
         if team_cfg.get('enabled', True):
@@ -838,10 +904,29 @@ class Others(commands.Cog):
         else:
             self.bot.cmd_states.pop('team_scan', None)
 
-    async def _level_sync_tick(self):
-        """Arm the level parser, then let the queue send the command as usual."""
-        self._want_level_until = time.time() + 60
-        return "owo level"
+    def trigger_action(self):
+        """Post-send hook for level_sync - arm the level parser now the read is out.
+
+        The window used to be opened by the scheduler hook at *enqueue* time, but a
+        priority-4 command can sit in the queue behind min_command_interval, a stealth
+        human break or a captcha pause for much longer than the window lasted. The reply
+        then arrived unarmed, was dropped, and nothing retried it for level_interval_s.
+        """
+        self._want_level_until = time.time() + 180
+
+    async def _zoo_sync_tick(self):
+        """Arm the zoo parser for the dashboard, then let the queue send the read.
+
+        Deliberately independent of commands.team.enabled. The zoo panel is fed from
+        _handle_zoo, which only runs while self.zoo is set, and the only thing that used
+        to set it was the team manager - so with team management off nothing ever sent
+        `owo zoo` and the panel stayed empty for good.
+
+        self.zoo is a latch rather than a deadline, so arming it at enqueue time is safe:
+        it stays set until a zoo card actually clears it.
+        """
+        self.zoo = True
+        return "owo zoo"
 
     async def _team_scan_tick(self):
         """Timer hook - kicks off a zoo read and returns None so nothing is sent twice."""
