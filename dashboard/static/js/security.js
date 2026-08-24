@@ -102,7 +102,13 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
     const service    = (cfg.service || 'yescaptcha').toLowerCase();
     const svcInfo    = CAPTCHA_SERVICES[service] || CAPTCHA_SERVICES.yescaptcha;
     const apiKey     = cfg[svcInfo.keyField] || '';
-    const dis        = parentEnabled ? '' : ' disabled';
+    // The key box has to follow the same rule as the Service dropdown below.
+    // It used to stay editable while the auto-solver was off, and because the
+    // dropdown was frozen at that point, a key for another service (say NopeCHA)
+    // landed in yescaptcha_api_key - a key that looked saved but was never read,
+    // so every captcha still came back to the operator to solve by hand.
+    const live       = enabled && parentEnabled;
+    const dis        = live ? '' : ' disabled';
     const serviceOptions = Object.entries(CAPTCHA_SERVICES).map(([id, s]) => `
         <option value="${id}" ${id === service ? 'selected' : ''}>${s.label}</option>
     `).join('');
@@ -119,7 +125,7 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
             <div class="cfg-row-control">
                 <div class="csw-dropdown-wrap">
                     <div class="csw-svc-dot" style="background:${svcInfo.color}"></div>
-                    <select id="csw-service-select" class="csw-select" ${!enabled || !parentEnabled ? 'disabled' : ''}
+                    <select id="csw-service-select" class="csw-select" ${live ? '' : 'disabled'}
                         onchange="updateCaptchaService(this.value)">
                         ${serviceOptions}
                     </select>
@@ -129,11 +135,12 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
         <div class="cfg-row csw-key-row" data-path="${basePath}.${svcInfo.keyField}" id="csw-key-row">
             <div class="cfg-row-label">
                 <span class="cfg-label-text">${svcInfo.label} API Key</span>
+                ${live ? '' : '<span class="csw-service-hint">Turn on Enable Auto-Solver first, then pick your service.</span>'}
             </div>
             <div class="cfg-row-control">
                 <div class="cfg-input-wrap">
                     <input type="password" id="csw-api-key-input" class="cfg-input" value="${apiKey}"${dis}
-                        placeholder="Paste your ${svcInfo.label} API key here…"
+                        placeholder="${live ? `Paste your ${svcInfo.label} API key here…` : 'Enable the auto-solver to set a key'}"
                         onchange="updateDeepVal('${basePath}.${svcInfo.keyField}', this.value)">
                 </div>
             </div>

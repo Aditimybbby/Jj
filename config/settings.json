@@ -242,7 +242,8 @@
             "service": "yescaptcha",
             "yescaptcha_api_key": "",
             "nopecha_api_key": "",
-            "anticaptcha_api_key": ""
+            "anticaptcha_api_key": "",
+            "captchaly_api_key": ""
         },
         "open_captcha_url_on_pc": true,
         "open_captcha_url_on_mobile": false,
