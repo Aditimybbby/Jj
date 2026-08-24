@@ -53,6 +53,14 @@
     --hidden-glow: rgba(255, 122, 198, 0.85);
     --distorted: #f43f5e;
     --distorted-glow: rgba(244, 63, 94, 0.9);
+    --gem: #14b8a6;
+    --gem-glow: rgba(20, 184, 166, 0.5);
+    --patreon: #ff7a59;
+    --patreon-glow: rgba(255, 122, 89, 0.5);
+    --bot: #94a3b8;
+    --bot-glow: rgba(148, 163, 184, 0.5);
+    --special: #facc15;
+    --special-glow: rgba(250, 204, 21, 0.5);
     --unknown: #64748b;
     --unknown-glow: rgba(100, 116, 139, 0.35);
 }

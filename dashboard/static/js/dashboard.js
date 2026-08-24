@@ -44,8 +44,9 @@ function update() {
         // a broke account used to show whatever number was left over from last poll
         setText('cash', d.cash === null || d.cash === undefined ? '—' : d.cash.toLocaleString());
         if (d.uptime !== undefined && d.uptime !== null) setText('uptimeDisplay', d.uptime);
-        renderLevelKpi(d.level, d.xp, d.xp_needed, d.level_source);
+        renderLevelKpi(d.level, d.xp, d.xp_needed, d.level_source, d.rank);
         renderTeam(d.team);
+        try { renderZoo(d.team); } catch(e) { console.error("Zoo Render Error:", e); }
         if (d.logs) renderLogs(d.logs);
 
         const dot = document.getElementById('statusDot'), lbl = document.getElementById('botStatus');
@@ -103,7 +104,7 @@ function setHtml(id, value) {
 
 // owo answers "owo level" with the level AND the xp pair in one message, so
 // both land in /api/stats - show them together
-function renderLevelKpi(level, xp, needed, source) {
+function renderLevelKpi(level, xp, needed, source, rank) {
     const lvlEl = document.getElementById('owoLevel');
     if (!lvlEl) return;
 
@@ -124,8 +125,18 @@ function renderLevelKpi(level, xp, needed, source) {
             xpText = `(${xp.toLocaleString()} xp)`;
         }
     }
+
+    // rank comes from the OCR'd image card (or text fallback); show it small next to the level
+    let rankText = '';
+    if (rank !== null && rank !== undefined && rank !== '') {
+        const rankNum = typeof rank === 'number' ? rank : parseInt(String(rank).replace(/[^\d]/g, ''), 10);
+        if (!isNaN(rankNum)) {
+            rankText = ` <span style="font-size:0.4em; color:var(--text-muted);" title="Global rank from the OwO level card">rank #${rankNum.toLocaleString()}</span>`;
+        }
+    }
+
     const lvlText = (level === null || level === undefined) ? '—' : level;
-    lvlEl.innerHTML = `${lvlText} <span style="font-size:0.45em; color:var(--text-muted);" id="owoXp">${xpText}</span>`;
+    lvlEl.innerHTML = `${lvlText} <span style="font-size:0.45em; color:var(--text-muted);" id="owoXp">${xpText}</span>${rankText}`;
 }
 
 
@@ -152,6 +163,53 @@ function renderTeam(team) {
     meta.innerHTML = `${watching} <span class="team-owned">${team.owned || 0} animals owned</span>`;
 }
 
+
+
+// the full zoo - every animal the watcher has read from the owo zoo card,
+// grouped by rarity tier, rarest first
+function renderZoo(team) {
+    const el = document.getElementById('zooGrid');
+    if (!el) return;
+
+    const zoo = (team && team.zoo) || [];
+    if (!zoo.length) {
+        el.innerHTML = `<div style="color:#666; font-style:italic; text-align:center; padding:20px;">No zoo data yet.<br><span style="font-size:0.8rem; opacity:0.7;">Run "owo zoo" to sync with OwO.</span></div>`;
+        return;
+    }
+
+    // group animals by rarity tier
+    const tiers = {};
+    const tierOrder = ['distorted', 'hidden', 'special', 'fabled', 'bot', 'legendary', 'gem', 'mythical', 'mythic', 'patreon', 'epic', 'rare', 'uncommon', 'common'];
+    for (const entry of zoo) {
+        const r = entry.rarity || 'unknown';
+        if (!tiers[r]) tiers[r] = [];
+        tiers[r].push(entry.animal);
+    }
+
+    // build tier blocks in rarity order (rarest first)
+    const blocks = tierOrder
+        .filter(t => tiers[t] && tiers[t].length)
+        .map(tier => {
+            const animals = tiers[tier].sort();
+            const chips = animals.map(a =>
+                `<span class="team-chip rarity-${escAttr(tier)}" title="${escAttr(tier)}">${escHtml(a)}</span>`
+            ).join('');
+            return `<div class="zoo-tier"><span class="zoo-tier-label rarity-${escAttr(tier)}">${escHtml(tier)}</span><div class="zoo-tier-animals">${chips}</div></div>`;
+        });
+
+    // include any tiers not in our order (e.g. unknown)
+    const extras = Object.keys(tiers)
+        .filter(t => !tierOrder.includes(t))
+        .map(tier => {
+            const animals = tiers[tier].sort();
+            const chips = animals.map(a =>
+                `<span class="team-chip rarity-${escAttr(tier)}" title="${escAttr(tier)}">${escHtml(a)}</span>`
+            ).join('');
+            return `<div class="zoo-tier"><span class="zoo-tier-label rarity-${escAttr(tier)}">${escHtml(tier)}</span><div class="zoo-tier-animals">${chips}</div></div>`;
+        });
+
+    el.innerHTML = blocks.concat(extras).join('');
+}
 
 function renderScheduler(states) {
     const list = document.getElementById('schedulerList');
