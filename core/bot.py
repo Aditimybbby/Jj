@@ -583,10 +583,13 @@ class NeuraBot(commands.Bot):
             ("channelswitch", self.config.get("utilities", {}).get("autochannel", {}).get("enabled", False)),
             ("cash_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("balance", True)),
             ("level_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("level", True)),
+            ("zoo_sync", self.config.get("utilities", {}).get("stats_sync", {}).get("zoo", True)),
             ("team_scan", enabled("team", True)),
             ("weapon_scan", enabled("weapon", True)),
             # the zoo watcher is event driven (it reacts to hunt results), so it owns no
-            # scheduler slot of its own - team_scan above is its periodic backstop
+            # scheduler slot of its own - team_scan above is its periodic backstop.
+            # zoo_sync is a separate thing: it is the dashboard's own zoo refresh and
+            # runs whether or not the team manager is switched on.
             ("coop_offer", bool(coop.get("enabled", True)) and bool(coop.get("battle", {}).get("enabled", True))),
         ]
         for cmd_id, is_on in rules:
@@ -960,12 +963,12 @@ class NeuraBot(commands.Bot):
                         self.cmd_states[cmd_id]['last_ran'] = time.time()
                     
                     if cmd_id and cmd_id in self.cmd_states:
-                        if cmd_id in ["rpp", "quest", "level_quotes", "huntbot", "daily", "cookie", "coinflip", "slots", "blackjack", "cursepray"]:
+                        if cmd_id in ["rpp", "quest", "level_quotes", "huntbot", "daily", "cookie", "coinflip", "slots", "blackjack", "cursepray", "level_sync"]:
                             class_map = {
                                 "rpp": "RPP", "quest": "Quest", "level_quotes": "LevelQuotes",
                                 "huntbot": "HuntBot", "daily": "Daily", "cookie": "Cookie",
                                 "coinflip": "Gambling", "slots": "Gambling", "blackjack": "Gambling",
-                                "cursepray": "NeuraCursePray",
+                                "cursepray": "NeuraCursePray", "level_sync": "Others",
                             }
                             
                             cog = self.get_cog(class_map[cmd_id])

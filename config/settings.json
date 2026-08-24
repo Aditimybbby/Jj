@@ -242,7 +242,8 @@
             "service": "yescaptcha",
             "yescaptcha_api_key": "",
             "nopecha_api_key": "",
-            "anticaptcha_api_key": ""
+            "anticaptcha_api_key": "",
+            "captchaly_api_key": ""
         },
         "open_captcha_url_on_pc": true,
         "open_captcha_url_on_mobile": false,
@@ -301,7 +302,9 @@
             "balance": true,
             "balance_interval_s": 900,
             "level": true,
-            "level_interval_s": 3600
+            "level_interval_s": 3600,
+            "zoo": true,
+            "zoo_interval_s": 1800
         }
     },
     "gambling": {

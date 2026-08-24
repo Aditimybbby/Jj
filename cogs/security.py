@@ -26,6 +26,43 @@ from plyer import notification
 import core.state as state
 
 class Security(commands.Cog):
+    # the settings field each service actually reads. web_solver._reload_service picks
+    # the key for the *selected* service only, so the old "is any key set at all" test
+    # was wrong in both directions: a NopeCHA key pasted while the service was still
+    # yescaptcha started an OAuth dance that then failed on an empty key, and a user
+    # with no key for the selected service got the same.
+    CAPTCHA_KEY_FIELDS = {
+        "yescaptcha": "yescaptcha_api_key",
+        "nopecha": "nopecha_api_key",
+        "anticaptcha": "anticaptcha_api_key",
+        "captchaly": "captchaly_api_key",
+    }
+
+    @classmethod
+    def _selected_key_field(cls, sol_cfg):
+        service = str(sol_cfg.get("service") or "yescaptcha").lower()
+        return service, cls.CAPTCHA_KEY_FIELDS.get(service, "yescaptcha_api_key")
+
+    def _should_autosolve(self, sol_cfg):
+        """True when the auto-solver is on and the *selected* service is usable."""
+        if not sol_cfg.get("enabled", True):
+            return False
+        service, key_field = self._selected_key_field(sol_cfg)
+        if sol_cfg.get(key_field):
+            return True
+        # nopecha is the one service with a keyless free tier - web_solver.auto_verify
+        # lets it through without a key too, so agree with it here
+        if service == "nopecha":
+            return True
+        # say why we are about to ask a human, instead of silently queueing a manual solve
+        self.bot.log(
+            "WARN",
+            f"Auto-solve is enabled but the selected service '{service}' has no key set "
+            f"(security.captcha_solver.{key_field} is empty) - falling back to a manual solve. "
+            f"Switch the service to the one your key belongs to."
+        )
+        return False
+
     def __init__(self, bot):
         self.bot = bot
         cfg = bot.config.get('security', {})
@@ -251,13 +288,7 @@ class Security(commands.Cog):
                 self.bot._solving_captcha = True
 
                 autosolved = False
-                has_key = bool(
-                    sol_cfg.get("yescaptcha_api_key") or
-                    sol_cfg.get("nopecha_api_key") or
-                    sol_cfg.get("anticaptcha_api_key") or
-                    sol_cfg.get("captchaly_api_key")
-                )
-                if sol_cfg.get("enabled", True) and has_key:
+                if self._should_autosolve(sol_cfg):
                     service_name = self.bot.web_solver.active_service_name.capitalize()
                     self.bot.log("SYS", f"Attempting {service_name} auto-solve for DM...")
                     autosolved = await self.bot.web_solver.auto_verify()
@@ -368,13 +399,7 @@ class Security(commands.Cog):
                     self.bot._solving_captcha = True
 
                     autosolved = False
-                    has_key = bool(
-                        sol_cfg.get("yescaptcha_api_key") or
-                        sol_cfg.get("nopecha_api_key") or
-                        sol_cfg.get("anticaptcha_api_key") or
-                        sol_cfg.get("captchaly_api_key")
-                    )
-                    if sol_cfg.get("enabled", True) and has_key:
+                    if self._should_autosolve(sol_cfg):
                         service_name = self.bot.web_solver.active_service_name.capitalize()
                         self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
                         autosolved = await self.bot.web_solver.auto_verify()
@@ -478,13 +503,7 @@ class Security(commands.Cog):
             self.bot._solving_captcha = True
 
             autosolved = False
-            has_key = bool(
-                sol_cfg.get("yescaptcha_api_key") or
-                sol_cfg.get("nopecha_api_key") or
-                sol_cfg.get("anticaptcha_api_key") or
-                sol_cfg.get("captchaly_api_key")
-            )
-            if sol_cfg.get("enabled", True) and has_key:
+            if self._should_autosolve(sol_cfg):
                 service_name = self.bot.web_solver.active_service_name.capitalize()
                 self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
                 autosolved = await self.bot.web_solver.auto_verify()
