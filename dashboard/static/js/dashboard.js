@@ -20,11 +20,11 @@ function initDashCharts() {
         const c2 = document.getElementById('lineChart').getContext('2d');
         lineChart = new Chart(c2, {
             type: 'line',
-            data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: '#ff1f1f', backgroundColor: 'rgba(255,31,31,0.05)', fill: true, pointRadius: 2, pointHoverRadius: 5, tension: 0.3 }] },
+            data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: '#7c6cff', backgroundColor: 'rgba(124,108,255,0.08)', fill: true, pointRadius: 2, pointHoverRadius: 5, tension: 0.3 }] },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                scales: { x: { display: false }, y: { min: 0, suggestedMax: 10, grid: { color: '#222' }, ticks: { color: '#555', font: { size: 10 } } } },
+                scales: { x: { display: false }, y: { min: 0, suggestedMax: 10, grid: { color: '#1c1f29' }, ticks: { color: '#5b6072', font: { size: 10 } } } },
                 plugins: { legend: { display: false } }
             }
         });
@@ -173,7 +173,7 @@ function renderZoo(team) {
 
     const zoo = (team && team.zoo) || [];
     if (!zoo.length) {
-        el.innerHTML = `<div style="color:#666; font-style:italic; text-align:center; padding:20px;">No zoo data yet.<br><span style="font-size:0.8rem; opacity:0.7;">Run "owo zoo" to sync with OwO.</span></div>`;
+        el.innerHTML = `<div style="color:var(--text-dim); font-style:italic; text-align:center; padding:20px;">No zoo data yet.<br><span style="font-size:0.8rem; opacity:0.7;">Run "owo zoo" to sync with OwO.</span></div>`;
         return;
     }
 
@@ -229,7 +229,7 @@ function renderScheduler(states) {
         }).filter(item => item !== null);
         items.sort((a, b) => (a.remaining || 0) - (b.remaining || 0));
         if (items.length === 0) {
-            list.innerHTML = '<div style="color:#666; font-style:italic; font-size:0.9rem; text-align:center; padding-top:20px;">No scheduled actions</div>';
+            list.innerHTML = '<div style="color:var(--text-dim); font-style:italic; font-size:0.9rem; text-align:center; padding-top:20px;">No scheduled actions</div>';
             return;
         }
         list.innerHTML = items.map(item => {
@@ -242,28 +242,28 @@ function renderScheduler(states) {
             } else {
                 const displayTime = Math.ceil(item.remaining);
                 const timeStr = displayTime > 60 ? `${Math.floor(displayTime / 60)}m ${displayTime % 60}s` : `${displayTime}s`;
-                statusHtml = `<span style="color:#aaa; font-family:var(--font-mono); font-size:0.8rem;">in ${timeStr}</span>`;
+                statusHtml = `<span style="color:var(--text-muted); font-family:var(--font-mono); font-size:0.8rem;">in ${timeStr}</span>`;
                 progress = Math.min(100, Math.max(0, 100 - (item.remaining / item.delay) * 100));
             }
             const pColor = item.priority <= 2 ? 'var(--primary)' : '#888';
             return `
-                <div style="background:rgba(0,0,0,0.2); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:8px 12px; display:flex; flex-direction:column; gap:6px;">
+                <div style="background:var(--bg-elev); border:1px solid var(--border-soft); border-radius:8px; padding:9px 12px; display:flex; flex-direction:column; gap:6px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <div style="display:flex; align-items:center; gap:8px;">
-                            <span style="width:8px; height:8px; border-radius:50%; background:${pColor}; display:inline-block; box-shadow:0 0 5px ${pColor};"></span>
-                            <span style="color:#ddd; font-weight:600; font-size:0.85rem;">${name}</span>
+                            <span style="width:8px; height:8px; border-radius:50%; background:${pColor}; display:inline-block; box-shadow:0 0 6px ${pColor}99;"></span>
+                            <span style="color:var(--text-main); font-weight:600; font-size:0.82rem;">${name}</span>
                         </div>
                         ${statusHtml}
                     </div>
-                    <div style="height:3px; background:rgba(255,255,255,0.05); border-radius:2px; overflow:hidden;">
-                        <div style="height:100%; width:${progress}%; background:${item.in_queue ? 'var(--success)' : '#444'}; transition:width 1s linear;"></div>
+                    <div style="height:3px; background:var(--border-soft); border-radius:2px; overflow:hidden;">
+                        <div style="height:100%; width:${progress}%; background:${item.in_queue ? 'var(--success)' : 'var(--text-dim)'}; transition:width 1s linear;"></div>
                     </div>
                 </div>
             `;
         }).join('');
     } catch (e) {
         console.error("Scheduler Render Error:", e);
-        list.innerHTML = '<div style="color:#666; font-style:italic; font-size:0.9rem; text-align:center; padding-top:20px;">Render Error (Check Console)</div>';
+        list.innerHTML = '<div style="color:var(--text-dim); font-style:italic; font-size:0.9rem; text-align:center; padding-top:20px;">Render Error (Check Console)</div>';
     }
 }
 
@@ -278,7 +278,7 @@ function renderQuests(quests, timer) {
         timerEl.style.display = 'none';
     }
     if (!quests || quests.length === 0) {
-        list.innerHTML = '<div style="color:#666; font-style:italic; text-align:center; padding: 20px;">No active quests tracked.<br><span style="font-size:0.8rem; opacity:0.7;">Run "o quest" to sync with OwO.</span></div>';
+        list.innerHTML = '<div style="color:var(--text-dim); font-style:italic; text-align:center; padding: 20px;">No active quests tracked.<br><span style="font-size:0.8rem; opacity:0.7;">Run "o quest" to sync with OwO.</span></div>';
         return;
     }
     list.innerHTML = quests.map(q => {
@@ -300,16 +300,16 @@ function renderQuests(quests, timer) {
             }
         }
         return `
-            <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.05); padding:15px; border-radius:8px;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9rem;">
-                    <span style="color:#eee; font-weight:500;">${escHtml(desc)}</span>
-                    <span style="color:${color}; font-weight:bold;">${escHtml(q.current)}/${escHtml(q.total)}</span>
+            <div style="background:var(--bg-elev); border:1px solid var(--border-soft); padding:14px 15px; border-radius:10px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.88rem;">
+                    <span style="color:var(--text-main); font-weight:500;">${escHtml(desc)}</span>
+                    <span style="color:${color}; font-weight:600; font-family:var(--font-mono);">${escHtml(q.current)}/${escHtml(q.total)}</span>
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                    <span style="font-size:0.65rem; color:${isCompleted ? 'var(--success)' : '#888'}; text-transform:uppercase; letter-spacing:0.8px; font-family:var(--font-mono);">${status}</span>
+                    <span style="font-size:0.62rem; color:${isCompleted ? 'var(--success)' : 'var(--text-dim)'}; text-transform:uppercase; letter-spacing:0.8px; font-family:var(--font-mono);">${status}</span>
                 </div>
-                <div style="height:6px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden;">
-                    <div style="width:${percent}%; height:100%; background:${color}; box-shadow: 0 0 10px ${color}44; transition: width 0.5s ease;"></div>
+                <div style="height:6px; background:var(--border-soft); border-radius:3px; overflow:hidden;">
+                    <div style="width:${percent}%; height:100%; background:${color}; box-shadow: 0 0 10px ${color}55; transition: width 0.5s ease;"></div>
                 </div>
             </div>
         `;
