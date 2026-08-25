@@ -45,7 +45,7 @@ class Shop(commands.Cog):
 
         if current_balance is None:
             if not self._pending_cash_check:
-                self.bot.log("Shop", "Balance unknown. Syncing via 'owo cash'...")
+                self.bot.log("SHOP", "Balance unknown. Syncing via 'owo cash'...")
                 self._pending_cash_check = True
                 await self.bot.neura_enqueue("owo cash", priority=3)
             return
@@ -56,9 +56,9 @@ class Shop(commands.Cog):
         
         if current_balance >= price:
             await self.bot.neura_enqueue(f"owo buy {item_id}", priority=3)
-            self.bot.log("Shop", f"Buying item #{item_id} (price: {price}, balance: {current_balance})")
+            self.bot.log("SHOP", f"Buying item #{item_id} (price: {price}, balance: {current_balance})")
         else:
-            self.bot.log("Shop", f"Not enough cowoncy to buy item #{item_id} (need {price}, have {current_balance})")
+            self.bot.log("SHOP", f"Not enough cowoncy to buy item #{item_id} (need {price}, have {current_balance})")
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -83,7 +83,7 @@ class Shop(commands.Cog):
                     st['current_cash'] = int(cash_str)
                     st['last_cash_update'] = time.time()
                     state.save_account_stats()
-                    self.bot.log("Shop", f"Balance synced: {cash_str} cowoncy")
+                    self.bot.log("SHOP", f"Balance synced: {cash_str} cowoncy")
                     self._pending_cash_check = False
             except Exception:
                 pass
@@ -103,7 +103,7 @@ class Shop(commands.Cog):
         cnf = self.bot.config.get('commands', {}).get('shop', {})
         if not cnf.get('enabled', False):
             return
-        self.bot.log("Shop", "Auto-syncing balance via 'owo cash'...")
+        self.bot.log("SHOP", "Auto-syncing balance via 'owo cash'...")
         await self.bot.neura_enqueue("owo cash", priority=3)
 
     async def register_actions(self):

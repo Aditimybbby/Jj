@@ -15,10 +15,45 @@ import re
 import time
 import core.state as state
 
+# command word as it appears on the wire -> the cmd_id the scheduler tracks it under.
+# Only entries where the two differ need listing; everything else falls through as
+# itself and is then filtered by `in bot.cmd_states`. This used to be two separate
+# literals, and the one on the slow-down path was missing cf/s/bj/hb - so an owo
+# "slow down" for a gamble or a huntbot never back-dated the timer it belonged to
+# and the account walked straight back into the same cooldown.
+CMD_ALIASES = {
+    "h": "hunt",
+    "b": "battle",
+    "curse": "cursepray",
+    "pray": "cursepray",
+    "cf": "coinflip",
+    "s": "slots",
+    "bj": "blackjack",
+    "hb": "huntbot",
+}
+
+
+def _cmd_id_from_text(text, prefix):
+    """The cmd_id for a command we sent, or None when the text is not one.
+
+    `text` and `prefix` are already lowercased and stripped. A bare prefix ("owo")
+    is the owo command itself; splitting it used to raise IndexError and abort the
+    whole slow-down sync.
+    """
+    if not text.startswith(prefix):
+        return None
+    remaining = text[len(prefix):].strip()
+    if not remaining:
+        return prefix or "owo"
+    return CMD_ALIASES.get(remaining.split()[0], remaining.split()[0])
+
+
 class CooldownManager:
     def __init__(self, bot):
         self.bot = bot
-        
+        self.last_manual_cmd = None
+        self.last_manual_time = 0.0
+
     async def on_message(self, message):
         # self.bot.user is None before the first READY; guard so a pre-ready
         # dispatch does not raise AttributeError on None.id and take down the
@@ -28,36 +63,21 @@ class CooldownManager:
         if message.author.id == self.bot.user.id:
             content = message.content.lower().strip()
             prefix = self.bot.prefix.lower().strip()
-            
+
             if content.startswith(prefix):
-                remaining = content[len(prefix):].strip()
-                parts = remaining.split()
-                
-                if not parts:
-                    cmd_part = "owo" 
-                else:
-                    cmd_part = parts[0]
+                cmd_id = _cmd_id_from_text(content, prefix)
 
-                alias_map = {
-                    "h": "hunt",
-                    "b": "battle",
-                    "curse": "cursepray",
-                    "pray": "cursepray",
-                    "owo": "owo"
-                }
-                cmd_id = alias_map.get(cmd_part, cmd_part)
-
-                if cmd_id in self.bot.cmd_states:
+                if cmd_id and cmd_id in self.bot.cmd_states:
                     self.bot.cmd_states[cmd_id]['last_ran'] = time.time()
 
-                    is_echo = (content == self.bot.last_sent_command.lower().strip() and 
+                    is_echo = (content == self.bot.last_sent_command.lower().strip() and
                               time.time() - self.bot.last_sent_time < 1.2)
-                    
+
                     if not is_echo:
                         silent_cmds = ['hunt', 'battle', 'owo']
                         if cmd_id not in silent_cmds:
                             self.bot.log("SYS", f"Manual command sync: {cmd_id}")
-                
+
                 self.last_manual_cmd = cmd_id
                 self.last_manual_time = time.time()
             return
@@ -95,18 +115,13 @@ class CooldownManager:
 
             if wait_seconds > 0:
                 cmd_id = None
-                if hasattr(self, 'last_manual_time') and time.time() - self.last_manual_time < 5:
+                if self.last_manual_cmd and time.time() - self.last_manual_time < 5:
                     cmd_id = self.last_manual_cmd
                 else:
-                    last_cmd = self.bot.last_sent_command.lower().strip()
-                    prefix = self.bot.prefix.lower().strip()
-                    if last_cmd.startswith(prefix):
-                        cmd_part = last_cmd[len(prefix):].strip().split()[0]
-                        alias_map = {
-                            "h": "hunt", "b": "battle", 
-                            "curse": "cursepray", "pray": "cursepray"
-                        }
-                        cmd_id = alias_map.get(cmd_part, cmd_part)
+                    cmd_id = _cmd_id_from_text(
+                        self.bot.last_sent_command.lower().strip(),
+                        self.bot.prefix.lower().strip(),
+                    )
 
                 if wait_seconds <= 15:
                     self.bot.throttle_until = time.time() + wait_seconds + 0.5

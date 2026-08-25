@@ -19,6 +19,7 @@ Shared mutable state: live bot instances, per-account stats and the log sink.
 import time
 import json
 import os
+import re
 import datetime
 from collections import deque
 import utils.history_tracker as ht
@@ -40,8 +41,6 @@ if os.path.exists(LOG_MISC_PATH):
         log_config = json.load(f)
 
 bot_instances = []
-bot_paused = False
-active_session_start = time.time()
 stats = {
     'uptime_start': time.time()
 }
@@ -204,6 +203,19 @@ def load_account_stats():
 command_logs = deque(maxlen=1000)
 full_session_history = []
 
+# _raw_send appends " (1.2s)" to the log line when stealth typing timed the send,
+# so the raw text is not a clean command string
+_TYPING_SUFFIX_RE = re.compile(r'\s*\(\d+(?:\.\d+)?s\)\s*$')
+
+
+def _sender_prefix(bot_id):
+    """The owo prefix the account that emitted this line is configured with."""
+    for bot in bot_instances:
+        if str(getattr(bot, 'user_id', '')) == str(bot_id):
+            return str(getattr(bot, 'prefix', 'owo ') or 'owo ').lower()
+    return 'owo '
+
+
 def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=None):
     hex_color = log_config.get("colors", {}).get(type, "#ffffff")
 
@@ -237,38 +249,44 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=
     
     if type in ["CMD", "SUCCESS", "ALARM", "SECURITY"] and bot_id and bot_id in account_stats:
         st = account_stats[bot_id]
-        
-        if "level quote:" in message.lower() or "level grind:" in message.lower():
-            return
-        
+
         cmd = "other"
         if type == "CMD":
             parts = message.split("Sent: ")
             if len(parts) > 1:
-                full_text = parts[1].lower().strip()
-                if full_text.startswith("owo "):
+                full_text = _TYPING_SUFFIX_RE.sub('', parts[1]).lower().strip()
+                prefix = _sender_prefix(bot_id)
+                bare = prefix.strip()
+                # Not everything the bot sends is an owo command: level_grind posts
+                # chat quotes and the captcha handler posts bare answers. Both used
+                # to land in other_count/total_cmd_count and inflate the dashboard
+                # totals. The guard this replaces looked for "level quote:" /
+                # "level grind:", strings nothing has ever emitted.
+                if full_text.startswith(prefix):
                     cmd_parts = full_text.split()
-                    cmd_text = cmd_parts[1] if len(cmd_parts) > 1 else "owo"
+                    cmd_text = cmd_parts[1] if len(cmd_parts) > 1 else bare
+                elif full_text == bare:
+                    cmd_text = bare
                 else:
-                    cmd_text = full_text.split()[0]
-                
-                if cmd_text in ["hunt", "h"]: 
+                    return
+
+                if cmd_text in ["hunt", "h"]:
                     cmd = "hunt"
                     st['hunt_count'] = st.get('hunt_count', 0) + 1
                     st['session_hunt_count'] = st.get('session_hunt_count', 0) + 1
-                elif cmd_text in ["battle", "b"]: 
+                elif cmd_text in ["battle", "b"]:
                     cmd = "battle"
                     st['battle_count'] = st.get('battle_count', 0) + 1
                     st['session_battle_count'] = st.get('session_battle_count', 0) + 1
-                elif cmd_text == "owo" or full_text.strip() == "owo":
+                elif cmd_text == bare:
                     cmd = "owo"
                     st['owo_count'] = st.get('owo_count', 0) + 1
                     st['session_owo_count'] = st.get('session_owo_count', 0) + 1
-                elif "autohunt" in cmd_text: 
+                elif "autohunt" in cmd_text:
                     cmd = "captcha"
                 else:
                     st['other_count'] = st.get('other_count', 0) + 1
-                
+
                 st['total_cmd_count'] = st.get('total_cmd_count', 0) + 1
    
         msg_low = message.lower()
