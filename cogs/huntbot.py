@@ -201,46 +201,46 @@ class HuntBot(commands.Cog):
             self.bot.is_busy = False
 
         elif "here is your password" in content_lower or "confirm your identity" in content_lower or "link below" in content_lower:
+            # is_busy holds off the channel rotation while a huntbot exchange is in
+            # flight. It used to be cleared only on the autosolve-succeeded path, so a
+            # missing http session, a captcha with no image, an unreadable captcha or
+            # any exception latched it True for the life of the process - and
+            # ChannelSwitch.trigger_switch then refused to rotate, forever, silently.
             self.bot.is_busy = True
-
-            img_url = None
-            if message.attachments:
-                img_url = message.attachments[0].url
-            elif message.embeds:
-                for em in message.embeds:
-                    if em.image:
-                        img_url = em.image.url
-                        break
             try:
+                img_url = None
+                if message.attachments:
+                    img_url = message.attachments[0].url
+                elif message.embeds:
+                    for em in message.embeds:
+                        if em.image:
+                            img_url = em.image.url
+                            break
+
                 import modules.nhuntbotsolver as solver
-                if self.bot.session and img_url:
+                if not self.bot.session:
+                    self.bot.log("WARN", "HuntBot captcha: no http session yet - cannot fetch the image.")
+                elif not img_url:
+                    self.bot.log("WARN", "HuntBot captcha: no image on the message - solve it manually.")
+                else:
                     self.bot.log("AutoHunt", "Attempting Lazy Farmers solver auto-solve...")
                     answer = await solver.solveHbCaptcha(img_url, self.bot.session)
-                    
+
                     if answer and len(answer) > 0:
                         self.bot.log("SUCCESS", f"Captcha Solved: {answer}")
                         cash = cfg.get('cash_to_spend', 15000)
                         await self.bot.neura_enqueue(f"autohunt {cash} {answer}", priority=1)
-                        
+
                         uid = str(self.bot.user.id)
                         if uid in state.account_stats:
                             self.bot.stats['captchas_solved_today'] = self.bot.stats.get('captchas_solved_today', 0) + 1
                             self.bot.stats['captcha_success_count'] = self.bot.stats.get('captcha_success_count', 0) + 1
-                        self.bot.is_busy = False
                     else:
                         self.bot.log("WARN", "Could not solve captcha automatically.")
-                        # base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                        # path = os.path.join(base, "beeps", "huntbot_image_beep.mp3")
-                        # plat_settings = self.bot.config.get('platform_settings', {})
-                        # if plat_settings.get('desktop_notifications', True):
-                        #     if os.path.exists(path):
-                        #         asyncio.create_task(self._play_beep_async(path))
             except Exception as e:
                 self.bot.log("ERROR", f"Solver failed: {e}")
-                # base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                # path = os.path.join(base, "beeps", "huntbot_image_beep.mp3")
-                # if os.path.exists(path):
-                #     asyncio.create_task(self._play_beep_async(path))
+            finally:
+                self.bot.is_busy = False
 
         elif "wrong password" in content_lower or "incorrect password" in content_lower:
             self.bot.log("AutoHunt", "Wrong password provided. Waiting for reset.")
@@ -251,23 +251,6 @@ class HuntBot(commands.Cog):
                 self.bot.cmd_states['huntbot']['last_ran'] = time.time()
             self.bot.is_busy = False
 
-
-    # async def _play_beep_async(self, path):
-    #     if not os.path.exists(path): return
-
-    #     if hasattr(self.bot, 'is_mobile') and self.bot.is_mobile:
-    #         try:
-    #             os.system(f'termux-media-player play "{path}"')
-    #         except:
-    #             pass
-    #         return
-
-    #     try:
-    #         from playsound3 import playsound
-    #         loop = asyncio.get_event_loop()
-    #         await loop.run_in_executor(None, lambda: playsound(path, block=False))
-    #     except:
-    #         pass
 
 async def setup(bot):
     cog = HuntBot(bot)

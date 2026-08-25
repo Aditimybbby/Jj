@@ -124,11 +124,33 @@ class NeuraBot(commands.Bot):
         self.is_on_break = False
         self.break_lock = asyncio.Lock()
 
-        
+
         self.is_mobile = "TERMUX_VERSION" in os.environ or "com.termux" in os.environ.get("PREFIX", "")
         platform = "Mobile (Termux)" if self.is_mobile else "Desktop"
         _log.info(f"Initialized bot on platform: {platform}")
-        
+
+    # "a long OwO exchange is mid-flight" - currently only huntbot sets it, and only
+    # ChannelSwitch reads it, to hold off a channel rotation that would strand the
+    # reply in the old channel. The window is seconds: huntbot clears it as soon as
+    # OwO answers.
+    BUSY_TIMEOUT_S = 120
+    _busy_until = 0.0
+
+    @property
+    def is_busy(self):
+        """Backed by a deadline rather than a plain bool.
+
+        Every writer used to be responsible for clearing the flag, so one reply OwO
+        never sent - a dropped message, an unsolvable huntbot captcha, an exception
+        in the solver - latched it True for the life of the process and silently
+        disabled channel rotation with no log line to say why.
+        """
+        return time.time() < self._busy_until
+
+    @is_busy.setter
+    def is_busy(self, value):
+        self._busy_until = (time.time() + self.BUSY_TIMEOUT_S) if value else 0.0
+
     async def setup_hook(self):
         # login() runs this on every session, including the ones run_bot restarts after a
         # dropped gateway - the workers and cogs from the first session are still alive
@@ -219,6 +241,7 @@ class NeuraBot(commands.Bot):
 
         # so the dashboard can tell which space a running account belongs to
         state.account_owners[self.user_id] = self.space_owner
+        self._persist_user_id()
         
         self.identifiers = [
             self.username.lower(),
@@ -411,10 +434,13 @@ class NeuraBot(commands.Bot):
                         parts[0] = f"{self.prefix}{new_base}" if base_cmd.startswith(prefix) else new_base
                         cmd = " ".join(parts)
 
+        # anything a cog may enqueue without the prefix has to be listed here, or it
+        # is posted as plain chat: owo ignores it, the cog waits forever for a reply
+        # that never comes, and the channel fills with bare words like "weapon"
         known = ['hunt', 'battle', 'curse', 'huntbot', 'daily', 'cookie',
                 'quest', 'checklist', 'cf', 'slots', 'bj', 'blackjack', 'autohunt', 'upgrade',
                 'sacrifice', 'team', 'zoo', 'use', 'inv', 'sell', 'crate',
-                'lootbox', 'run', 'pup', 'piku','pray']
+                'lootbox', 'run', 'pup', 'piku', 'pray', 'weapon']
         
         if self.shortforms:
             for sf in self.shortforms.values():
@@ -468,6 +494,23 @@ class NeuraBot(commands.Bot):
             proxy_manager.set_account_status(self.space_owner, name, status, reason)
         except Exception as e:
             _log.warning("could not record account status: %s", e)
+
+    def _persist_user_id(self):
+        """Write this account's discord id into accounts.json.
+
+        `spaces.owner_for_account` falls back to scanning accounts.json when the
+        account is not running, and that fallback needs the id to have been saved
+        at least once - otherwise the dashboard cannot prove ownership of a
+        stopped account and hides its history.
+        """
+        name = getattr(self, 'account_name', None)
+        if not name or not self.user_id:
+            return
+        try:
+            from utils import proxy_manager
+            proxy_manager.set_account_user_id(self.space_owner, name, self.user_id)
+        except Exception as e:
+            _log.warning("could not record account user id: %s", e)
 
     def note_send_failure(self, exc):
         """Classify a failed send, flag the account and stop hammering Discord."""
@@ -965,20 +1008,20 @@ class NeuraBot(commands.Bot):
                         self.cmd_states[cmd_id]['last_ran'] = time.time()
                     
                     if cmd_id and cmd_id in self.cmd_states:
-                        if cmd_id in ["rpp", "quest", "level_quotes", "huntbot", "daily", "cookie", "coinflip", "slots", "blackjack", "cursepray", "level_sync"]:
-                            class_map = {
-                                "rpp": "RPP", "quest": "Quest", "level_quotes": "LevelQuotes",
-                                "huntbot": "HuntBot", "daily": "Daily", "cookie": "Cookie",
-                                "coinflip": "Gambling", "slots": "Gambling", "blackjack": "Gambling",
-                                "cursepray": "NeuraCursePray", "level_sync": "Others",
-                            }
-                            
-                            cog = self.get_cog(class_map[cmd_id])
+                        # post-send recompute hooks. One map, not a list plus a map that
+                        # could drift apart. Gambling is deliberately absent: its content
+                        # is a scheduler callable now, so the next wager is computed at
+                        # enqueue time off the freshest balance (see cogs/gambling.py).
+                        class_map = {
+                            "rpp": "RPP", "quest": "Quest", "level_quotes": "LevelQuotes",
+                            "huntbot": "HuntBot", "daily": "Daily", "cookie": "Cookie",
+                            "cursepray": "NeuraCursePray", "level_sync": "Others",
+                        }
+                        cog_name = class_map.get(cmd_id)
+                        if cog_name:
+                            cog = self.get_cog(cog_name)
                             if cog:
-                                if cmd_id == "coinflip": getattr(cog, "trigger_coinflip")()
-                                elif cmd_id == "slots": getattr(cog, "trigger_slots")()
-                                elif cmd_id == "blackjack": getattr(cog, "trigger_blackjack")()
-                                else: getattr(cog, "trigger_action")()
+                                cog.trigger_action()
                 
                 finally:
                     if cmd_id and cmd_id in self.cmd_states:

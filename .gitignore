@@ -53,6 +53,19 @@ config/*.migrated
 # per-user spaces: tokens, proxies, settings and history
 data/users/
 
+# per-account runtime state written into the data root at boot. Only
+# data/neura_quotes.json is shipped content; everything else here is generated
+# and account-specific (stats.json carries discord ids and cash totals).
+data/stats.json
+data/stats_daily.json
+data/stats_cookie.json
+data/boss_state.json
+data/cp_state_*.json
+data/giveaway_db*.json
+data/history.json
+data/neura_history.db
+data/setup.log
+
 # ===============================
 # Virtual environments
 # ===============================

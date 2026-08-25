@@ -130,50 +130,69 @@ class Gambling(commands.Cog):
         base_amount = cmd_cfg.get('amount', 1)
         return self._get_bet_amount(cmd, base_amount)
 
-    def trigger_coinflip(self):
+    # while a safeguard is tripped there is no bet to place, so re-check on a slow
+    # timer instead of once per bet interval - _check_safeguards logs every pass
+    SUSPENDED_RECHECK_S = 120
+
+    def _suspend(self, cmd):
+        """No bet this tick. _check_safeguards has already logged the reason."""
+        cmd_state = self.bot.cmd_states.get(cmd)
+        if cmd_state:
+            cmd_state['delay'] = self.SUSPENDED_RECHECK_S
+        return None
+
+    def _set_delay(self, cmd, low, high):
+        cmd_state = self.bot.cmd_states.get(cmd)
+        if cmd_state:
+            cmd_state['delay'] = random.uniform(low, high)
+
+    # These are scheduler hooks, not senders: neura_scheduler_worker resolves a
+    # callable `content` on every tick and skips the send when it returns None. That
+    # is what makes the stop-loss real. The methods these replaced only *wrote*
+    # cmd_states[...]['content'] and returned early when a safeguard tripped, which
+    # left the previous wager sitting in the scheduler - so the log said "Suspending"
+    # while the bot kept firing that exact bet forever, against the very balance the
+    # safeguard existed to protect.
+
+    def next_coinflip(self):
         if not self._check_safeguards():
-            return
+            return self._suspend('coinflip')
         cfg = self._get_cmd_cfg('coinflip')
         amount = self._get_current_bet_for_cmd('coinflip')
         side = cfg.get('side', 'h')
-        self.bot.cmd_states['coinflip']['content'] = f"cf {side} {amount}"
-        self.bot.cmd_states['coinflip']['delay'] = random.uniform(30, 60)
+        self._set_delay('coinflip', 30, 60)
         self.bot.log("GAMBLING", f"Coinflip: Betting {amount} on {side}")
+        return f"cf {side} {amount}"
 
-    def trigger_slots(self):
+    def next_slots(self):
         if not self._check_safeguards():
-            return
-        cfg = self._get_cmd_cfg('slots')
+            return self._suspend('slots')
         amount = self._get_current_bet_for_cmd('slots')
-        self.bot.cmd_states['slots']['content'] = f"slots {amount}"
-        self.bot.cmd_states['slots']['delay'] = random.uniform(25, 50)
+        self._set_delay('slots', 25, 50)
         self.bot.log("GAMBLING", f"Slots: Betting {amount}")
+        return f"slots {amount}"
 
-    def trigger_blackjack(self):
+    def next_blackjack(self):
         if not self._check_safeguards():
-            return
-        cfg = self._get_cmd_cfg('blackjack')
+            return self._suspend('blackjack')
         amount = self._get_current_bet_for_cmd('blackjack')
-        self.bot.cmd_states['blackjack']['content'] = f"bj {amount}"
-        self.bot.cmd_states['blackjack']['delay'] = random.uniform(40, 70)
+        self._set_delay('blackjack', 40, 70)
         self.bot.log("GAMBLING", f"Blackjack: Betting {amount}")
+        return f"bj {amount}"
 
     async def register_actions(self):
         cfg_cf = self._get_cmd_cfg('coinflip')
         if cfg_cf.get('enabled', False):
             self.bot.log("SYS", "Gambling (Coinflip) Module configured.")
-            await self.bot.neura_register_command("coinflip", "cf", priority=self.bot.get_cmd_priority("coinflip", 3), delay=random.uniform(30, 60), initial_offset=15)
-            self.trigger_coinflip()
+            await self.bot.neura_register_command("coinflip", self.next_coinflip, priority=self.bot.get_cmd_priority("coinflip", 3), delay=random.uniform(30, 60), initial_offset=15)
         cfg_slots = self._get_cmd_cfg('slots')
         if cfg_slots.get('enabled', False):
             self.bot.log("SYS", "Gambling (Slots) Module configured.")
-            await self.bot.neura_register_command("slots", "slots", priority=self.bot.get_cmd_priority("slots", 3), delay=random.uniform(25, 50), initial_offset=20)
-            self.trigger_slots()
+            await self.bot.neura_register_command("slots", self.next_slots, priority=self.bot.get_cmd_priority("slots", 3), delay=random.uniform(25, 50), initial_offset=20)
         cfg_bj = self._get_cmd_cfg('blackjack')
         if cfg_bj.get('enabled', False):
             self.bot.log("SYS", "Gambling (Blackjack) Module configured.")
-            await self.bot.neura_register_command("blackjack", "bj", priority=self.bot.get_cmd_priority("blackjack", 3), delay=random.uniform(40, 70), initial_offset=25)
-            self.trigger_blackjack()
+            await self.bot.neura_register_command("blackjack", self.next_blackjack, priority=self.bot.get_cmd_priority("blackjack", 3), delay=random.uniform(40, 70), initial_offset=25)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -234,21 +253,19 @@ class Gambling(commands.Cog):
         return elapsed < 30
 
     def _handle_gamble_outcome(self, cmd, won, content):
-        cmd_cfg = self._get_cmd_cfg(cmd)
-        base_amount = cmd_cfg.get('amount', 1)
         bet_amount = self._get_current_bet_for_cmd(cmd)
 
         self._update_martingale(cmd, won)
 
         self._record_outcome(cmd, won, bet_amount)
 
-        if cmd == 'coinflip':
-            side = cmd_cfg.get('side', 'h')
-            next_bet = self._get_current_bet_for_cmd('coinflip')
-            self.bot.cmd_states['coinflip']['content'] = f"cf {side} {next_bet}"
-        elif cmd == 'slots':
-            next_bet = self._get_current_bet_for_cmd('slots')
-            self.bot.cmd_states['slots']['content'] = f"slots {next_bet}"
+        # deliberately no cmd_states[...]['content'] write here. It used to stamp a
+        # literal "cf h 200" over the scheduler entry, which (a) replaced the
+        # callable that enforces the stop-loss with a static string, undoing the
+        # safeguard from the first result onwards, and (b) raised KeyError when the
+        # game that produced this outcome was not the one registered. The callable
+        # recomputes the wager from the martingale state _update_martingale just
+        # wrote, so the next tick already has the right number.
 
         self._sync_cash_from_response(content)
         outcome_str = "WON" if won else "LOST"

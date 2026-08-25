@@ -285,31 +285,37 @@ class Security(commands.Cog):
                 if getattr(self.bot, '_solving_captcha', False):
                     self.bot.log("SECURITY", "[GUARD] Captcha already being solved – skipping duplicate DM captcha task.")
                     return
+                # try/finally: the flag means "a solve is in flight right now". It used
+                # to be cleared only on the autosolve-succeeded path, so one failed or
+                # skipped solve latched it True for the life of the process and every
+                # later captcha was silently dropped by the guard above - no retry, no
+                # manual solve queued, account parked at throttle_until=inf forever.
                 self.bot._solving_captcha = True
+                try:
+                    autosolved = False
+                    if self._should_autosolve(sol_cfg):
+                        service_name = self.bot.web_solver.active_service_name.capitalize()
+                        self.bot.log("SYS", f"Attempting {service_name} auto-solve for DM...")
+                        autosolved = await self.bot.web_solver.auto_verify()
+                        if autosolved:
+                            self.bot.log("SUCCESS", f"{service_name} solved successfully (DM)!")
+                            self._show_desktop_notification(f"{service_name} solved successfully!")
+                        else:
+                            self.bot.log("ERROR", f"{service_name} auto-solve failed (DM)!")
+                            self._show_desktop_notification(f"{service_name} failed! Solve manually.")
 
-                autosolved = False
-                if self._should_autosolve(sol_cfg):
-                    service_name = self.bot.web_solver.active_service_name.capitalize()
-                    self.bot.log("SYS", f"Attempting {service_name} auto-solve for DM...")
-                    autosolved = await self.bot.web_solver.auto_verify()
-                    if autosolved:
-                        self.bot._solving_captcha = False
-                        self.bot.log("SUCCESS", f"{service_name} solved successfully (DM)!")
-                        self._show_desktop_notification(f"{service_name} solved successfully!")
-                    else:
-                        self.bot.log("ERROR", f"{service_name} auto-solve failed (DM)!")
-                        self._show_desktop_notification(f"{service_name} failed! Solve manually.")
-
-                if not autosolved:
-                    self._send_webhook("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
-                    if not getattr(self.bot, 'is_mobile', False):
-                        auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
-                    else:
-                        auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
-                    if auto_open:
-                        self.bot.log("SYS", "Queuing manual solve for DM captcha...")
-                        self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
-                        self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+                    if not autosolved:
+                        self._send_webhook("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
+                        if not getattr(self.bot, 'is_mobile', False):
+                            auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
+                        else:
+                            auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
+                        if auto_open:
+                            self.bot.log("SYS", "Queuing manual solve for DM captcha...")
+                            self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
+                            self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+                finally:
+                    self.bot._solving_captcha = False
                 return
 
         if str(message.author.id) != self.monitor_id: return
@@ -396,32 +402,35 @@ class Security(commands.Cog):
                     if getattr(self.bot, '_solving_captcha', False):
                         self.bot.log("SECURITY", "[GUARD] Captcha already being solved – skipping duplicate warning captcha task.")
                         return
+                    # see the DM branch: cleared in finally so a failed solve cannot
+                    # latch the guard on and mute every later captcha
                     self.bot._solving_captcha = True
+                    try:
+                        autosolved = False
+                        if self._should_autosolve(sol_cfg):
+                            service_name = self.bot.web_solver.active_service_name.capitalize()
+                            self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
+                            autosolved = await self.bot.web_solver.auto_verify()
+                            if autosolved:
+                                self.bot.log("SUCCESS", f"{service_name} solved successfully!")
+                                self._show_desktop_notification(f"{service_name} solved successfully!")
+                            else:
+                                self.bot.log("ERROR", f"{service_name} auto-solve failed!")
+                                self._show_desktop_notification(f"{service_name} failed! Solve manually.")
 
-                    autosolved = False
-                    if self._should_autosolve(sol_cfg):
-                        service_name = self.bot.web_solver.active_service_name.capitalize()
-                        self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
-                        autosolved = await self.bot.web_solver.auto_verify()
-                        if autosolved:
-                            self.bot._solving_captcha = False
-                            self.bot.log("SUCCESS", f"{service_name} solved successfully!")
-                            self._show_desktop_notification(f"{service_name} solved successfully!")
-                        else:
-                            self.bot.log("ERROR", f"{service_name} auto-solve failed!")
-                            self._show_desktop_notification(f"{service_name} failed! Solve manually.")
-
-                    if not autosolved:
-                        solve_link = captcha_url or "https://owobot.com/captcha"
-                        self._send_webhook("CAPTCHA WARNING", f"Solve: {solve_link}")
-                        if not getattr(self.bot, 'is_mobile', False):
-                            auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
-                        else:
-                            auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
-                        if auto_open:
-                            self.bot.log("SYS", "Queuing manual solve for captcha...")
-                            self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
-                            self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+                        if not autosolved:
+                            solve_link = captcha_url or "https://owobot.com/captcha"
+                            self._send_webhook("CAPTCHA WARNING", f"Solve: {solve_link}")
+                            if not getattr(self.bot, 'is_mobile', False):
+                                auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
+                            else:
+                                auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
+                            if auto_open:
+                                self.bot.log("SYS", "Queuing manual solve for captcha...")
+                                self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
+                                self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+                    finally:
+                        self.bot._solving_captcha = False
                 return
 
         has_image = len(message.attachments) > 0
@@ -500,32 +509,35 @@ class Security(commands.Cog):
             if getattr(self.bot, '_solving_captcha', False):
                 self.bot.log("SECURITY", "[GUARD] Captcha already being solved – skipping duplicate channel captcha task.")
                 return
+            # see the DM branch: cleared in finally so a failed solve cannot latch the
+            # guard on and mute every later captcha
             self.bot._solving_captcha = True
+            try:
+                autosolved = False
+                if self._should_autosolve(sol_cfg):
+                    service_name = self.bot.web_solver.active_service_name.capitalize()
+                    self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
+                    autosolved = await self.bot.web_solver.auto_verify()
+                    if autosolved:
+                        self.bot.log("SUCCESS", f"{service_name} solved successfully!")
+                        self._show_desktop_notification(f"{service_name} solved successfully!")
+                    else:
+                        self.bot.log("ERROR", f"{service_name} auto-solve failed!")
+                        self._show_desktop_notification(f"{service_name} failed! Solve manually.")
 
-            autosolved = False
-            if self._should_autosolve(sol_cfg):
-                service_name = self.bot.web_solver.active_service_name.capitalize()
-                self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
-                autosolved = await self.bot.web_solver.auto_verify()
-                if autosolved:
-                    self.bot._solving_captcha = False
-                    self.bot.log("SUCCESS", f"{service_name} solved successfully!")
-                    self._show_desktop_notification(f"{service_name} solved successfully!")
-                else:
-                    self.bot.log("ERROR", f"{service_name} auto-solve failed!")
-                    self._show_desktop_notification(f"{service_name} failed! Solve manually.")
-
-            if not autosolved:
-                solve_link = captcha_url or "https://owobot.com/captcha"
-                self._send_webhook("CAPTCHA DETECTED", f"Solve: {solve_link}")
-                if not getattr(self.bot, 'is_mobile', False):
-                    auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
-                else:
-                    auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
-                if auto_open:
-                    self.bot.log("SYS", "Queuing manual solve for captcha...")
-                    self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
-                    self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+                if not autosolved:
+                    solve_link = captcha_url or "https://owobot.com/captcha"
+                    self._send_webhook("CAPTCHA DETECTED", f"Solve: {solve_link}")
+                    if not getattr(self.bot, 'is_mobile', False):
+                        auto_open = sec_cfg.get("open_captcha_url_on_pc", False)
+                    else:
+                        auto_open = sec_cfg.get("open_captcha_url_on_mobile", False)
+                    if auto_open:
+                        self.bot.log("SYS", "Queuing manual solve for captcha...")
+                        self.bot.web_solver.enqueue_manual_solve(str(self.bot.user.id), captcha_url)
+                        self._show_desktop_notification(f"Manual solve queued for {self.bot.username}")
+            finally:
+                self.bot._solving_captcha = False
             return
 
 async def setup(bot):

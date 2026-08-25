@@ -963,7 +963,7 @@ def accounts_config_api():
                                     "message": f"Token is required for {name!r}"}), 400
                 account['token'] = prior['token']
             if prior:
-                for carried in ('status', 'status_reason', 'status_at', 'autostart'):
+                for carried in ('status', 'status_reason', 'status_at', 'autostart', 'user_id'):
                     if carried not in account and carried in prior:
                         account[carried] = prior[carried]
 

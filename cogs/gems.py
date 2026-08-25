@@ -34,6 +34,46 @@ class NeuraGems(commands.Cog):
         
         self.inventory_check = False
         self.last_inv_time = 0
+        # gem type -> when we last confirmed the inventory had none of it
+        self._missing_since = {}
+
+    # An entry in state.missing_gems_cache is a suppression: we read the inventory,
+    # found none of that gem type, and stop asking. Without an expiry that verdict
+    # outlived the inventory it was based on - once every enabled type had been
+    # exhausted once, the module went permanently silent and buying more gems did
+    # not wake it up until the process restarted.
+    MISSING_CACHE_TTL_S = 1800
+
+    def _missing_types(self):
+        """Gem types still suppressed for this account, dropping stale verdicts."""
+        cached = state.missing_gems_cache.get(self.bot.user_id)
+        if not cached:
+            return []
+        now = time.time()
+        fresh = []
+        for g_type in list(cached):
+            if now - self._missing_since.get(g_type, 0) >= self.MISSING_CACHE_TTL_S:
+                cached.remove(g_type)
+                self._missing_since.pop(g_type, None)
+                self.bot.log("SYS", f"[Gems] {g_type} missing-cache entry expired - re-checking inventory.")
+            else:
+                fresh.append(g_type)
+        return fresh
+
+    def _mark_missing(self, g_type):
+        cache = state.missing_gems_cache.setdefault(self.bot.user_id, [])
+        self._missing_since[g_type] = time.time()
+        if g_type not in cache:
+            cache.append(g_type)
+            self.bot.log("WARN", f"[Gems] {g_type} not found in inventory, added to missing cache.")
+
+    def _clear_missing(self, g_type):
+        cache = state.missing_gems_cache.setdefault(self.bot.user_id, [])
+        self._missing_since.pop(g_type, None)
+        if g_type in cache:
+            cache.remove(g_type)
+            return True
+        return False
 
     def convert_small_numbers(self, text):
         mapping = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
@@ -159,7 +199,8 @@ class NeuraGems(commands.Cog):
                 if type_cfg.get('specialGem', False): missing_types.append('specialGem')
                 
                 if missing_types:
-                    actually_missing = [t for t in missing_types if t not in state.missing_gems_cache.get(self.bot.user_id, [])]
+                    suppressed = self._missing_types()
+                    actually_missing = [t for t in missing_types if t not in suppressed]
                     
                     if actually_missing:
                         if state.checking_gems.get(self.bot.user_id):
@@ -186,12 +227,8 @@ class NeuraGems(commands.Cog):
             elif "special" in gem_name: g_type = "specialGem"
             
             if g_type:
-                if self.bot.user_id not in state.missing_gems_cache:
-                    state.missing_gems_cache[self.bot.user_id] = []
-                
-                if g_type in state.missing_gems_cache[self.bot.user_id]:
-                    state.missing_gems_cache[self.bot.user_id].remove(g_type)
-                
+                self._clear_missing(g_type)
+
                 self.bot.log("SUCCESS", f"[Gems] Confirmation: {g_type} activated. Cache updated.")
 
                 self.last_inv_time = time.time()
@@ -220,7 +257,8 @@ class NeuraGems(commands.Cog):
             if type_cfg.get('specialGem', False) and "specialGem" not in active_gems: missing_types.append("specialGem")
 
             if missing_types:
-                actually_missing = [t for t in missing_types if t not in state.missing_gems_cache.get(self.bot.user_id, [])]
+                suppressed = self._missing_types()
+                actually_missing = [t for t in missing_types if t not in suppressed]
                 
                 if actually_missing:
                     if state.checking_gems.get(self.bot.user_id):
@@ -250,9 +288,6 @@ class NeuraGems(commands.Cog):
                 available = self.find_gems_available(message.content)
                 to_use = self.find_gems_to_use(available, target_types=missing_types)
 
-                if self.bot.user_id not in state.missing_gems_cache:
-                    state.missing_gems_cache[self.bot.user_id] = []
-                
 
                 type_to_index = {
                     "huntGem": 0,
@@ -288,13 +323,10 @@ class NeuraGems(commands.Cog):
                             break
                     
                     if has_any:
-                        if g_type in state.missing_gems_cache[self.bot.user_id]:
-                            state.missing_gems_cache[self.bot.user_id].remove(g_type)
+                        if self._clear_missing(g_type):
                             self.bot.log("SYS", f"[Gems] {g_type} found in inventory, removed from missing cache.")
                     else:
-                        if g_type not in state.missing_gems_cache[self.bot.user_id]:
-                            state.missing_gems_cache[self.bot.user_id].append(g_type)
-                            self.bot.log("WARN", f"[Gems] {g_type} not found in inventory, added to missing cache.")
+                        self._mark_missing(g_type)
 
                 if to_use:
                     cmd_ids = [gid if not gid.startswith('0') else gid[1:] for gid in to_use]

@@ -147,6 +147,31 @@ def set_account_status(owner, name, status, reason=None):
         save_accounts(owner, accounts)
 
 
+def set_account_user_id(owner, name, user_id):
+    """Remember which discord account a config entry logged in as.
+
+    Nothing used to persist this, so `spaces.owner_for_account` could only answer
+    for accounts running in *this* process - its accounts.json fallback matched
+    nothing and `owns_account()` said no. The dashboard then returned an empty
+    /api/stats for a stopped account even to the space that owns it, hiding all
+    its history. Written once per ready; a token swapped onto an existing entry
+    overwrites it.
+    """
+    if not name or not user_id:
+        return False
+    accounts = load_accounts(owner)
+    changed = False
+    for account in accounts:
+        if str(account.get("name")) != str(name):
+            continue
+        if str(account.get("user_id") or "") != str(user_id):
+            account["user_id"] = str(user_id)
+            changed = True
+    if changed:
+        save_accounts(owner, accounts)
+    return changed
+
+
 def _normalize_type(proxy_type):
     proxy_type = (proxy_type or DEFAULT_PROXY_TYPE).lower().strip()
     if proxy_type not in SUPPORTED_TYPES:

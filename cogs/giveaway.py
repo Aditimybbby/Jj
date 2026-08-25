@@ -46,19 +46,29 @@ class Giveaway(commands.Cog):
         except Exception as e:
             self.bot.log("ERROR", f"Failed to save giveaway DB: {e}")
 
+    def _target_channels(self, cfg):
+        """Channel ids the giveaway watcher covers, as strings.
+
+        `commands.giveaway.channels` used to be parsed in both callers and then
+        dropped on the floor by _process_message, whose gate tested bot.channels
+        instead - so the setting did nothing at all. _safe_scan did honour it, but
+        bailed out when it was empty, which is the shipped default, so the
+        startup backfill scan never ran either. Configured channels win; the farm
+        channels are the fallback.
+        """
+        raw = cfg.get('channels', [])
+        if isinstance(raw, str):
+            configured = [c.strip() for c in raw.split(',') if c.strip().isdigit()]
+        else:
+            configured = [str(c) for c in raw if str(c).strip().isdigit()]
+        return configured or [str(c) for c in self.bot.channels]
+
     async def _process_message(self, message):
         cfg = self.bot.config.get('commands', {}).get('giveaway', {})
-        if not cfg.get('enabled', False): 
+        if not cfg.get('enabled', False):
             return
 
-        raw_channels = cfg.get('channels', [])
-        if isinstance(raw_channels, str):
-            target_channels = [c.strip() for c in raw_channels.split(',') if c.strip().isdigit()]
-        else:
-            target_channels = [str(c) for c in raw_channels if str(c).strip().isdigit()]
-
-        all_channels = [str(c) for c in self.bot.channels]
-        if str(message.channel.id) not in all_channels:
+        if str(message.channel.id) not in self._target_channels(cfg):
             return
 
         if not message.embeds: return
@@ -111,12 +121,7 @@ class Giveaway(commands.Cog):
         cfg = self.bot.config.get('commands', {}).get('giveaway', {})
         if not cfg.get('enabled', False): return
 
-        raw_channels = cfg.get('channels', [])
-        if isinstance(raw_channels, str):
-            target_channels = [c.strip() for c in raw_channels.split(',') if c.strip().isdigit()]
-        else:
-            target_channels = [str(c) for c in raw_channels if str(c).strip().isdigit()]
-
+        target_channels = self._target_channels(cfg)
         if not target_channels: return
 
         self.bot.log("SYS", f"Scanning for missed giveaways as {self.bot.username}...")

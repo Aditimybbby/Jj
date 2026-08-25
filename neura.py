@@ -126,6 +126,35 @@ def configured_account_count():
     """How many accounts exist across every space, autostart or not."""
     return sum(len(proxy_manager.load_accounts(owner)) for owner in spaces.list_owners())
 
+
+def _menu_choice():
+    """The blocking console prompt, to be run off the event loop.
+
+    Both this and the account manager below used to run directly on the asyncio
+    loop. The dashboard is already serving by then, so a prompt sitting on the
+    loop parked every request that needs it - start, stop, verify, manual command
+    all queue a coroutine onto `supervisor`'s loop and wait for a result that can
+    never arrive. Option 2 held the loop for the whole terminal session.
+    """
+    from rich.prompt import Prompt
+    try:
+        return Prompt.ask("\nSelect option", choices=["1", "2", "3"], default="1")
+    except EOFError:
+        console.print("\n[yellow]No console input - starting the enabled accounts.[/yellow]")
+        return "1"
+
+
+def _run_account_manager():
+    """neura_setup.account_manager() on its own loop, in a worker thread.
+
+    It is declared `async def`, but every line inside it is a blocking Prompt or
+    input(); the one await is a self-contained token verification, so giving it a
+    private loop costs nothing and leaves the main one free to keep serving bots.
+    """
+    import neura_setup
+    asyncio.run(neura_setup.account_manager())
+
+
 async def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     supervisor.bind_loop(asyncio.get_running_loop())
@@ -141,15 +170,9 @@ async def main():
             console.print("\n[bold cyan]1.[/bold cyan] Start Lazy Farmers")
             console.print("[bold cyan]2.[/bold cyan] Manage Accounts")
             console.print("[bold cyan]3.[/bold cyan] Exit")
-            from rich.prompt import Prompt
-            try:
-                choice = Prompt.ask("\nSelect option", choices=["1", "2", "3"], default="1")
-            except EOFError:
-                console.print("\n[yellow]No console input - starting the enabled accounts.[/yellow]")
-                choice = "1"
+            choice = await asyncio.to_thread(_menu_choice)
             if choice == "2":
-                import neura_setup
-                await neura_setup.account_manager()
+                await asyncio.to_thread(_run_account_manager)
                 continue
             elif choice == "3":
                 console.print("\n[yellow]Shutting down. See you next time![/yellow]")

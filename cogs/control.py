@@ -29,17 +29,26 @@ class Control(commands.Cog):
         if content == '.stop':
             if not self.bot.paused:
                 self.bot.paused = True
-                state.bot_paused = True
                 self.bot.log("SYS", "Bot PAUSED via Chat cmd")
                 
         elif content == '.start' or content == '.resume':
             if self.bot.paused:
                 self.bot.paused = False
-                state.bot_paused = False
-                state.active_session_start = time.time()
-                for bot in state.bot_instances:
+                # only this tenant's accounts: state.bot_instances is every space at
+                # once, so walking it let one operator's `.resume` restart somebody
+                # else's farm.
+                for bot in state.bots_for(self.bot.space_owner):
                     bot.paused = False
-                    bot.throttle_until = 0
+                    # float('inf') means "parked until a captcha is solved" (see
+                    # cogs/security.py). Zeroing it here sent an unverified account
+                    # straight back to spamming owo, which is how a warning turns
+                    # into a ban.
+                    if bot.throttle_until != float('inf'):
+                        bot.throttle_until = 0
+                    else:
+                        bot.paused = True
+                        self.bot.log("SECURITY",
+                                     f"{bot.username} is still waiting on a captcha - left paused")
                 self.bot.log("SYS", "Bot RESUMED via Chat cmd")
 
 
