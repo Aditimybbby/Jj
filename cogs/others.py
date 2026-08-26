@@ -18,8 +18,8 @@ import re
 import random
 import core.state as state
 from discord.ext import commands
-from component_v2_neura import parse_v2_message, collect_text
-from modules.level_ocr import parse_level_card
+from component_v2_neura import parse_v2_message, collect_text, is_image_only, media_image_url
+from modules.level_ocr import parse_level_card, ocr_status, ocr_engine_path
 
 # ── level ────────────────────────────────────────────────────────────────────
 # owo prints the word "level" in hunt results, battle logs, quest lines, weapon
@@ -121,6 +121,54 @@ UNICODE_ANIMALS = {
 # selectors and joiners that ride along with an emoji but are not part of its identity
 EMOJI_MODIFIERS = ("️", "︎", "‍", "⃣")
 
+# OwO writes the lower zoo tiers as Discord *shortcodes*. The zoo row arrives on the
+# wire as the literal text ":bee:²⁷³  :bug:²⁷⁸  :snail:²⁷² ...", which is neither a
+# unicode glyph nor a custom emoji - Discord's client turns it into a picture at render
+# time, so it only looks like an emoji. ZOO_TOKEN_RE matched `<:name:id>` and unicode
+# glyphs only, so every one of those tokens was skipped: a live 26-animal zoo parsed as
+# exactly one animal (the single legendary that owo does draw as a custom emoji). That
+# one number fed the zoo panel, the battle team picker and the hunt watcher alike.
+#
+# Keys are the shortcode without its colons, values are the names `owo team add`
+# expects. OwO picks the "2" variants for several rows (🐁 :mouse2: not 🐭 :mouse:,
+# 🐇 :rabbit2:, 🐈 :cat2:, 🐕 :dog2:, 🐖 :pig2:, 🐄 :cow2:, 🐅 :tiger2:, ⛄ :snowman2:),
+# so both spellings are mapped rather than guessing which one a future card uses.
+SHORTCODE_RE = re.compile(r':(\w+):')
+SHORTCODE_ANIMALS = {
+    # common
+    "bee": "bee", "bug": "bug", "snail": "snail", "beetle": "beetle",
+    "butterfly": "butterfly",
+    # uncommon
+    "baby_chick": "chick", "hatched_chick": "chick", "chick": "chick",
+    "mouse2": "mouse", "mouse": "mouse",
+    "rooster": "chicken", "chicken": "chicken",
+    "rabbit2": "rabbit", "rabbit": "rabbit",
+    "chipmunk": "chipmunk",
+    # rare
+    "sheep": "sheep", "pig2": "pig", "pig": "pig", "cow2": "cow", "cow": "cow",
+    "dog2": "dog", "dog": "dog", "cat2": "cat", "cat": "cat",
+    # epic
+    "crocodile": "crocodile", "tiger2": "tiger", "tiger": "tiger",
+    "penguin": "penguin", "elephant": "elephant", "whale": "whale", "whale2": "whale",
+    # mythical
+    "dragon_face": "dragon", "dragon": "dragon",
+    "unicorn": "unicorn", "unicorn_face": "unicorn",
+    "snowman2": "snowman", "snowman": "snowman",
+    "ghost": "ghost", "dove": "dove", "dove_of_peace": "dove",
+    # gem
+    "camel": "camel", "fish": "fish", "panda_face": "panda", "panda": "panda",
+    "shrimp": "shrimp", "spider": "spider",
+    # legendary
+    "deer": "deer", "fox": "fox", "fox_face": "fox",
+    "lion": "lion", "lion_face": "lion", "owl": "owl", "squid": "squid",
+    # fabled
+    "boar": "boar", "eagle": "eagle", "frog": "frog", "gorilla": "gorilla",
+    "wolf": "wolf",
+    # hidden
+    "koala": "koala", "lizard": "lizard", "monkey_face": "monkey", "monkey": "monkey",
+    "snake": "snake", "octopus": "octopus",
+}
+
 # a zoo row looks like:  common   🐝¹⁰  🐛⁰⁵  ❓⁰⁰ ...
 # the count is how many you own, and ❓ is a slot you have never caught.
 #
@@ -128,8 +176,11 @@ EMOJI_MODIFIERS = ("️", "︎", "‍", "⃣")
 # an inline code span (`🐝`10``) and some rows use plain trailing digits. A
 # superscript-only group read those as "no count", which fell through to owned=1 and
 # invented one of every animal in the row.
+#
+# The alternation order matters: `<a?:\w+:\d+>` has to be tried before `:\w+:` or a
+# custom emoji would match from its second colon and lose its name.
 ZOO_TOKEN_RE = re.compile(
-    r'(?P<emoji><a?:\w+:\d+>|[\U0001F000-\U0001FAFF☀-➿⬀-⯿][️‍\U0001F000-\U0001FAFF]*)'
+    r'(?P<emoji><a?:\w+:\d+>|:\w+:|[\U0001F000-\U0001FAFF☀-➿⬀-⯿][️‍\U0001F000-\U0001FAFF]*)'
     r'(?:(?P<sup>[⁰¹²³⁴-⁹]+)|`\s*(?P<code>\d{1,4})\s*`|(?P<plain>\d{1,4})(?!\d))?'
 )
 SUPERSCRIPTS = {'⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
@@ -158,6 +209,22 @@ STATIC_RANKS = {
 def emoji_key(emoji):
     """An emoji stripped of variation selectors, for dictionary lookups."""
     return ''.join(ch for ch in emoji if ch not in EMOJI_MODIFIERS)
+
+
+def animal_from_token(token):
+    """Animal name for one zoo/hunt token, whichever way owo drew it, or None.
+
+    Deliberately returns None for anything it cannot name: the hunt watcher and the
+    team reader feed this straight into rank lookups, so inventing a name there would
+    put a nonexistent animal on the battle team.
+    """
+    custom = CUSTOM_EMOJI_RE.fullmatch(token or '')
+    if custom:
+        return custom.group(1).lower()
+    short = SHORTCODE_RE.fullmatch(token or '')
+    if short:
+        return SHORTCODE_ANIMALS.get(short.group(1).lower())
+    return UNICODE_ANIMALS.get(emoji_key(token or ''))
 
 
 def parse_level_xp(content):
@@ -225,11 +292,14 @@ class Others(commands.Cog):
         self._want_level_until = 0.0
         self._level_image_warned = False
         self._level_parse_warned = 0.0
+        # register_actions re-runs on every ready and on config changes, so the OCR
+        # availability line is latched to one report per process
+        self._ocr_state_logged = False
         self._handled_v2 = {}
 
     # ── level ────────────────────────────────────────────────────────────────
 
-    def _store_level(self, level, xp, xp_needed, source="text", rank=None):
+    def _store_level(self, level, xp, xp_needed, source="text", rank=None, card_url=None):
         st = self.bot.stats
         changed = []
         if level is not None and st.get('level') != level:
@@ -246,6 +316,11 @@ class Others(commands.Cog):
             changed.append(f"rank #{rank:,}")
         if level is not None or xp is not None:
             st['level_source'] = source
+        if card_url:
+            st['level_card_url'] = card_url
+        elif source != "image":
+            # a card we could read in text supersedes any picture still on the panel
+            st.pop('level_card_url', None)
         if changed:
             st['last_level_update'] = time.time()
             state.save_account_stats()
@@ -254,40 +329,117 @@ class Others(commands.Cog):
     async def _read_level_image(self, url):
         """OwO drew the level as a picture - OCR it instead of giving up.
 
-        Downloads the attachment through the bot's own (proxy-aware) session and
-        runs the multi-pass Tesseract reader in ``modules.level_ocr``. Returns
-        ``(level, xp, xp_needed, rank)`` with any field that could not be read
-        left as ``None``.
+        Downloads the attachment through the bot's own (proxy-aware) session and runs
+        the reader in ``modules.level_ocr``. Returns the reader's dict, with any field
+        that could not be read left as ``None``.
         """
+        blank = {'level': None, 'xp': None, 'xp_needed': None, 'rank': None, 'text': ''}
         if not url:
-            return None, None, None, None
+            return blank
         session = getattr(self.bot, 'session', None)
         if session is None or getattr(session, 'closed', True):
-            return None, None, None, None
+            return blank
         try:
-            async with session.get(url) as resp:
+            # Discord's CDN 403s a request without a browser-ish User-Agent, so a
+            # download that looked like an expiring link was really a rejected one.
+            # discord.py-self's session already sends a client UA; state it anyway so
+            # this does not depend on a library internal staying the way it is.
+            async with session.get(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                              '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+            }) as resp:
                 if resp.status != 200:
-                    return None, None, None, None
+                    # a silent `return` here made a 403 indistinguishable from an
+                    # unreadable image, which is the whole reason this looked like
+                    # "OCR does not work"
+                    self.bot.log(
+                        "WARN",
+                        f"Level card download returned HTTP {resp.status} - the level "
+                        "number cannot be read from it."
+                    )
+                    return blank
                 data = await resp.read()
         except Exception as e:
             self.bot.log("ERROR", f"Level image download failed: {e}")
-            return None, None, None, None
-        level, xp, xp_needed, rank = parse_level_card(data)
-        if level is not None or xp is not None:
-            self._level_image_warned = False
-        return level, xp, xp_needed, rank
+            return blank
 
-    def _note_level_unreadable(self):
+        # OCR is CPU-bound and takes on the order of a second or two per card. Every
+        # account shares one asyncio loop, so running it inline froze the *whole farm*
+        # for that long - and for the full pass list it was closer to a minute.
+        try:
+            result = await asyncio.to_thread(parse_level_card, data)
+        except Exception as e:
+            self.bot.log("ERROR", f"Level card OCR failed: {e}")
+            return blank
+        if result.get('level') is not None or result.get('xp') is not None:
+            self._level_image_warned = False
+        return result
+
+    def _ocr_card_is_mine(self, blob):
+        """Does the OCR'd card text carry one of our own names?
+
+        owo renders the account name onto the level card, so once OCR can read the card
+        we can *confirm* ownership instead of relying only on "we asked for one a moment
+        ago" - which is all an image-only payload otherwise offers, and which two farm
+        accounts in the same channel can satisfy at the same time.
+        """
+        idents = {str(self.bot.user.name or '').lower(),
+                  str(getattr(self.bot, 'display_name', '') or '').lower()}
+        # owo prints the plain name, so a mention-style identifier is no use here
+        for ident in getattr(self.bot, 'identifiers', []) or []:
+            ident = str(ident).lower()
+            if not ident.startswith('<@'):
+                idents.add(ident)
+        return any(ident and len(ident) >= 3 and ident in blob for ident in idents)
+
+    async def _handle_level_image(self, card_url):
+        """`owo level` answered with a picture. OCR it, and keep the picture regardless.
+
+        The image is the only place the number exists now, so it is stored either way:
+        the dashboard renders owo's own card, which is real data, instead of a blank
+        KPI with nothing to show for it.
+        """
+        result = await self._read_level_image(card_url)
+        blob = result.get('text') or ''
+
+        # Only meaningful when OCR actually read something: a blank blob means the
+        # engine is missing, not that the card belongs to somebody else.
+        if blob and not self._ocr_card_is_mine(blob):
+            # deliberately does not clear the window - another account's card must not
+            # consume our pending request, or ours would be dropped when it arrives
+            self.bot.log(
+                "INFO",
+                "Ignored an `owo level` card: OCR read the name on it and it is not ours."
+            )
+            return
+
+        lvl, xpv = result.get('level'), result.get('xp')
+        if lvl is not None or xpv is not None:
+            self._want_level_until = 0.0
+            self._store_level(lvl, xpv, result.get('xp_needed'), source="image",
+                              rank=result.get('rank'), card_url=card_url)
+        else:
+            self._note_level_unreadable(card_url)
+
+    def _note_level_unreadable(self, card_url=None):
         """last-resort: the image could not be OCRed either. Say so, don't guess."""
         self._want_level_until = 0.0
-        self.bot.stats['level_source'] = 'image'
+        st = self.bot.stats
+        st['level_source'] = 'image'
+        if card_url:
+            st['level_card_url'] = card_url
+            st['last_level_update'] = time.time()
+            state.save_account_stats()
         if self._level_image_warned:
             return
         self._level_image_warned = True
+        why = ocr_status()
+        detail = f"OCR is unavailable because {why}" if why else "OCR could not read it"
+        shown = "The card itself is shown on the dashboard" if card_url else "Nothing to show"
         self.bot.log(
             "WARN",
-            "OwO answered `owo level` with an image card that OCR could not read. "
-            "Level and xp stay blank on the dashboard rather than showing a guessed number."
+            f"OwO answered `owo level` with an image card and {detail}. "
+            f"{shown}; the level number stays blank rather than being guessed."
         )
 
     def _note_level_unparsed(self, raw_text):
@@ -345,12 +497,16 @@ class Others(commands.Cog):
         cannot tell badge from animal there - which let the badge through as a fake
         animal named "epictier" that `team add` would only ever reject.
         """
-        custom = CUSTOM_EMOJI_RE.fullmatch(emoji or '')
+        custom = CUSTOM_EMOJI_RE.fullmatch(emoji or '') or SHORTCODE_RE.fullmatch(emoji or '')
         if not custom:
             return False
         name = custom.group(1).lower()
         if 'tier' in name:
             return True
+        # a shortcode that names an animal is an animal, not a badge - ":dove:" would
+        # otherwise be thrown away on the mythical row if owo ever renamed a tier
+        if name in SHORTCODE_ANIMALS:
+            return False
         return any(name == word or name == f"{word}s" for word, _rank in RARITY_RANK)
 
     @classmethod
@@ -366,8 +522,12 @@ class Others(commands.Cog):
             return tokens[1:]
         if tier_names and len(tokens) == len(tier_names) + 1:
             return tokens[1:]
-        # a badge never carries an owned-count superscript, an animal usually does
-        if not first_count and any(token[1] for token in tokens[1:]):
+        # a badge never carries an owned-count superscript, an animal usually does.
+        # Only applies when the leading token is not a name we recognise: with
+        # shortcodes now parsed, the first token of a row is usually a real animal
+        # whose count owo happened to omit.
+        if (not first_count and animal_from_token(first_emoji) is None
+                and any(token[1] for token in tokens[1:])):
             return tokens[1:]
         return tokens
 
@@ -378,6 +538,18 @@ class Others(commands.Cog):
             # owo names every animal emoji after the animal, and this is the only
             # thing that works for legendary/fabled/hidden rows we have no list for
             return custom.group(1).lower()
+        short = SHORTCODE_RE.fullmatch(emoji)
+        if short:
+            name = short.group(1).lower()
+            mapped = SHORTCODE_ANIMALS.get(name)
+            if mapped:
+                return mapped
+            # an unmapped shortcode still sits in a known slot of a known tier
+            if slot < len(tier_names):
+                return tier_names[slot]
+            # ...and if the tier has no fixed list (event animals), the shortcode name
+            # is what owo itself uses for the emoji, so it is the best handle we have
+            return name
         known = UNICODE_ANIMALS.get(emoji_key(emoji))
         if known:
             return known
@@ -449,7 +621,9 @@ class Others(commands.Cog):
         names = [name.lower() for name in CUSTOM_EMOJI_RE.findall(raw)]
         if not names:
             for token in ZOO_TOKEN_RE.finditer(raw):
-                known = UNICODE_ANIMALS.get(emoji_key(token.group('emoji')))
+                # unicode glyph or ":shortcode:" - the team card uses the same
+                # rendering as the zoo row it was picked from
+                known = animal_from_token(token.group('emoji'))
                 if known:
                     names.append(known)
         if not names:
@@ -556,7 +730,11 @@ class Others(commands.Cog):
         for name in CUSTOM_EMOJI_RE.findall(raw):
             names.add(name.lower())
         for token in ZOO_TOKEN_RE.finditer(raw):
-            known = UNICODE_ANIMALS.get(emoji_key(token.group('emoji')))
+            # covers unicode glyphs AND the ":shortcode:" text owo actually sends -
+            # without the shortcode branch a hunt drawn that way named no animal at
+            # all, so the watcher fell back to the tier hint and missed every catch
+            # whose tier word owo did not spell out
+            known = animal_from_token(token.group('emoji'))
             if known:
                 names.add(known)
         for word in re.findall(r'\*\*\s*([a-z][a-z_\- ]{1,20})\s*\*\*', content):
@@ -712,6 +890,27 @@ class Others(commands.Cog):
 
         raw_text = f"{data.get('content') or ''}\n{collect_text(components)}"
         content = raw_text.lower()
+
+        # An image-only card carries no text whatsoever - `owo level` is one
+        # media_gallery holding level.png, with content "", embeds [] and (this is the
+        # part that used to defeat the OCR branch) an empty `attachments` list too.
+        # There is therefore no username in it to match, so _v2_is_mine below can only
+        # ever answer "not mine" and the reply was dropped before anything looked at it.
+        # Attribute it the only way actually available: we asked for it seconds ago (the
+        # level window is open), it arrived in one of our channels, and owo named the
+        # picture after the command it answers. The window is closed by the handler so a
+        # single request can only ever claim one card.
+        if time.time() <= self._want_level_until and is_image_only(components):
+            card_url = media_image_url(components, name_contains=("level", "profile"))
+            if card_url:
+                if self._seen_v2(data):
+                    return
+                try:
+                    await self._handle_level_image(card_url)
+                except Exception as e:
+                    self.bot.log("ERROR", f"Level image card handling failed: {e}")
+                return
+
         if not self._v2_is_mine(content):
             return
 
@@ -875,6 +1074,20 @@ class Others(commands.Cog):
                 delay=max(600, int(cfg.get('level_interval_s', 3600))),
                 initial_offset=45,
             )
+            # owo answers `owo level` with a rendered picture, so whether the number
+            # ever reaches the dashboard depends entirely on OCR being present. Say
+            # which it is at startup instead of leaving a silently blank KPI.
+            if not self._ocr_state_logged:
+                self._ocr_state_logged = True
+                why = ocr_status()
+                if why:
+                    self.bot.log(
+                        "WARN",
+                        f"Level OCR is off: {why}. The dashboard will show OwO's level "
+                        "card as a picture instead of the number."
+                    )
+                else:
+                    self.bot.log("SYS", f"Level OCR ready ({ocr_engine_path()}).")
         if cfg.get('zoo', True):
             await self.bot.neura_register_command(
                 "zoo_sync",

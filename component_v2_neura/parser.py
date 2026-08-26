@@ -175,6 +175,57 @@ def emoji_names(text):
     return [match.group(1).lower() for match in CUSTOM_EMOJI_RE.finditer(text or "")]
 
 
+def media_urls(components):
+    """Every image url on a v2 card, in document order.
+
+    OwO has started answering whole commands with a *rendered picture* - `owo level`
+    is a single media_gallery holding level.png, `owo quest` puts the quest rows in
+    quest-rows.png. Such a message carries an empty ``content``, no embeds **and an
+    empty ``attachments`` list**: the url exists only inside the component. Code that
+    looked in ``attachments`` therefore never found the image and silently gave up,
+    which is why the dashboard showed a blank level and no quests.
+    """
+    urls = []
+    for comp in components:
+        if comp.name not in ("media_gallery", "thumbnail", "file") or not comp.media:
+            continue
+        for entry in comp.media:
+            url = entry.get("url") or entry.get("proxy_url")
+            if url:
+                urls.append(url)
+    return urls
+
+
+def media_image_url(components, name_contains=None):
+    """First card image url, optionally only when its filename matches.
+
+    ``name_contains`` is the attribution signal for an image-only card: it has no
+    text to match a username against, so the filename owo chose ("level.png",
+    "quest-rows.png") is the only thing that says which command it answers.
+    """
+    for url in media_urls(components):
+        if name_contains is None:
+            return url
+        base = os.path.basename(url.split("?")[0]).lower()
+        if any(part.lower() in base for part in (
+                name_contains if isinstance(name_contains, (list, tuple)) else [name_contains])):
+            return url
+    return None
+
+
+def is_image_only(components):
+    """True when the card is nothing but picture - no readable text anywhere.
+
+    `owo level` answers with exactly this, and because there is no text there is also
+    no username to match, so callers have to attribute it by "I just asked for it".
+    """
+    if not components:
+        return False
+    if not media_urls(components):
+        return False
+    return not collect_text(components).strip()
+
+
 def get_boss_battle_id(components):
     """A stable id for one boss spawn so two accounts never double-join the same fight."""
     for comp in components:

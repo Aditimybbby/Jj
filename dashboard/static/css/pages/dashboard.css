@@ -121,6 +121,25 @@
     position: relative;
     min-height: 200px;
 }
+/* Chart.js runs these canvases with responsive:true + maintainAspectRatio:false, so
+   the canvas measures its parent. A canvas left in normal flow *also contributes* to
+   that parent's height, which closes the loop: every one-second update() re-measured
+   a box that its own last measurement had made taller, and the panel grew without
+   limit. Taking the canvas out of flow breaks the feedback permanently - it can read
+   the parent's height but never affect it. */
+.chart-container canvas {
+    position: absolute;
+    inset: 0;
+    width: 100% !important;
+    height: 100% !important;
+}
+/* pages/history.css declares a global `.chart-container { height: 250px }` and loads
+   after this file, so the dashboard's own chart needs the id to keep filling its box. */
+#dash .chart-container {
+    height: auto;
+    flex: 1;
+    min-height: 200px;
+}
 
 /* ── scheduler list ─────────────────────────────────────────── */
 .scheduler-list {

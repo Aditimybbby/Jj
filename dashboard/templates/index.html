@@ -38,7 +38,6 @@
     <link rel="stylesheet" href="/static/css/pages/history.css?v={{ asset_v }}">
     <link rel="stylesheet" href="/static/css/pages/users.css?v={{ asset_v }}">
     <link rel="stylesheet" href="/static/css/responsive.css?v={{ asset_v }}">
-<script src="https://sites.super.myninja.ai/_assets/ninja-daytona-script.js"></script>
 </head>
 
 <body>
@@ -294,7 +293,16 @@
                             <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/chart-column.svg');"></span>
                             <h2>Activity Over Time</h2>
                         </div>
-                        <canvas id="lineChart"></canvas>
+                        <!-- the wrapper is load-bearing, not decoration: chart.js is
+                             configured responsive + maintainAspectRatio:false, so a bare
+                             canvas sizes itself from its parent while the parent sizes
+                             itself from the canvas. Every one-second update() re-measured
+                             that loop and the panel grew a few pixels taller forever.
+                             .chart-container pins the canvas absolutely so it can never
+                             drive the height. -->
+                        <div class="chart-container">
+                            <canvas id="lineChart"></canvas>
+                        </div>
                     </div>
                     <div class="chart-box glass-panel" style="flex:1;">
                         <div class="chart-box-head">
