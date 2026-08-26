@@ -21,6 +21,7 @@ import json
 import os
 import re
 import datetime
+import threading
 from collections import deque
 import utils.history_tracker as ht
 
@@ -144,50 +145,90 @@ def get_empty_stats():
         }
     }
 
-def save_account_stats():
+def _write_account_stats():
+    """Serialise account_stats to STATS_FILE. Only ever called by save_account_stats."""
+    serializable_stats = {}
+    for uid, st in account_stats.items():
+        serializable_stats[uid] = {
+            'last_reset_date': st.get('last_reset_date'),
+            'captchas_solved': st.get('captchas_solved', 0),
+            'bans_detected': st.get('bans_detected', 0),
+            'warnings_detected': st.get('warnings_detected', 0),
+            'hunt_count': st.get('hunt_count', 0),
+            'battle_count': st.get('battle_count', 0),
+            'owo_count': st.get('owo_count', 0),
+            'total_cmd_count': st.get('total_cmd_count', 0),
+            'other_count': st.get('other_count', 0),
+            'gems_used': st.get('gems_used', 0),
+            'username': st.get('username', 'Unknown'),
+            'level': st.get('level'),
+            'xp': st.get('xp'),
+            'xp_needed': st.get('xp_needed'),
+            'rank': st.get('rank'),
+            # without these the dashboard forgot on every restart *why* the level was
+            # blank and which card to show, and silently fell back to "never checked"
+            # for the six hours until the next `owo level`
+            'level_source': st.get('level_source'),
+            'level_card_url': st.get('level_card_url'),
+            'last_level_update': st.get('last_level_update'),
+            'quest_data': st.get('quest_data', []),
+            'quest_source': st.get('quest_source'),
+            'quest_card_url': st.get('quest_card_url'),
+            'quest_seals': st.get('quest_seals'),
+            'next_quest_timer': st.get('next_quest_timer'),
+            'next_quest_at': st.get('next_quest_at'),
+            'current_cash': st.get('current_cash', 0),
+            'gambling_stats': st.get('gambling_stats', {
+                'total_wins': 0, 'total_losses': 0, 'total_wagered': 0,
+                'net_profit': 0, 'current_streak': 0, 'best_streak': 0,
+                'worst_streak': 0, 'biggest_win': 0, 'last_outcome': None
+            })
+        }
+
+    # STATS_FILE lives under DATA_DIR (the volume), not a relative ./config.
+    # Written to a sibling and renamed: a plain open('w') truncates the real file
+    # first, so a crash (or a Railway redeploy) landing in that window left an
+    # empty stats.json and every account's totals started again from zero.
+    os.makedirs(os.path.dirname(STATS_FILE) or '.', exist_ok=True)
+    tmp = STATS_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(serializable_stats, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, STATS_FILE)
+
+
+# stats.json is rewritten in full every time, and log_command calls this on every
+# SUCCESS / ALARM / SECURITY line - from the asyncio loop. On a busy farm that is
+# a multi-kilobyte fsync several times a second on the loop the dashboard waits
+# on, which is how Start and Stop ended up timing out. Coalesce them.
+STATS_SAVE_INTERVAL = 3.0
+_stats_last_write = 0.0
+_stats_timer = None
+_stats_lock = threading.Lock()
+
+
+def save_account_stats(force=False):
+    """Persist account stats, at most once every STATS_SAVE_INTERVAL seconds.
+
+    force=True writes now and is what shutdown uses - a debounced write that
+    never fires because the process exited first would lose the whole session.
+    """
+    global _stats_last_write, _stats_timer
+    with _stats_lock:
+        if _stats_timer is not None:
+            _stats_timer.cancel()
+            _stats_timer = None
+        due = time.time() - _stats_last_write
+        if not force and due < STATS_SAVE_INTERVAL:
+            _stats_timer = threading.Timer(STATS_SAVE_INTERVAL - due,
+                                           lambda: save_account_stats(force=True))
+            _stats_timer.daemon = True
+            _stats_timer.start()
+            return
+        _stats_last_write = time.time()
     try:
-        serializable_stats = {}
-        for uid, st in account_stats.items():
-            serializable_stats[uid] = {
-                'last_reset_date': st.get('last_reset_date'),
-                'captchas_solved': st.get('captchas_solved', 0),
-                'bans_detected': st.get('bans_detected', 0),
-                'warnings_detected': st.get('warnings_detected', 0),
-                'hunt_count': st.get('hunt_count', 0),
-                'battle_count': st.get('battle_count', 0),
-                'owo_count': st.get('owo_count', 0),
-                'total_cmd_count': st.get('total_cmd_count', 0),
-                'other_count': st.get('other_count', 0),
-                'gems_used': st.get('gems_used', 0),
-                'username': st.get('username', 'Unknown'),
-                'level': st.get('level'),
-                'xp': st.get('xp'),
-                'xp_needed': st.get('xp_needed'),
-                'rank': st.get('rank'),
-                # without these the dashboard forgot on every restart *why* the level was
-                # blank and which card to show, and silently fell back to "never checked"
-                # for the six hours until the next `owo level`
-                'level_source': st.get('level_source'),
-                'level_card_url': st.get('level_card_url'),
-                'last_level_update': st.get('last_level_update'),
-                'quest_data': st.get('quest_data', []),
-                'quest_source': st.get('quest_source'),
-                'quest_card_url': st.get('quest_card_url'),
-                'quest_seals': st.get('quest_seals'),
-                'next_quest_timer': st.get('next_quest_timer'),
-                'next_quest_at': st.get('next_quest_at'),
-                'current_cash': st.get('current_cash', 0),
-                'gambling_stats': st.get('gambling_stats', {
-                    'total_wins': 0, 'total_losses': 0, 'total_wagered': 0,
-                    'net_profit': 0, 'current_streak': 0, 'best_streak': 0,
-                    'worst_streak': 0, 'biggest_win': 0, 'last_outcome': None
-                })
-            }
-        
-        # STATS_FILE lives under DATA_DIR (the volume), not a relative ./config
-        os.makedirs(os.path.dirname(STATS_FILE) or '.', exist_ok=True)
-        with open(STATS_FILE, 'w') as f:
-            json.dump(serializable_stats, f, indent=4)
+        _write_account_stats()
     except Exception as e:
         print(f"Error saving stats: {e}")
 
@@ -302,19 +343,28 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=
                     st['owo_count'] = st.get('owo_count', 0) + 1
                     st['session_owo_count'] = st.get('session_owo_count', 0) + 1
                 elif "autohunt" in cmd_text:
-                    cmd = "captcha"
+                    # counts as a command like any other. It used to be mapped to
+                    # cmd_type "captcha", which is the only thing that ever
+                    # incremented the history db's captcha column - so the number
+                    # the analytics page labelled "Captchas Solved" was really
+                    # "times autohunt was re-armed", and a real solve was never
+                    # recorded at all. Real solves go through track_captcha below.
+                    cmd = "other"
+                    st['other_count'] = st.get('other_count', 0) + 1
                 else:
                     st['other_count'] = st.get('other_count', 0) + 1
 
                 st['total_cmd_count'] = st.get('total_cmd_count', 0) + 1
-   
+
         msg_low = message.lower()
         if type == "SUCCESS":
             if any(k in msg_low for k in ["captcha solved", "verified", "resuming"]):
                 st['captchas_solved'] = st.get('captchas_solved', 0) + 1
                 st['captcha_success_count'] = st.get('captcha_success_count', 0) + 1
                 st['captchas_solved_today'] = st.get('captchas_solved_today', 0) + 1
-            
+                ht.track_captcha(owner=owner_of(bot_id), account_id=bot_id,
+                                 account_name=st.get('username') or bot_name)
+
         elif type in ["ALARM", "SECURITY"]:
             if "ban detected" in msg_low:
                 st['bans_detected'] = st.get('bans_detected', 0) + 1
@@ -323,10 +373,12 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=
         
         if type in ["SUCCESS", "ALARM", "SECURITY"]:
             save_account_stats()
-        
+
         if type == "CMD":
-            history = ht.load_history()
-            ht.track_command(history, cmd, owner=owner_of(bot_id))
+            # per-account, so the analytics page can finally break the numbers
+            # down instead of summing every account in the space into one row
+            ht.track_command(None, cmd, owner=owner_of(bot_id), account_id=bot_id,
+                             account_name=st.get('username') or bot_name)
 
 def record_snapshot(user_id):
     if user_id not in account_stats: return
@@ -337,9 +389,8 @@ def record_snapshot(user_id):
     if not st.get('start_cash'):
         st['start_cash'] = st['current_cash']
     st.setdefault('cowoncy_history', []).append((now, st['current_cash']))
-    
-    history = ht.load_history()
-    ht.track_cash(history, st['current_cash'], owner=owner_of(user_id))
-    
+
+    ht.track_cash(None, st['current_cash'], owner=owner_of(user_id), account_id=user_id)
+
     if len(st['cowoncy_history']) > 100:
         st['cowoncy_history'].pop(0)

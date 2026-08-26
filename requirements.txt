@@ -3,6 +3,12 @@ Flask==2.3.0
 # Flask 2.3 declares no upper bound, so a bare install pulls Werkzeug 3.x and
 # drops APIs it still uses. Keep it on the line Flask 2.3 was built against.
 Werkzeug>=2.3.0,<3
+# the dashboard was served by werkzeug's development server, which is single
+# process and explicitly not for production - a deploy with several tabs polling
+# it stalled. waitress is a real WSGI server, pure python, no build step.
+# Deliberately not in setup_engine.verify_imports(): that list gates an
+# os.execv re-exec, and neura.py falls back to werkzeug when waitress is absent.
+waitress>=2.1.2
 requests==2.31.0
 # a hard == pin has no wheel on Python 3.13+ and the source build fails, so
 # `pip install -r requirements.txt` dies on any current interpreter. discord.py
