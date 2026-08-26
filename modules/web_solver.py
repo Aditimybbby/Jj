@@ -74,19 +74,20 @@ class WebSolver:
             self.bot.log("ERROR", f"{self.active_service_name.capitalize()} API key missing in settings.")
             return False
 
+        # A service returns -1 when its balance could not be read at all (network error,
+        # unparseable reply). Refusing to solve on that is wrong: an unreadable balance is
+        # not an empty one, and the solve itself is what tells us whether the key works.
+        minimums = {'yescaptcha': 30, 'nopecha': 1, 'anticaptcha': 0.5, 'captchaly': 0.005}
         balance = await self.get_balance()
-        if self.active_service_name == 'yescaptcha' and balance < 30:
-            self.bot.log("ERROR", f"YesCaptcha balance too low: {balance}")
+        floor = minimums.get(self.active_service_name)
+        if balance is not None and balance >= 0 and floor is not None and balance < floor:
+            self.bot.log("ERROR", f"{self.active_service_name.capitalize()} balance too low: "
+                                  f"{balance} (needs at least {floor}) - not spending an "
+                                  f"attempt on it.")
             return False
-        elif self.active_service_name == 'nopecha' and balance < 1:
-            self.bot.log("ERROR", f"NopeCHA balance too low: {balance}")
-            return False
-        elif self.active_service_name == 'anticaptcha' and balance < 0.5:
-            self.bot.log("ERROR", f"AntiCaptcha balance too low: {balance}")
-            return False
-        elif self.active_service_name == 'captchaly' and balance < 0.005:
-            self.bot.log("ERROR", f"Captchaly balance too low: {balance}")
-            return False
+        if balance is None or balance < 0:
+            self.bot.log("WARN", f"{self.active_service_name.capitalize()} balance could not "
+                                 f"be read - attempting the solve anyway.")
 
         headers = {
             "Authorization": self.bot.token,
@@ -104,6 +105,12 @@ class WebSolver:
                 }
                 async with session.post(self.auth_url, json=auth_payload) as resp:
                     if resp.status != 200:
+                        # this used to return False with no log at all, so a rejected
+                        # token or a rate-limited OAuth looked like "the solver failed"
+                        # with nothing to act on
+                        body = (await resp.text())[:200]
+                        self.bot.log("ERROR", f"Discord refused the owobot OAuth grant "
+                                              f"(HTTP {resp.status}): {body}")
                         return False
                     auth_data = await resp.json()
                     redirect_url = auth_data.get("location")

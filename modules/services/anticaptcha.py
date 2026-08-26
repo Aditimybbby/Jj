@@ -25,8 +25,9 @@ class AntiCaptchaService:
         self.base_url = "https://api.anti-captcha.com"
 
     async def get_balance(self):
+        """Balance, or -1 when it could not be read (which is not the same as empty)."""
         if not self.api_key:
-            return 0
+            return -1
         url = f"{self.base_url}/getBalance"
         payload = {"clientKey": self.api_key}
         try:
@@ -36,10 +37,12 @@ class AntiCaptchaService:
                         data = await resp.json()
                         if data.get("errorId") == 0:
                             return float(data.get("balance", 0))
-                    return 0
+                        self.bot.log("ERROR", f"Anti-Captcha rejected the balance check: "
+                                              f"{data.get('errorDescription') or data}")
+                    return -1
         except Exception as e:
             self.bot.log("ERROR", f"Failed to get Anti-Captcha balance: {e}")
-            return 0
+            return -1
 
     async def solve_hcaptcha(self, retries=3):
         if not self.api_key:

@@ -20,13 +20,44 @@ class NopeCaptchaService:
         self.site_key = site_key
         self.base_url = "https://api.nopecha.com"
 
+    # NopeCHA reports its error code under "error", not "code". Reading the wrong field
+    # meant every error logged as "error None" and, worse, the terminal-code check in
+    # solve_hcaptcha never matched - so a permanently dead key (expired plan, bad key,
+    # zero credit) burned three attempts with sleeps on every single captcha.
+    @staticmethod
+    def _error_code(payload):
+        if not isinstance(payload, dict):
+            return None
+        for field in ("error", "code"):
+            value = payload.get(field)
+            if isinstance(value, int):
+                return value
+        return None
+
     async def get_balance(self):
+        """Credits available, or -1 when the answer could not be read at all.
+
+        0 used to mean both "no credit" and "the request failed", which made a network
+        hiccup look identical to an empty account.
+        """
         result = await self._request("GET", "/v1/status")
-        if result and result.get("credit") is not None:
+        if not isinstance(result, dict):
+            return -1
+        # the plan and its state are the part that actually explains a refusal - an
+        # expired plan still reports a plan name, so log both
+        plan, status = result.get("plan"), result.get("status")
+        if plan or status:
+            note = f"NopeCHA plan: {plan or 'unknown'} ({status or 'unknown state'})"
+            if str(status or "").lower() not in ("active", "", "none"):
+                self.bot.log("ERROR", f"{note} - an inactive plan cannot solve hCaptcha "
+                                      f"no matter what the key is.")
+            else:
+                self.bot.log("SYS", note)
+        if result.get("credit") is not None:
             return result["credit"]
-        if result and result.get("error") == 12:
+        if self._error_code(result) == 12:
             self.bot.log("ERROR", "NopeCHA free IP is banned.")
-        return 0
+        return -1
 
     def _get_headers(self):
         headers = {"Content-Type": "application/json"}
@@ -60,7 +91,7 @@ class NopeCaptchaService:
             else:
                 try:
                     err = await response.json()
-                    code = err.get("code")
+                    code = self._error_code(err)
                     if code == 10:
                         self.bot.log("ERROR", f"NopeCHA invalid request: {err.get('message')}")
                     elif code == 15:
@@ -115,8 +146,13 @@ class NopeCaptchaService:
                         return token
 
                 if result and result.get("error"):
-                    code = result.get("code")
+                    code = self._error_code(result)
                     if code in (12, 16, 15, 18):
+                        # invalid key / no credit / wrong plan / banned IP: retrying
+                        # cannot change any of these, so stop and let the caller fall
+                        # through to the free browser solve
+                        self.bot.log("ERROR", f"NopeCHA cannot solve this (error {code}) "
+                                              f"- not retrying.")
                         break
                     if code == 14:
                         continue
