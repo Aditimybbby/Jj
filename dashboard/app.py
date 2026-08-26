@@ -56,10 +56,22 @@ import socket
 
 _original_getaddrinfo = socket.getaddrinfo
 
+# Some hosts cannot resolve owobot.com (captive resolvers, Termux without a DNS
+# server, a few container images), and the captcha flow in modules/web_solver.py
+# needs it. This used to answer owobot.com from a hardcoded address
+# unconditionally - so the day that Cloudflare address stops serving the site,
+# every captcha solve fails and no amount of correct DNS can help. Real DNS wins;
+# the pin is only the fallback.
+_OWOBOT_FALLBACK_IP = '104.21.35.189'
+
+
 def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    if host == 'owobot.com':
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.21.35.189', port))]
-    return _original_getaddrinfo(host, port, family, type, proto, flags)
+    try:
+        return _original_getaddrinfo(host, port, family, type, proto, flags)
+    except socket.gaierror:
+        if host == 'owobot.com':
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (_OWOBOT_FALLBACK_IP, port))]
+        raise
 
 socket.getaddrinfo = patched_getaddrinfo
 
@@ -415,6 +427,9 @@ def protect_large_ints(obj):
         return str(obj)
     return obj
 
+_asset_version_cache = (0.0, "0")
+
+
 def _asset_version():
     """Cache-busting token for the css/js tags.
 
@@ -422,7 +437,17 @@ def _asset_version():
     the next reload. The js tags previously carried no ?v= at all while the css did,
     so after a deploy a browser ran the old javascript against the new markup - the
     dashboard looked broken until someone hard-refreshed by hand.
+
+    Cached for a few seconds: this walks the whole static tree, and on a deploy
+    with a network-backed volume that is a few hundred stat() calls in the middle
+    of serving the page.
     """
+    global _asset_version_cache
+    checked_at, value = _asset_version_cache
+    now = time.time()
+    if now - checked_at < 5.0:
+        return value
+
     newest = 0.0
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
     for root, _dirs, files in os.walk(static_dir):
@@ -433,12 +458,31 @@ def _asset_version():
                 newest = max(newest, os.path.getmtime(os.path.join(root, name)))
             except OSError:
                 continue
-    return str(int(newest)) or "0"
+    value = str(int(newest)) or "0"
+    _asset_version_cache = (now, value)
+    return value
 
 
 @app.context_processor
 def inject_asset_version():
     return {'asset_v': _asset_version(), 'csrf_token': csrf_token()}
+
+
+@app.route('/healthz')
+def healthz():
+    """Liveness probe for the host's health check.
+
+    No session, no template, no database, no auth - it answers if and only if the
+    WSGI server is accepting requests, which is exactly what a health check should
+    measure. /login was being used for this, and it renders a template and touches
+    the signing key, so an unwritable config dir or a template error read as "the
+    whole container is down" and the deploy was never promoted.
+    """
+    return jsonify({
+        'ok': True,
+        'accounts_running': len(state.bot_instances),
+        'uptime': int(time.time() - state.stats.get('uptime_start', time.time())),
+    })
 
 
 @app.route('/')
@@ -1016,10 +1060,16 @@ def _bot_loop_call(coro, timeout=60):
     if loop is None:
         coro.close()
         return None, 'bot loop is not running'
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout), None
+        return future.result(timeout=timeout), None
     except FuturesTimeout:
-        return None, f'timed out after {timeout}s'
+        # Cancel it. Without this the coroutine kept running after the browser had
+        # been told the call failed, so Start reported an error and the account
+        # came up anyway a moment later - which read as "it stops accounts, then
+        # they start again on their own".
+        future.cancel()
+        return None, f'timed out after {timeout}s - cancelled'
     except Exception as e:
         return None, str(e)
 

@@ -175,10 +175,13 @@ class NeuraBot(commands.Bot):
         self.log("SYS", "Initializing systems...")
         
         try:
-            history = state.ht.load_history()
-            state.ht.start_session(history, owner=self.space_owner)
+            # opens (and, on an old database, migrates) this space's history db and
+            # closes sessions a previous run left behind. Off the loop: the schema
+            # upgrade backfills a unix timestamp for every historical row, and the
+            # dashboard is sitting on a 60s future waiting for this account to start.
+            await asyncio.to_thread(state.ht.start_session, owner=self.space_owner)
         except Exception as e:
-            self.log("ERROR", f"Failed to start history session: {e}")
+            self.log("ERROR", f"Failed to open history database: {e}")
 
         self.worker_tasks = [
             asyncio.create_task(self._process_pending_commands()),

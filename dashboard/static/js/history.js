@@ -1,4 +1,4 @@
-/* 
+/*
 
 # This file is part of LazyFarmers.
 # Copyright (c) 2025-Present Routo
@@ -15,8 +15,23 @@
 
 */
 
+/* Sessions carry an account id and a live flag now (see utils/history_tracker.py),
+   so the dropdown can say which account a session belongs to and the table below
+   the charts can break the totals down per account. */
+
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.innerText = value;
+}
+
+function sessionLabel(s) {
+    const when = s.start_time ? new Date(s.start_time * 1000).toLocaleString() : `session ${s.id}`;
+    const who = s.account && s.account !== 'unassigned' ? s.account : null;
+    const live = s.active ? ' • LIVE' : '';
+    return who ? `${who} — ${when}${live}` : `Session ${s.id} — ${when}${live}`;
+}
+
 window.loadHistory = async function() {
-    console.log('loadHistory called');
     try {
         const startEl = document.getElementById('historyStartDate');
         const endEl = document.getElementById('historyEndDate');
@@ -29,60 +44,105 @@ window.loadHistory = async function() {
         if (params.toString()) {
             url += '?' + params.toString();
         }
-        console.log("Fetching from:", url);
         const res = await fetch(url);
-        console.log("Response status:", res.status);
+        if (!res.ok) throw new Error(`analytics returned ${res.status}`);
         globalAnalyticsData = await res.json();
-        console.log("Global analytics data:", globalAnalyticsData);
-        
-        const totals = globalAnalyticsData.totals || {};
-        const sEl = document.getElementById('total-sessions');
-        if (sEl) sEl.innerText = totals.total_sessions || 0;
-        const hEl = document.getElementById('total-hunts');
-        if (hEl) hEl.innerText = (totals.all_time_hunts || 0).toLocaleString();
-        const bEl = document.getElementById('total-battles');
-        if (bEl) bEl.innerText = (totals.all_time_battles || 0).toLocaleString();
-        const cEl = document.getElementById('total-cmds');
-        if (cEl) cEl.innerText = (totals.all_time_commands || 0).toLocaleString();
-        const capSolvedEl = document.getElementById('totalCaptchasSolved');
-        if (capSolvedEl) capSolvedEl.innerText = (totals.all_time_captchas || 0).toLocaleString();
-        
-        window.populateSessionDropdown();
 
-        setTimeout(() => {
-            console.log('Forced renderCharts after delay');
-            renderCharts();
-        }, 100);
+        const totals = globalAnalyticsData.totals || {};
+        setText('total-sessions', totals.total_sessions || 0);
+        setText('total-hunts', (totals.all_time_hunts || 0).toLocaleString());
+        setText('total-battles', (totals.all_time_battles || 0).toLocaleString());
+        setText('total-cmds', (totals.all_time_commands || 0).toLocaleString());
+        setText('totalCaptchasSolved', (totals.all_time_captchas || 0).toLocaleString());
+
+        window.populateSessionDropdown();
+        window.renderPerAccount();
+        renderCharts();
     } catch (e) {
-        console.error("History Error:", e);
+        console.error('History Error:', e);
+        const body = document.getElementById('perAccountBody');
+        if (body) {
+            body.innerHTML = '<tr><td colspan="7" class="per-account-empty">'
+                + '— could not load history —</td></tr>';
+        }
     }
 };
 
 window.populateSessionDropdown = function() {
     const dropdown = document.getElementById('session-select');
-    if (!dropdown || !globalAnalyticsData || !globalAnalyticsData.sessions) {
+    if (!dropdown) return;
+    if (!globalAnalyticsData || !globalAnalyticsData.sessions) {
         dropdown.innerHTML = '<option value="all">ALL SESSIONS IN RANGE</option>';
         return;
     }
     const currentVal = dropdown.value;
-    let html = '<option value="all">ALL SESSIONS IN RANGE</option>';
-    globalAnalyticsData.sessions.forEach(s => {
-        const d = s.start_time ? new Date(s.start_time * 1000).toLocaleString() : `Session ${s.id}`;
-        html += `<option value="${s.id}">Session ${s.id} — ${d}</option>`;
+    const opts = ['<option value="all">ALL SESSIONS IN RANGE</option>'];
+    // newest first: the session someone wants to look at is almost always the last one
+    [...globalAnalyticsData.sessions].reverse().forEach(s => {
+        opts.push(`<option value="${s.id}">${escapeHtml(sessionLabel(s))}</option>`);
     });
-    dropdown.innerHTML = html;
-    if (currentVal && dropdown.querySelector(`option[value="${currentVal}"]`)) {
+    dropdown.innerHTML = opts.join('');
+    if (currentVal && dropdown.querySelector(`option[value="${CSS.escape(currentVal)}"]`)) {
         dropdown.value = currentVal;
     }
 };
 
+function escapeHtml(text) {
+    return String(text == null ? '' : text).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[ch]);
+}
+
+window.renderPerAccount = function() {
+    const body = document.getElementById('perAccountBody');
+    if (!body) return;
+    const rows = (globalAnalyticsData && globalAnalyticsData.per_account) || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="per-account-empty">— no history yet —</td></tr>';
+        return;
+    }
+    const liveIds = new Set((globalAnalyticsData.sessions || [])
+        .filter(s => s.active)
+        .map(s => String(s.account_id)));
+    body.innerHTML = rows.map(a => {
+        const live = liveIds.has(String(a.account_id));
+        const seen = a.last_seen ? new Date(a.last_seen * 1000).toLocaleString() : '—';
+        // "unassigned" is what the pre-per-account rows aggregate into; say so
+        // rather than pretending it is an account name
+        const name = a.account === 'unassigned'
+            ? '<span class="per-account-unassigned">before per-account tracking</span>'
+            : escapeHtml(a.account);
+        return `<tr>
+            <td>${name}${live ? ' <span class="per-account-live">LIVE</span>' : ''}</td>
+            <td>${(a.sessions || 0).toLocaleString()}</td>
+            <td>${(a.hunts || 0).toLocaleString()}</td>
+            <td>${(a.battles || 0).toLocaleString()}</td>
+            <td>${(a.commands || 0).toLocaleString()}</td>
+            <td>${(a.captchas || 0).toLocaleString()}</td>
+            <td>${live ? 'now' : escapeHtml(seen)}</td>
+        </tr>`;
+    }).join('');
+};
+
 function getFilteredSessions() {
-    console.log('getFilteredSessions called');
     if (!globalAnalyticsData || !globalAnalyticsData.sessions) return [];
     const dropdown = document.getElementById('session-select');
     const selected = dropdown ? dropdown.value : 'all';
     if (selected === 'all') return globalAnalyticsData.sessions;
     return globalAnalyticsData.sessions.filter(s => String(s.id) === String(selected));
+}
+
+/* Cash rows carry an account id too, so one account's samples no longer get
+   interleaved into another's line. */
+function cashSeriesFor(sessions) {
+    const all = (globalAnalyticsData && globalAnalyticsData.cash_history) || [];
+    const dropdown = document.getElementById('session-select');
+    if (!dropdown || dropdown.value === 'all') return all;
+    const wanted = new Set(sessions.map(s => String(s.account_id)));
+    const narrowed = all.filter(c => wanted.has(String(c.account_id)));
+    // an old row with no account id belongs to nobody in particular; showing the
+    // unfiltered series beats showing an empty chart
+    return narrowed.length ? narrowed : all;
 }
 
 function showChartEmpty(canvasId, message) {
@@ -112,36 +172,21 @@ function clearChartEmpty(canvasId) {
 
 
 window.renderCharts = function renderCharts() {
-    console.log('renderCharts called');
-    console.log('globalAnalyticsData:', globalAnalyticsData);
-    
-    if (!globalAnalyticsData) {
-        console.warn('No globalAnalyticsData');
+    if (!globalAnalyticsData) return;
+    if (typeof Chart === 'undefined') {
+        showChartEmpty('sessionChart', '— chart library did not load —');
+        showChartEmpty('pieChart', '— chart library did not load —');
+        showChartEmpty('cashHistoryChart', '— chart library did not load —');
         return;
     }
-    
-    const sessions = getFilteredSessions();
-    console.log('sessions count:', sessions.length);
-    if (sessions.length > 0) {
-        console.log('first session:', sessions[0]);
-    }
-    
-    const sessionCanvas = document.getElementById('sessionChart');
-    const pieCanvas = document.getElementById('pieChart');
-    const cashCanvas = document.getElementById('cashHistoryChart');
-    
-    console.log('sessionChart element:', sessionCanvas);
-    console.log('pieChart element:', pieCanvas);
-    console.log('cashHistoryChart element:', cashCanvas);
-    
-    console.log('Chart available:', typeof Chart !== 'undefined' ? 'Yes' : 'No');
 
-    const sessEl = sessionCanvas;
+    const sessions = getFilteredSessions();
+
+    const sessEl = document.getElementById('sessionChart');
     if (sessEl) {
         if (!sessions || sessions.length === 0) {
             showChartEmpty('sessionChart', '— No session data in range —');
             if (sessChart) { sessChart.destroy(); sessChart = null; }
-            console.log(' No sessions data, showing empty state');
         } else {
             clearChartEmpty('sessionChart');
             const sctx = sessEl.getContext('2d');
@@ -151,12 +196,14 @@ window.renderCharts = function renderCharts() {
                 sessChart = new Chart(sctx, {
                     type: 'bar',
                     data: {
+                        // labelled by account, since one bar per account per session
+                        // is the whole point of the per-account schema
                         labels: revSessions.map(s => {
+                            const who = s.account && s.account !== 'unassigned' ? s.account : `S${s.id}`;
                             if (s.start_time) {
-                                const dt = new Date(s.start_time * 1000);
-                                return `S${s.id} (${dt.toLocaleDateString()})`;
+                                return `${who} (${new Date(s.start_time * 1000).toLocaleDateString()})`;
                             }
-                            return `S${s.id}`;
+                            return who;
                         }),
                         datasets: [
                             { label: 'Hunts', data: revSessions.map(s => s.stats?.hunts || 0), backgroundColor: '#7c6cff', borderRadius: 4 },
@@ -171,26 +218,31 @@ window.renderCharts = function renderCharts() {
                             x: { grid: { display: false }, ticks: { color: '#888' } },
                             y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#888' } }
                         },
-                        plugins: { legend: { labels: { color: '#ccc' } } }
+                        plugins: {
+                            legend: { labels: { color: '#ccc' } },
+                            tooltip: {
+                                callbacks: {
+                                    afterTitle: items => {
+                                        const s = revSessions[items[0].dataIndex];
+                                        return s && s.active ? 'still running' : '';
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
-                console.log(' Session chart created successfully');
             } catch (e) {
-                console.error(' Error creating session chart:', e);
+                console.error('Error creating session chart:', e);
             }
         }
-    } else {
-        console.warn('sessionChart canvas not found');
     }
 
-    const cashEl = cashCanvas;
+    const cashEl = document.getElementById('cashHistoryChart');
     if (cashEl) {
-        const cashData = globalAnalyticsData.cash_history || [];
-        console.log(' cashData length:', cashData.length);
+        const cashData = cashSeriesFor(sessions);
         if (!cashData || cashData.length === 0) {
             showChartEmpty('cashHistoryChart', '— No cash history recorded —');
             if (cashChart) { cashChart.destroy(); cashChart = null; }
-            console.log(' No cash data, showing empty state');
         } else {
             clearChartEmpty('cashHistoryChart');
             const cctx = cashEl.getContext('2d');
@@ -220,32 +272,26 @@ window.renderCharts = function renderCharts() {
                         }
                     }
                 });
-                console.log(' Cash chart created successfully');
             } catch (e) {
-                console.error(' Error creating cash chart:', e);
+                console.error('Error creating cash chart:', e);
             }
         }
-    } else {
-        console.warn(' cashHistoryChart canvas not found');
     }
 
-
-    const pieEl = pieCanvas;
+    const pieEl = document.getElementById('pieChart');
     if (pieEl) {
         let totalHunts = 0, totalBattles = 0, totalCaptchas = 0, totalOther = 0;
         sessions.forEach(s => {
             totalHunts += s.stats?.hunts || 0;
             totalBattles += s.stats?.battles || 0;
             totalCaptchas += s.stats?.captchas || 0;
-            totalOther += Math.max(0, (s.stats?.commands || 0) - (s.stats?.hunts || 0) - (s.stats?.battles || 0) - (s.stats?.captchas || 0));
+            totalOther += Math.max(0, (s.stats?.commands || 0) - (s.stats?.hunts || 0) - (s.stats?.battles || 0));
         });
         const total = totalHunts + totalBattles + totalCaptchas + totalOther;
-        console.log(' Pie chart totals:', { totalHunts, totalBattles, totalCaptchas, totalOther, total });
-        
+
         if (total === 0) {
             showChartEmpty('pieChart', '— No activity data —');
             if (pieChart) { pieChart.destroy(); pieChart = null; }
-            console.log(' No activity data, showing empty state');
         } else {
             clearChartEmpty('pieChart');
             const pctx = pieEl.getContext('2d');
@@ -254,10 +300,12 @@ window.renderCharts = function renderCharts() {
                 pieChart = new Chart(pctx, {
                     type: 'doughnut',
                     data: {
-                        labels: ['Hunts', 'Battles', 'Captchas', 'Other'],
+                        // captchas are not commands, so subtracting them from "other"
+                        // used to hide one non-hunt/battle command per solve
+                        labels: ['Hunts', 'Battles', 'Other commands', 'Captchas solved'],
                         datasets: [{
-                            data: [totalHunts, totalBattles, totalCaptchas, totalOther],
-                            backgroundColor: ['#7c6cff', '#22d3ee', '#34d399', '#5b6072'],
+                            data: [totalHunts, totalBattles, totalOther, totalCaptchas],
+                            backgroundColor: ['#7c6cff', '#22d3ee', '#5b6072', '#34d399'],
                             borderWidth: 0
                         }]
                     },
@@ -268,12 +316,9 @@ window.renderCharts = function renderCharts() {
                         plugins: { legend: { position: 'right', labels: { color: '#ccc' } } }
                     }
                 });
-                console.log(' Pie chart created successfully');
             } catch (e) {
-                console.error(' Error creating pie chart:', e);
+                console.error('Error creating pie chart:', e);
             }
         }
-    } else {
-        console.warn('pieChart canvas not found');
     }
 };

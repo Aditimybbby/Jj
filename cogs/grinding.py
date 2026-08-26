@@ -17,7 +17,6 @@ import random
 import time
 import re
 import core.state as state
-from utils import history_tracker as ht
 
 class Grinding(commands.Cog):
     def __init__(self, bot):

@@ -133,3 +133,67 @@
 .chart-box {
     min-height: 320px;
 }
+
+/* ── per-account breakdown ───────────────────────────────────── */
+
+.per-account-wrap {
+    /* bounded and scrollable: a space can hold 25 accounts, and the panel must
+       not grow the page every time another one starts farming */
+    max-height: 320px;
+    overflow-y: auto;
+    margin-top: 8px;
+}
+.per-account-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+}
+.per-account-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: rgba(7, 8, 16, 0.95);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-align: right;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+.per-account-table th:first-child,
+.per-account-table td:first-child {
+    text-align: left;
+}
+.per-account-table td {
+    text-align: right;
+    padding: 9px 12px;
+    color: var(--text-main);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    white-space: nowrap;
+}
+.per-account-table tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.03);
+}
+.per-account-empty {
+    text-align: center !important;
+    color: var(--text-muted);
+    padding: 24px 12px !important;
+}
+.per-account-live {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(0, 209, 110, 0.14);
+    border: 1px solid rgba(0, 209, 110, 0.4);
+    color: #00d16e;
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+}
+.per-account-unassigned {
+    color: var(--text-muted);
+    font-style: italic;
+}

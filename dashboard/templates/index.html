@@ -640,6 +640,31 @@
                         <div class="chart-container"><canvas id="cashHistoryChart"></canvas></div>
                     </div>
                 </div>
+                <!-- sessions carry an account id now, so the numbers can finally be
+                     split up instead of every account in the space summing into one row -->
+                <div class="chart-box glass-panel" style="margin-top:20px;">
+                    <h3 class="chart-box-h3"><span class="icon-svg"
+                            style="--icon: url('/static/assets/neura_icons/layers.svg');"></span> Per-Account
+                        Breakdown</h3>
+                    <div class="per-account-wrap">
+                        <table class="per-account-table">
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th>Sessions</th>
+                                    <th>Hunts</th>
+                                    <th>Battles</th>
+                                    <th>Commands</th>
+                                    <th>Captchas</th>
+                                    <th>Last active</th>
+                                </tr>
+                            </thead>
+                            <tbody id="perAccountBody">
+                                <tr><td colspan="7" class="per-account-empty">— no history yet —</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <!-- ═══════════════════════════════════════════════════════

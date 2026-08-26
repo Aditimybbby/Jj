@@ -22,6 +22,7 @@ import subprocess
 import asyncio
 import random
 import json
+import socket
 import threading
 import time
 from rich.console import Console
@@ -48,11 +49,27 @@ HEADLESS = (
 )
 
 if not engine.environment_healthy():
+    # os.execv replaces this process, so a setup that "succeeds" without actually
+    # fixing the imports used to re-exec forever. On a host with a console you see
+    # the banner scroll past again and again; on Railway you see a service that
+    # stays "running" and never serves a single request, because the dashboard is
+    # never reached. Two tries, then say what is missing and fail properly.
+    _attempts = 0
+    try:
+        _attempts = int(os.environ.get("LAZYFARMERS_SETUP_ATTEMPTS", "0") or 0)
+    except ValueError:
+        _attempts = 0
+    if _attempts >= 2:
+        console.print("[red]Dependencies are still missing after two setup attempts.[/red]")
+        console.print("[red]Run 'python neura_setup.py' and read data/setup.log - re-running "
+                      "the installer again would only loop.[/red]")
+        sys.exit(1)
     console.print("[yellow]Environment not healthy – running setup...[/yellow]")
     if not engine.run_full_setup(force_bootstrap=True):
         console.print("[red]Setup failed. Please run 'python neura_setup.py' manually.[/red]")
         sys.exit(1)
     console.print("[green]Setup complete. Restarting...[/green]")
+    os.environ["LAZYFARMERS_SETUP_ATTEMPTS"] = str(_attempts + 1)
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 def show_banner():
@@ -78,18 +95,121 @@ def detect_platform():
     console.print(f"[bold green]Detected Platform: {platform}[/bold green]")
     return is_termux
 
-def run_dashboard():
-    port = int(os.environ.get('PORT', 8000))
-    console.print(f"[bold green]Dashboard listening on 0.0.0.0:{port}[/bold green]")
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+DEFAULT_PORT = 8000
+
+
+def _dashboard_port():
+    """(port, came_from_env). Railway injects PORT; everything else defaults."""
+    raw = (os.environ.get('PORT') or '').strip()
+    if not raw:
+        return DEFAULT_PORT, False
+    try:
+        return int(raw), True
+    except ValueError:
+        console.print(f"[bold red]PORT={raw!r} is not a number - using {DEFAULT_PORT}.[/bold red]")
+        return DEFAULT_PORT, False
+
+
+def _bind_dashboard(port):
+    """Claim the listening socket up front, in the main thread.
+
+    A platform edge (Railway's, a reverse proxy, anything) decides a container is
+    up by connecting to a port. Binding here rather than inside the server thread
+    means "nothing is listening" is a startup failure with a reason in the log,
+    not an exception swallowed by a daemon thread.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name == 'posix':
+        # POSIX only, deliberately. On Windows SO_REUSEADDR lets a second process
+        # bind a port that is already being listened on, so the "nothing else has
+        # this port" guarantee above would quietly stop holding.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(('0.0.0.0', port))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _serve_dashboard(sock, port):
+    """Serve Flask on an already-bound socket, on the best server available."""
+    try:
+        from waitress import serve as waitress_serve
+    except ImportError:
+        waitress_serve = None
+
+    if waitress_serve is not None:
+        # threads: the dashboard polls stats every second and several routes block
+        # on the bot loop for up to a minute, so waitress' default of 4 would let
+        # one slow Start button freeze every other tab.
+        console.print("[green]Serving the dashboard with waitress.[/green]")
+        waitress_serve(flask_app, sockets=[sock], threads=16, channel_timeout=180)
+        return
+
+    from werkzeug.serving import make_server
+    console.print("[yellow]waitress is not installed - falling back to werkzeug's "
+                  "development server (fine locally, slow under load).[/yellow]")
+    make_server('0.0.0.0', port, flask_app, threaded=True, fd=sock.fileno()).serve_forever()
+
+
+def run_dashboard(sock, port):
+    try:
+        _serve_dashboard(sock, port)
+        reason = 'the web server returned on its own'
+    except BaseException as e:
+        reason = f'{type(e).__name__}: {e}'
+        console.print_exception(show_locals=False)
+    _dashboard_died(reason)
+
+
+def _dashboard_died(reason):
+    """The web server is gone, so take the process with it.
+
+    This is what made "it says running but the site does not load" possible: the
+    dashboard runs in a daemon thread, main() then parks in `await
+    asyncio.sleep(60)` forever, and nothing anywhere checked whether the server
+    was still alive. A crash inside flask_app.run() printed nothing (the
+    "listening" line had already been printed), left the process happily idling
+    with no listener, and because the exit code stayed 0 the platform's
+    restart-on-failure policy never fired.
+    """
+    console.print(f"[bold red]The dashboard web server stopped: {reason}[/bold red]")
+    console.print("[bold red]Nothing is listening any more - exiting so the host restarts us.[/bold red]")
+    _shutdown()
+    # a daemon thread cannot end the process by raising, and the asyncio loop is
+    # asleep in main(); this is the only exit that actually happens.
+    os._exit(1)
+
 
 _dashboard_thread = None
 
+
 def start_dashboard():
     global _dashboard_thread
-    if _dashboard_thread is None:
-        _dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
-        _dashboard_thread.start()
+    if _dashboard_thread is not None:
+        return
+    port, from_env = _dashboard_port()
+    try:
+        sock = _bind_dashboard(port)
+    except OSError as e:
+        console.print(f"[bold red]Cannot listen on 0.0.0.0:{port}: {e}[/bold red]")
+        if from_env:
+            console.print("[bold red]$PORT asked for that port, so nothing could ever reach "
+                          "the dashboard on it.[/bold red]")
+        else:
+            console.print(f"[bold red]Stop whatever is already using {port}, or set PORT "
+                          f"to a free port.[/bold red]")
+        sys.exit(1)
+    console.print(f"[bold green]Dashboard listening on http://0.0.0.0:{port}[/bold green]")
+    if not from_env:
+        console.print(f"[yellow]No PORT was set, so the dashboard is on {port}. If this is a hosted "
+                      f"deploy, the public domain's target port must be {port} - a mismatch is "
+                      f"answered with 502 while the service still reads as running.[/yellow]")
+    _dashboard_thread = threading.Thread(target=run_dashboard, args=(sock, port),
+                                        name='dashboard', daemon=True)
+    _dashboard_thread.start()
 
 def load_enabled_accounts(owner):
     """Accounts this space wants running right now.
@@ -106,6 +226,24 @@ def load_enabled_accounts(owner):
 
 
 _started_spaces = set()
+_shutdown_done = threading.Event()
+
+
+def _shutdown():
+    """Close history sessions and flush stats. Safe to call from any thread, once."""
+    if _shutdown_done.is_set():
+        return
+    _shutdown_done.set()
+    try:
+        import utils.history_tracker as ht
+        for owner in list(_started_spaces):
+            ht.end_session(owner=owner)
+        # force: the debounced write would otherwise be scheduled on a timer that
+        # never gets to run, losing everything since the last flush
+        state.save_account_stats(force=True)
+        console.print("\n[bold yellow][!] Systems shut down. History saved.[/bold yellow]")
+    except Exception as e:
+        console.print(f"[red]Shutdown bookkeeping failed: {e}[/red]")
 
 def spaces_with_accounts():
     """(owner, accounts) for every space that has something to start.
@@ -193,7 +331,8 @@ async def main():
         for owner, accounts in pending:
             if not accounts:
                 continue
-            ht.start_session(owner=owner)
+            # opens the space's history db (and migrates an old schema) off the loop
+            await asyncio.to_thread(ht.start_session, owner=owner)
             _started_spaces.add(owner)
             label = "operator" if owner == spaces.ADMIN_SPACE else owner
             console.print(f"[bold yellow]Initializing {len(accounts)} accounts for {label}...[/bold yellow]")
@@ -213,16 +352,16 @@ async def main():
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         pass
+    except SystemExit as e:
+        # the code was being swallowed here, so a fatal startup problem still exited
+        # 0 and a restart-on-failure policy had nothing to react to
+        code = e.code
+        exit_code = code if isinstance(code, int) else (0 if code is None else 1)
     finally:
-        try:
-            import utils.history_tracker as ht
-            for owner in _started_spaces:
-                ht.end_session(owner=owner)
-            state.save_account_stats()
-            console.print("\n[bold yellow][!] Systems shut down. History saved.[/bold yellow]")
-        except Exception:
-            pass
+        _shutdown()
+    sys.exit(exit_code)
