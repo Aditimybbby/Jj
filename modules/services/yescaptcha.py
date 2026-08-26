@@ -26,16 +26,21 @@ class YesCaptchaService:
         self.site_key = site_key
 
     async def get_balance(self):
-        if not self.api_key: return 0
+        """Balance, or -1 when it could not be read (which is not the same as empty)."""
+        if not self.api_key: return -1
         url = "https://api.yescaptcha.com/getBalance"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json={"clientKey": self.api_key}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     data = await resp.json()
-                    return int(data.get("balance", 0)) if data.get("errorId") == 0 else 0
+                    if data.get("errorId") == 0:
+                        return int(data.get("balance", 0))
+                    self.bot.log("ERROR", f"YesCaptcha rejected the balance check: "
+                                          f"{data.get('errorDescription') or data}")
+                    return -1
         except Exception as e:
             self.bot.log("ERROR", f"Failed to get YesCaptcha balance: {e}")
-            return 0
+            return -1
 
     async def solve_hcaptcha(self, retries=2):
         """solves hcaptcha using yescaptcha api and returns the token"""

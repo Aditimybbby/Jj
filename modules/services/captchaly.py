@@ -20,8 +20,9 @@ class CaptchalyService:
         self.site_key = site_key
 
     async def get_balance(self):
+        """Balance, or -1 when it could not be read (which is not the same as empty)."""
         if not self.api_key:
-            return 0
+            return -1
         url = f"https://v1.captchaly.com/account?apikey={self.api_key}"
         try:
             async with aiohttp.ClientSession() as session:
@@ -29,10 +30,12 @@ class CaptchalyService:
                     if resp.status == 200:
                         data = await resp.json()
                         return float(data.get("balance", 0))
-                    return 0
+                    self.bot.log("ERROR", f"Captchaly balance check returned "
+                                          f"HTTP {resp.status}")
+                    return -1
         except Exception as e:
             self.bot.log("ERROR", f"Failed to get Captchaly balance: {e}")
-            return 0
+            return -1
 
     async def solve_hcaptcha(self, retries=2):
         if not self.api_key:

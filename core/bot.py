@@ -32,6 +32,7 @@ from modules.identity import IdentityManager
 from component_v2_neura import setup_interactions
 from modules.captcha_solver import setup_solver
 from modules.web_solver import setup_web_solver
+from modules.browser_solver import setup_browser_solver
 import core.state as state
 from core import spaces
 import aiohttp
@@ -170,6 +171,7 @@ class NeuraBot(commands.Bot):
         self.interactions = setup_interactions(self)
         self.captcha_solver = setup_solver(self)
         self.web_solver = setup_web_solver(self)
+        self.browser_solver = setup_browser_solver(self)
         self.log("SYS", "Initializing systems...")
         
         try:
@@ -260,6 +262,7 @@ class NeuraBot(commands.Bot):
 
         from modules.web_solver import setup_web_solver
         self.web_solver = setup_web_solver(self)
+        self.browser_solver = setup_browser_solver(self)
         self.log("SYS", "WebSolver reinitialized with account-specific settings.")
 
         if not st.get('uptime_start'):
@@ -287,6 +290,7 @@ class NeuraBot(commands.Bot):
         self.interactions = setup_interactions(self)
         self.captcha_solver = setup_solver(self)
         self.web_solver = setup_web_solver(self)
+        self.browser_solver = setup_browser_solver(self)
         
         self.log("INFO", f"Channel: {self.channel_id}")
         

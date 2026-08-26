@@ -36,6 +36,9 @@ class CaptchaSolver:
         self.onnx_session = None
         self.classes = "abcdefghijklmnopqrstuvwxyz"
         self.conf_threshold = 0.3
+        # a letter kept at 0.3 is a coin flip; an answer is only sent when every letter
+        # in it clears this. Below it the captcha goes to a human with attempts intact.
+        self.min_answer_conf = 0.5
         self.img_size = 384
         
         if onnxruntime:
@@ -75,6 +78,12 @@ class CaptchaSolver:
     async def solve_image(self, url, letter_count=5):
         """
         downloads a captcha image from a url and predicts the letters.
+
+        Returns None rather than a partial answer when the model does not find exactly
+        letter_count letters. OwO allows about three attempts before it stops accepting
+        answers at all, so sending "abd" for a 5-letter captcha spends an attempt on
+        something that cannot be right - refusing hands it to a human with all attempts
+        still available.
         """
         if not self.onnx_session:
             return None
@@ -83,8 +92,12 @@ class CaptchaSolver:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
                     if resp.status != 200:
+                        # used to be a bare return None, so an expired or refused image
+                        # url looked identical to a model that simply saw nothing
+                        self.bot.log("ERROR", f"Captcha image download failed: HTTP "
+                                              f"{resp.status} for {url[:80]}")
                         return None
-                    
+
                     data = await resp.read()
                     img = Image.open(io.BytesIO(data)).convert("RGB")
                     img_array = np.array(img)
@@ -92,35 +105,59 @@ class CaptchaSolver:
             self.bot.log("ERROR", f"Failed to download captcha image: {e}")
             return None
 
-        img = self._letterbox(img_array, self.img_size)
-        img = img.astype(np.float32) / 255.0
-        img = np.transpose(img, (2, 0, 1)) 
-        img = np.expand_dims(img, axis=0) 
-
-        input_name = self.onnx_session.get_inputs()[0].name
-        outputs = self.onnx_session.run(None, {input_name: img})[0]
-        detections_raw = outputs[0]
-
-        detections = []
-        for det in detections_raw:
-            x1, y1, x2, y2, conf, cls_id = det
-            if conf < self.conf_threshold:
-                continue
-            
-            detections.append({
-                "char": self.classes[int(cls_id)],
-                "conf": float(conf),
-                "cx": float((x1 + x2) / 2)
-            })
+        # ~250ms of CPU per solve. On the event loop that stalls every other account's
+        # sends and heartbeats, so it runs on a worker thread.
+        try:
+            detections = await asyncio.to_thread(self._detect, img_array)
+        except Exception as e:
+            self.bot.log("ERROR", f"AI Solver inference failed: {e}")
+            return None
 
         if len(detections) > letter_count:
+            # keep the most confident letter_count, then read them left to right
             detections.sort(key=lambda d: d["conf"], reverse=True)
             detections = detections[:letter_count]
         detections.sort(key=lambda d: d["cx"])
-        
+
         result = "".join(d["char"] for d in detections)
-        self.bot.log("SECURITY", f"AI Solver Predicted: {result}")
+        if len(result) != letter_count:
+            self.bot.log("WARN", f"AI Solver found {len(result)} letters "
+                                 f"({result or 'none'}) but OwO asked for {letter_count} "
+                                 f"- refusing to guess so the attempt is not wasted.")
+            return None
+
+        weakest = min(d["conf"] for d in detections)
+        if weakest < self.min_answer_conf:
+            self.bot.log("WARN", f"AI Solver read '{result}' but one letter scored only "
+                                 f"{weakest:.2f} (floor {self.min_answer_conf:.2f}) "
+                                 f"- refusing to guess.")
+            return None
+
+        self.bot.log("SECURITY", f"AI Solver Predicted: {result} "
+                                 f"(lowest letter {weakest:.2f})")
         return result
+
+    def _detect(self, img_array):
+        """Run the model. Blocking - call through asyncio.to_thread."""
+        img = self._letterbox(img_array, self.img_size)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
+
+        input_name = self.onnx_session.get_inputs()[0].name
+        outputs = self.onnx_session.run(None, {input_name: img})[0]
+
+        detections = []
+        for det in outputs[0]:
+            x1, y1, x2, y2, conf, cls_id = det
+            if conf < self.conf_threshold:
+                continue
+            detections.append({
+                "char": self.classes[int(cls_id)],
+                "conf": float(conf),
+                "cx": float((x1 + x2) / 2),
+            })
+        return detections
 
 def setup_solver(bot):
     return CaptchaSolver(bot)

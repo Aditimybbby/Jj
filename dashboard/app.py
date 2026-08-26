@@ -1555,6 +1555,11 @@ def captcha_balance():
     try:
         future = asyncio.run_coroutine_threadsafe(temp_solver.get_balance(), bot.loop)
         balance = future.result(timeout=10)
+        # the services return -1 for "could not read it", which is not a balance
+        if balance is None or balance < 0:
+            return jsonify({'balance': None, 'service': service,
+                            'enabled': cfg.get('enabled', False),
+                            'error': 'balance unreadable - check the key and the service'})
         return jsonify({'balance': balance, 'service': service, 'enabled': cfg.get('enabled', False)})
     except Exception as e:
         return jsonify({'balance': None, 'service': service, 'error': str(e)})
@@ -1844,6 +1849,69 @@ def captcha_oauth_url():
         return jsonify({'success': False, 'error': 'Failed to get OAuth URL'})
 
     return jsonify({'success': True, 'url': redirect_url})
+
+@app.route('/api/captcha/browser_solve', methods=['POST'])
+@space_required
+def captcha_browser_solve():
+    """Solve this account's captcha in a locally installed browser - no service key.
+
+    Carries the account's owobot session into Chrome/Edge over the DevTools protocol, so
+    hCaptcha runs in a real browser (the only place it will run at all - its challenge
+    payload is encrypted and only its own WASM can read it). hCaptcha issues the token
+    itself when its risk score allows; otherwise the challenge appears in the window for
+    one answer and the token is submitted automatically.
+    """
+    data = _payload()
+    account_id = data.get('account_id')
+    if not account_id:
+        return jsonify({'success': False, 'error': 'Missing account_id'})
+
+    bot = get_bot(account_id, g.owner)
+    if not bot:
+        return jsonify({'success': False, 'error': 'Bot not found'})
+
+    solver = getattr(bot, 'browser_solver', None)
+    if solver is None:
+        return jsonify({'success': False, 'error': 'Browser solver not initialised yet'})
+
+    from modules.browser_solver import browser_status
+    unavailable = browser_status()
+    if unavailable:
+        return jsonify({'success': False, 'error': unavailable})
+
+    # headless=False: a visual challenge cannot be answered in a window nobody sees, and
+    # this route only ever runs because a human asked it to
+    security_cog = bot.get_cog('Security')
+    hook = getattr(security_cog, '_on_browser_challenge', None) if security_cog else None
+    timeout = 240
+    result, error = _bot_loop_call(
+        solver.solve(timeout=timeout - 20, headless=False, on_challenge=hook),
+        timeout=timeout)
+    if error:
+        return jsonify({'success': False, 'error': error}), 503
+
+    if result.get('ok'):
+        # tear down everything the captcha did to the account, same as a DM confirmation
+        if security_cog:
+            _bot_loop_fire(_resume_account(security_cog, result.get('how')))
+        else:
+            from modules.web_solver import WebSolver
+            WebSolver.mark_verification_done(str(account_id))
+            clear_captcha_challenge(str(account_id))
+        state.log_command("SEC", f"Captcha solved in the browser for {account_id} "
+                                 f"({result.get('how')})", "success", owner=g.owner)
+        return jsonify({'success': True, 'how': result.get('how')})
+
+    return jsonify({'success': False, 'error': result.get('reason') or 'solve failed',
+                    'challenge': result.get('challenge')})
+
+
+async def _resume_account(security_cog, how):
+    """Call the Security cog's resume on the bot loop (it touches bot state)."""
+    security_cog._resume_after_solve(
+        "Captcha solved in the browser." if how not in ('cleared', 'not-required')
+        else "OwO says this account is verified.")
+
 
 @app.route('/api/captcha/pending', methods=['GET'])
 @space_required

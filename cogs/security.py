@@ -25,6 +25,8 @@ from discord.ext import commands
 from plyer import notification
 import core.state as state
 
+from modules.browser_solver import browser_status as browser_solver_status
+
 class Security(commands.Cog):
     # the settings field each service actually reads. web_solver._reload_service picks
     # the key for the *selected* service only, so the old "is any key set at all" test
@@ -62,6 +64,108 @@ class Security(commands.Cog):
             f"Switch the service to the one your key belongs to."
         )
         return False
+
+    def _resume_after_solve(self, why):
+        """Undo everything a captcha did to this account.
+
+        Used to live only in the "I have verified that you are human" DM branch, so a
+        captcha cleared any other way - a paid service, the dashboard, the browser solver,
+        or OwO simply dropping it - left the account paused with throttle_until == inf
+        forever, which looks exactly like a solver that does not work.
+        """
+        # OwO's "I have verified that you are human" DM lands *after* whichever path
+        # cleared the captcha already resumed us. Logging twice would double-count
+        # captchas_solved, since state.log_command counts on the message text.
+        already_running = (not self.bot.paused
+                           and not self.bot.throttle_until
+                           and not getattr(self.bot, '_solving_captcha', False))
+        self.bot.web_solver.mark_verification_done(str(self.bot.user.id))
+        self.bot._solving_captcha = False
+        try:
+            from dashboard.app import clear_captcha_challenge
+            clear_captcha_challenge(str(self.bot.user.id))
+        except Exception as e:
+            self.bot.log("ERROR", f"Failed to clear captcha challenge: {e}")
+        self.bot.paused = False
+        self.bot.throttle_until = 0.0
+        self.bot.last_sent_time = 0
+        self.bot.warmup_until = 0
+        grinding_cog = self.bot.get_cog('Grinding')
+        if grinding_cog:
+            grinding_cog.cooldowns['hunt'] = 0
+            grinding_cog.cooldowns['battle'] = 0
+            grinding_cog.cooldowns['owo'] = 0
+        if already_running:
+            return
+        # "captcha solved" is what state.log_command counts, so keep that wording
+        self.bot.log("SUCCESS", f"{why} Resuming...")
+        self.bot.log("INFO", "All cooldowns reset. Bot will resume in 2 seconds...")
+
+    async def _run_autosolve(self, sol_cfg, where=""):
+        """Every way we can clear a captcha without a human, in order. True if cleared.
+
+        Order matters: a paid service costs credits but needs no window, so it goes first
+        when one is configured. The browser solver needs no key at all, so it runs whether
+        or not a service is set - it is the only free path and it is also the only one that
+        can tell us the captcha is already gone.
+        """
+        suffix = f" ({where})" if where else ""
+        if self._should_autosolve(sol_cfg):
+            service_name = self.bot.web_solver.active_service_name.capitalize()
+            self.bot.log("SYS", f"Attempting {service_name} auto-solve{suffix}...")
+            try:
+                paid_ok = await self.bot.web_solver.auto_verify()
+            except Exception as e:
+                paid_ok = False
+                self.bot.log("ERROR", f"{service_name} auto-solve crashed{suffix}: {e}")
+            if paid_ok:
+                # only _resume_after_solve logs the success - a second "captcha solved"
+                # line here would double-count captchas_solved in state.log_command
+                self._show_desktop_notification(f"{service_name} solved successfully!")
+                self._resume_after_solve(f"{service_name} cleared the captcha.")
+                return True
+            # no "solve manually" notification yet - the free browser path is next
+            self.bot.log("ERROR", f"{service_name} auto-solve failed{suffix}!")
+
+        browser_solver = getattr(self.bot, "browser_solver", None)
+        if not browser_solver or not browser_solver.enabled:
+            return False
+        unavailable = browser_solver_status()
+        if unavailable:
+            self.bot.log("WARN", f"Key-free browser solve unavailable: {unavailable}")
+            return False
+
+        self.bot.log("SYS", f"Attempting key-free browser solve{suffix}...")
+        try:
+            result = await browser_solver.solve(on_challenge=self._on_browser_challenge)
+        except Exception as e:
+            self.bot.log("ERROR", f"Browser solve crashed{suffix}: {e}")
+            return False
+        if result.get("ok"):
+            how = result.get("how")
+            if how in ("not-required", "cleared"):
+                self._resume_after_solve("OwO says this account is verified.")
+            else:
+                self._show_desktop_notification("Captcha solved in the browser!")
+                self._resume_after_solve("Browser solver cleared the captcha.")
+            return True
+        self.bot.log("ERROR", f"Browser solve failed{suffix}: {result.get('reason')}")
+        return False
+
+    def _on_browser_challenge(self, prompt, screenshot_b64):
+        """Put the live hCaptcha challenge on the dashboard so it can be answered there."""
+        try:
+            from dashboard.app import register_captcha_challenge
+            register_captcha_challenge(str(self.bot.user.id), {
+                'account_name': self.bot.username,
+                'url': "https://owobot.com/captcha",
+                'type': 'hcaptcha',
+                'browser_prompt': prompt,
+                'browser_screenshot': screenshot_b64,
+            })
+        except Exception as e:
+            self.bot.log("DEBUG", f"Could not publish the browser challenge: {e}")
+        self._show_desktop_notification(f"hCaptcha challenge: {prompt or 'needs a human'}")
 
     def __init__(self, bot):
         self.bot = bot
@@ -212,24 +316,7 @@ class Security(commands.Cog):
         if (message.guild is None or isinstance(message.channel, discord.DMChannel)) and message.author.id == int(self.monitor_id):
             if (discord.utils.utcnow() - message.created_at).total_seconds() > 30: return
             if "i have verified that you are human" in message.content.lower():
-                self.bot.web_solver.mark_verification_done(str(self.bot.user.id))
-                self.bot._solving_captcha = False
-                try:
-                    from dashboard.app import clear_captcha_challenge
-                    clear_captcha_challenge(str(self.bot.user.id))
-                except Exception as e:
-                    self.bot.log("ERROR", f"Failed to clear captcha challenge: {e}")
-                self.bot.paused = False
-                self.bot.throttle_until = 0.0
-                self.bot.last_sent_time = 0
-                self.bot.warmup_until = 0
-                grinding_cog = self.bot.get_cog('Grinding')
-                if grinding_cog:
-                    grinding_cog.cooldowns['hunt'] = 0
-                    grinding_cog.cooldowns['battle'] = 0
-                    grinding_cog.cooldowns['owo'] = 0
-                self.bot.log("SUCCESS", "Verified detected in DM. Captcha solved successfully. Resuming...")
-                self.bot.log("INFO", "All cooldowns reset. Bot will resume in 2 seconds...")
+                self._resume_after_solve("Verified detected in DM. Captcha solved successfully.")
                 await asyncio.sleep(2)
                 return
 
@@ -292,17 +379,7 @@ class Security(commands.Cog):
                 # manual solve queued, account parked at throttle_until=inf forever.
                 self.bot._solving_captcha = True
                 try:
-                    autosolved = False
-                    if self._should_autosolve(sol_cfg):
-                        service_name = self.bot.web_solver.active_service_name.capitalize()
-                        self.bot.log("SYS", f"Attempting {service_name} auto-solve for DM...")
-                        autosolved = await self.bot.web_solver.auto_verify()
-                        if autosolved:
-                            self.bot.log("SUCCESS", f"{service_name} solved successfully (DM)!")
-                            self._show_desktop_notification(f"{service_name} solved successfully!")
-                        else:
-                            self.bot.log("ERROR", f"{service_name} auto-solve failed (DM)!")
-                            self._show_desktop_notification(f"{service_name} failed! Solve manually.")
+                    autosolved = await self._run_autosolve(sol_cfg, "DM")
 
                     if not autosolved:
                         self._send_webhook("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
@@ -406,17 +483,7 @@ class Security(commands.Cog):
                     # latch the guard on and mute every later captcha
                     self.bot._solving_captcha = True
                     try:
-                        autosolved = False
-                        if self._should_autosolve(sol_cfg):
-                            service_name = self.bot.web_solver.active_service_name.capitalize()
-                            self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
-                            autosolved = await self.bot.web_solver.auto_verify()
-                            if autosolved:
-                                self.bot.log("SUCCESS", f"{service_name} solved successfully!")
-                                self._show_desktop_notification(f"{service_name} solved successfully!")
-                            else:
-                                self.bot.log("ERROR", f"{service_name} auto-solve failed!")
-                                self._show_desktop_notification(f"{service_name} failed! Solve manually.")
+                        autosolved = await self._run_autosolve(sol_cfg, "warning")
 
                         if not autosolved:
                             solve_link = captcha_url or "https://owobot.com/captcha"
@@ -513,17 +580,7 @@ class Security(commands.Cog):
             # guard on and mute every later captcha
             self.bot._solving_captcha = True
             try:
-                autosolved = False
-                if self._should_autosolve(sol_cfg):
-                    service_name = self.bot.web_solver.active_service_name.capitalize()
-                    self.bot.log("SYS", f"Attempting {service_name} auto-solve...")
-                    autosolved = await self.bot.web_solver.auto_verify()
-                    if autosolved:
-                        self.bot.log("SUCCESS", f"{service_name} solved successfully!")
-                        self._show_desktop_notification(f"{service_name} solved successfully!")
-                    else:
-                        self.bot.log("ERROR", f"{service_name} auto-solve failed!")
-                        self._show_desktop_notification(f"{service_name} failed! Solve manually.")
+                autosolved = await self._run_autosolve(sol_cfg, "channel")
 
                 if not autosolved:
                     solve_link = captcha_url or "https://owobot.com/captcha"
