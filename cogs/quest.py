@@ -18,7 +18,7 @@ import json
 import core.state as state
 from discord.ext import commands
 from lazy_engines.quest_engine import LazyQuestEngine
-from component_v2_neura import parse_v2_message, collect_text, buttons
+from component_v2_neura import parse_v2_message, collect_text, buttons, media_image_url
 
 # a quest line owo numbers itself. The separator is not always a dot: cards in the
 # wild use "1) ", "1- " and "quest 1: ", and the leading \W run absorbs any markdown
@@ -40,6 +40,16 @@ QUEST_HEADERS = (
     "active quest", "quest card", "checklist", "quests",
 )
 
+# OwO writes the next-quest time as a discord *relative timestamp*: the live card
+# says "Next quest: **<t:1787727600:R>**", never "next quest in 2h 30m". The old
+# pattern demanded the literal word "in" followed by digits, so it matched nothing on
+# a modern card and the dashboard countdown sat blank forever. Storing the absolute
+# unix time also lets the panel tick down live instead of freezing a string.
+DISCORD_TS_RE = re.compile(r'<t:(\d{9,12})(?::[a-zA-Z])?>')
+# "Balance: 11 <:seal:...> Quest Seals" - a real number the card still carries as
+# text even when the quest rows themselves are a picture, and which was discarded.
+SEAL_RE = re.compile(r'balance:\s*([\d,]+)\s*(?:<a?:\w+:\d+>\s*)?quest\s*seals?', re.I)
+
 class Quest(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -49,6 +59,8 @@ class Quest(commands.Cog):
         self._claimed = {}
         self._claim_lock = asyncio.Lock()
         self._last_recheck = 0.0
+        # so the "rows are an image" note is logged once per card, not every 6 hours
+        self._card_logged = None
 
     async def register_actions(self):
         cfg = self.bot.config.get('commands', {}).get('quest', {})
@@ -173,9 +185,36 @@ class Quest(commands.Cog):
                 if not was_completed:
                     self.bot.log("SUCCESS", f"QUEST COMPLETED: {desc_text}")
 
+        # OwO now renders the quest rows as a picture ("quest-rows.png") and the url is
+        # only inside the media_gallery component - `attachments` is empty on these
+        # cards. Everything around the rows (header, seal balance, next-quest stamp) is
+        # still text, which is why the card is recognised but no quest line ever parses.
+        card_url = media_image_url(components, name_contains=("quest", "checklist", "rows"))
+
         if cleaned_quests:
             st['quest_data'] = cleaned_quests
+            st.pop('quest_source', None)
+            st.pop('quest_card_url', None)
             self.bot.log("SYS", f"Dashboard synced: {len(cleaned_quests)} V2 quests tracked.")
+        elif card_url:
+            # Keeping the previous card's rows would be worse than keeping none: the
+            # quest engine drives sibling pings and Force Lucky Gems off this list, so
+            # stale rows make it act on quests that may have finished days ago. Empty
+            # plus quest_source='image' is the truth - the rows genuinely are not on the
+            # wire any more, and inventing progress numbers is not an option.
+            st['quest_data'] = []
+            st['quest_source'] = 'image'
+            st['quest_card_url'] = card_url
+            if self._card_logged != card_url:
+                self._card_logged = card_url
+                self.bot.log(
+                    "INFO",
+                    "OwO drew the quest rows as an image (quest-rows.png), so the "
+                    "descriptions and N/M counters are pixels, not text. The card itself "
+                    "is shown on the dashboard. Auto-claim is unaffected - it follows the "
+                    "Claim button, not the text - but quest-text automation (social quest "
+                    "routing, Force Lucky Gems) has nothing to read."
+                )
         else:
             # the card was recognised as a quest log of ours, yet not one line parsed.
             # This used to fall through in silence, so the panel kept showing stale (or
@@ -188,13 +227,27 @@ class Quest(commands.Cog):
                 f"Card text: {sample}"
             )
 
-        #  global timer in v2 text lines
-        timer_pattern = r'next quest.*?\bin\s*(\d+\w+(?:\s*\d+\w+)*)'
-        for line in text_lines:
-            timer_match = re.search(timer_pattern, line)
-            if timer_match:
-                st['next_quest_timer'] = timer_match.group(1).upper()
-                break
+        # the seal balance survives as text even on an image card, and was thrown away
+        seal_match = SEAL_RE.search(text)
+        if seal_match:
+            try:
+                st['quest_seals'] = int(seal_match.group(1).replace(',', ''))
+            except ValueError:
+                pass
+
+        #  global timer - a discord relative timestamp on modern cards, plain text on old
+        ts_match = DISCORD_TS_RE.search(text)
+        if ts_match:
+            st['next_quest_at'] = int(ts_match.group(1))
+            st['next_quest_timer'] = None
+        else:
+            st.pop('next_quest_at', None)
+            timer_pattern = r'next quest.*?\bin\s*(\d+\w+(?:\s*\d+\w+)*)'
+            for line in text_lines:
+                timer_match = re.search(timer_pattern, line)
+                if timer_match:
+                    st['next_quest_timer'] = timer_match.group(1).upper()
+                    break
 
         await self._claim_rewards(components, message_data, sum(1 for q in quests if q['completed']))
 
@@ -421,11 +474,30 @@ class Quest(commands.Cog):
 
         timer_match = re.search(timer_pattern, text, re.IGNORECASE)
         next_timer = timer_match.group(1).upper() if timer_match else None
-        
+
         valid_quests = [q for q in new_quest_data if 'progress' not in q['description'].lower()]
 
         if valid_quests or "quest log" in text.lower():
             st['quest_data'] = valid_quests
+        if valid_quests:
+            # a readable embed card supersedes any image card we stored earlier
+            st.pop('quest_source', None)
+            st.pop('quest_card_url', None)
+
+        seal_match = SEAL_RE.search(text)
+        if seal_match:
+            try:
+                st['quest_seals'] = int(seal_match.group(1).replace(',', ''))
+            except ValueError:
+                pass
+
+        # embeds carry the same relative timestamp as v2 cards, so read it here too
+        ts_match = DISCORD_TS_RE.search(text)
+        if ts_match:
+            st['next_quest_at'] = int(ts_match.group(1))
+            next_timer = None
+        elif next_timer:
+            st.pop('next_quest_at', None)
 
         st['next_quest_timer'] = next_timer
         return sum(1 for q in valid_quests if q.get('completed'))

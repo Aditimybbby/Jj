@@ -44,7 +44,7 @@ function update() {
         // a broke account used to show whatever number was left over from last poll
         setText('cash', d.cash === null || d.cash === undefined ? '—' : d.cash.toLocaleString());
         if (d.uptime !== undefined && d.uptime !== null) setText('uptimeDisplay', d.uptime);
-        renderLevelKpi(d.level, d.xp, d.xp_needed, d.level_source, d.rank);
+        renderLevelKpi(d.level, d.xp, d.xp_needed, d.level_source, d.rank, d.level_card_url);
         renderTeam(d.team);
         try { renderZoo(d.team); } catch(e) { console.error("Zoo Render Error:", e); }
         if (d.logs) renderLogs(d.logs);
@@ -84,7 +84,7 @@ function update() {
             lineChart.data.datasets[0].data.shift();
             lineChart.update('none');
         }
-        try { renderQuests(d.quest_data, d.next_quest_timer); } catch(e) { console.error("Quest Render Error:", e); }
+        try { renderQuests(d.quest_data, d.next_quest_timer, d.next_quest_at, d.quest_source, d.quest_card_url, d.quest_seals); } catch(e) { console.error("Quest Render Error:", e); }
         try { if (d.cmd_states) renderScheduler(d.cmd_states); } catch(e) { console.error("Scheduler Render Error in update():", e); }
         try { fetchSecuritySummary(); } catch(e) { console.error("Security Summary Error:", e); }
     }).catch(e => console.error("Stats poll failed:", e));
@@ -102,17 +102,36 @@ function setHtml(id, value) {
 }
 
 
+// A card url arrives inside owo's message payload - a third party - and ends up in an
+// href/src, so anything that is not a plain https link is refused rather than escaped:
+// escaping does not stop `javascript:` or `data:` from executing in those attributes.
+function safeCardUrl(u) {
+    const s = String(u === null || u === undefined ? '' : u);
+    return /^https:\/\/[\w.-]+\//.test(s) ? s : '';
+}
+
 // owo answers "owo level" with the level AND the xp pair in one message, so
 // both land in /api/stats - show them together
-function renderLevelKpi(level, xp, needed, source, rank) {
+function renderLevelKpi(level, xp, needed, source, rank, cardUrl) {
     const lvlEl = document.getElementById('owoLevel');
     if (!lvlEl) return;
 
     // owo has started answering with a rendered image card. Say so rather than
-    // leaving the last known number sitting there looking freshly synced.
+    // leaving the last known number sitting there looking freshly synced - and link
+    // the card itself, which is the only place the real level now exists when OCR is
+    // not installed. The link stops its click from bubbling into the tile's
+    // onclick="sendQuickCommand('owo level')".
     if (source === 'image' && (level === null || level === undefined)) {
-        lvlEl.innerHTML = `<span style="color:var(--text-muted);">—</span>` +
-            ` <span style="font-size:0.4em; color:var(--warning, #f59e0b);" title="OwO replied with an image card instead of text, so the level could not be read.">image card · unreadable</span>`;
+        const safe = safeCardUrl(cardUrl);
+        const link = safe
+            ? ` <a href="${escAttr(safe)}" target="_blank" rel="noopener noreferrer"` +
+              ` onclick="event.stopPropagation()"` +
+              ` style="font-size:0.36em; color:var(--accent); text-decoration:underline;"` +
+              ` title="OwO rendered your level as a picture. Open it to read the number.">open OwO's card &#8599;</a>`
+            : ` <span style="font-size:0.36em; color:var(--text-muted);">card link expired</span>`;
+        lvlEl.innerHTML = `<span style="color:var(--text-muted);">&mdash;</span>` +
+            ` <span style="font-size:0.4em; color:var(--warning, #f59e0b);" title="OwO replied with an image card instead of text, so the level could not be read as text.">image card</span>` +
+            link;
         return;
     }
 
@@ -267,18 +286,67 @@ function renderScheduler(states) {
     }
 }
 
-function renderQuests(quests, timer) {
+// "2h 14m 03s" from a number of seconds. Only used for the live quest countdown.
+function fmtCountdown(secs) {
+    if (secs <= 0) return 'due now';
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${String(s).padStart(2, '0')}s`;
+    return `${m}m ${String(s).padStart(2, '0')}s`;
+}
+
+function renderQuests(quests, timer, nextAt, source, cardUrl, seals) {
     const list = document.getElementById('questList');
     const timerEl = document.getElementById('nextQuestTimer');
     if (!list || !timerEl) return;
-    if (timer) {
-        timerEl.innerHTML = `<span class="icon-svg" style="--icon: url('/static/assets/neura_icons/clock.svg'); width: 14px; height: 14px;"></span> Next quest in: ${escHtml(timer)}`;
+
+    // owo sends the next-quest time as a relative discord timestamp, so we hold the
+    // absolute unix second and recompute here. update() runs once a second, which makes
+    // this a live countdown instead of a string that was stale the moment owo printed it.
+    let timerText = '';
+    if (nextAt) {
+        timerText = `Next quest in: ${fmtCountdown(nextAt - Math.floor(Date.now() / 1000))}`;
+    } else if (timer) {
+        timerText = `Next quest in: ${escHtml(timer)}`;
+    }
+    if (seals !== null && seals !== undefined) {
+        const sealText = `${Number(seals).toLocaleString()} quest seal${Number(seals) === 1 ? '' : 's'}`;
+        timerText = timerText ? `${timerText} &middot; ${sealText}` : sealText;
+    }
+    if (timerText) {
+        timerEl.innerHTML = `<span class="icon-svg" style="--icon: url('/static/assets/neura_icons/clock.svg'); width: 14px; height: 14px;"></span> ${timerText}`;
         timerEl.style.display = 'block';
     } else {
         timerEl.style.display = 'none';
     }
+
     if (!quests || quests.length === 0) {
-        list.innerHTML = '<div style="color:var(--text-dim); font-style:italic; text-align:center; padding: 20px;">No active quests tracked.<br><span style="font-size:0.8rem; opacity:0.7;">Run "o quest" to sync with OwO.</span></div>';
+        // OwO now draws the quest rows into quest-rows.png. The descriptions and the
+        // N/M counters are pixels, so there is nothing to parse and nothing to fake -
+        // show owo's own card, which is the real data, and say plainly what that costs.
+        const safe = source === 'image' ? safeCardUrl(cardUrl) : '';
+        if (safe) {
+            list.innerHTML =
+                `<div style="grid-column:1/-1;">` +
+                `<img src="${escAttr(safe)}" alt="OwO quest card"` +
+                ` style="width:100%; max-width:520px; display:block; border:1px solid var(--border-soft); border-radius:10px;"` +
+                ` onerror="this.style.display='none'; var n=this.nextElementSibling; if(n) n.style.display='block';">` +
+                `<div style="display:none; color:var(--text-dim); font-style:italic; padding:14px 0;">` +
+                `OwO's quest image has expired (its links are only signed for about a day).` +
+                ` Run <b>owo quest</b> to fetch a fresh one.</div>` +
+                `<div style="margin-top:10px; font-size:0.78rem; color:var(--text-dim); line-height:1.5;">` +
+                `OwO now draws the quest rows as an image, so the text and the progress` +
+                ` counters cannot be read by the bot. Rewards are still claimed` +
+                ` automatically &mdash; that follows OwO's Claim button, not the text &mdash;` +
+                ` but quest-driven automation (asking another account to pray/cookie you,` +
+                ` forcing lucky gems for a rarity quest) has nothing to read.</div>` +
+                `</div>`;
+        } else {
+            list.innerHTML = '<div style="color:var(--text-dim); font-style:italic; text-align:center; padding: 20px;">No active quests tracked.<br><span style="font-size:0.8rem; opacity:0.7;">Run "o quest" to sync with OwO.</span></div>';
+        }
         return;
     }
     list.innerHTML = quests.map(q => {

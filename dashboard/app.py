@@ -730,6 +730,7 @@ def stats():
         # "image" means owo answered with a rendered card we cannot read - the UI shows
         # that instead of leaving a stale number looking freshly synced
         'level_source': st.get('level_source'),
+        'level_card_url': st.get('level_card_url'),
         'last_level_update': st.get('last_level_update'),
         'team': team_info,
         'logs': [l for l in state.command_logs if str(l.get('bot_id')) == uid][:200],
@@ -769,7 +770,16 @@ def stats():
             'pending_commands': len(st.get('pending_commands', []))
         },
         'quest_data': st.get('quest_data', []),
+        # owo now draws the quest rows into quest-rows.png, so the descriptions and the
+        # N/M counters do not exist as text any more. quest_source says so honestly and
+        # quest_card_url lets the panel show owo's own card instead of an empty list.
+        'quest_source': st.get('quest_source'),
+        'quest_card_url': st.get('quest_card_url'),
+        'quest_seals': st.get('quest_seals'),
         'next_quest_timer': st.get('next_quest_timer'),
+        # absolute unix seconds, so the panel counts down live instead of showing a
+        # string that was already stale when owo printed it
+        'next_quest_at': st.get('next_quest_at'),
         'cmd_states': {k: {**v, 'content': '[Dynamic function]' if callable(v.get('content')) else v.get('content')} for k, v in bot.cmd_states.items()} if bot else {},
         'gambling_stats': st.get('gambling_stats', {})
     }

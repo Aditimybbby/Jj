@@ -116,9 +116,18 @@ def get_empty_stats():
         'level': None,
         'xp': None,
         'xp_needed': None,
+        'rank': None,
+        # 'text' when owo printed the numbers, 'image' when it sent a rendered card we
+        # could not read. The dashboard shows the card itself rather than a stale number.
+        'level_source': None,
+        'level_card_url': None,
         'last_level_update': None,
         'quest_data': [],
+        'quest_source': None,
+        'quest_card_url': None,
+        'quest_seals': None,
         'next_quest_timer': None,
+        'next_quest_at': None,
         'session_hunt_count': 0,
         'session_battle_count': 0,
         'session_owo_count': 0,
@@ -154,9 +163,19 @@ def save_account_stats():
                 'level': st.get('level'),
                 'xp': st.get('xp'),
                 'xp_needed': st.get('xp_needed'),
+                'rank': st.get('rank'),
+                # without these the dashboard forgot on every restart *why* the level was
+                # blank and which card to show, and silently fell back to "never checked"
+                # for the six hours until the next `owo level`
+                'level_source': st.get('level_source'),
+                'level_card_url': st.get('level_card_url'),
                 'last_level_update': st.get('last_level_update'),
                 'quest_data': st.get('quest_data', []),
+                'quest_source': st.get('quest_source'),
+                'quest_card_url': st.get('quest_card_url'),
+                'quest_seals': st.get('quest_seals'),
                 'next_quest_timer': st.get('next_quest_timer'),
+                'next_quest_at': st.get('next_quest_at'),
                 'current_cash': st.get('current_cash', 0),
                 'gambling_stats': st.get('gambling_stats', {
                     'total_wins': 0, 'total_losses': 0, 'total_wagered': 0,
