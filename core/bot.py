@@ -325,7 +325,28 @@ class NeuraBot(commands.Bot):
         # is_ready to on_ready/on_resumed. This hook exists so discord.py does
         # not warn about an unhandled event during reconnects.
         pass
-    
+
+    async def on_command_error(self, context, exception):
+        """Swallow "command not found" for our own outgoing OwO commands.
+
+        With ``self_bot=True`` discord.py's skip check is inverted: the only
+        messages it feeds through the command parser are the ones *we* send. Our
+        prefix is OwO's (`owo `), so every `owo hunt` / `owo b` / `owo inv` this
+        bot sends is re-read as an invocation of a local command named `hunt` /
+        `b` / `inv`, none of which exist - and the default handler logs each one
+        at ERROR level ("Ignoring exception in command None"). On a ten-account
+        deploy that was 42% of the Railway log: two error lines per command sent,
+        describing nothing that went wrong.
+
+        This cog set registers no ext.commands commands at all (every trigger is
+        an on_message listener), so CommandNotFound here is always that echo.
+        Anything else is a real bug in a real command and still gets logged.
+        """
+        if isinstance(exception, commands.CommandNotFound):
+            return
+        _log.error("Ignoring exception in command %s", getattr(context, 'command', None),
+                   exc_info=exception)
+
     async def _resolve_channel(self, c_id):
         channel = self.get_channel(c_id)
         if not channel:
@@ -443,11 +464,13 @@ class NeuraBot(commands.Bot):
 
         # anything a cog may enqueue without the prefix has to be listed here, or it
         # is posted as plain chat: owo ignores it, the cog waits forever for a reply
-        # that never comes, and the channel fills with bare words like "weapon"
+        # that never comes, and the channel fills with bare words like "weapon".
+        # `equip` was the live proof of that - the weapon manager's own command was
+        # missing from this list, so every equip it sent was chat, not a command.
         known = ['hunt', 'battle', 'curse', 'huntbot', 'daily', 'cookie',
                 'quest', 'checklist', 'cf', 'slots', 'bj', 'blackjack', 'autohunt', 'upgrade',
                 'sacrifice', 'team', 'zoo', 'use', 'inv', 'sell', 'crate',
-                'lootbox', 'run', 'pup', 'piku', 'pray', 'weapon']
+                'lootbox', 'run', 'pup', 'piku', 'pray', 'weapon', 'equip']
         
         if self.shortforms:
             for sf in self.shortforms.values():

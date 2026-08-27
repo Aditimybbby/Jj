@@ -131,12 +131,7 @@ class Quest(commands.Cog):
 
     def _v2_text_is_mine(self, full_text):
         """components v2 messages are invisible to discord.py-self, so match by name."""
-        if f"<@{self.bot.user.id}>" in full_text or f"<@!{self.bot.user.id}>" in full_text:
-            return True
-        idents = {self.bot.user.name.lower(), (self.bot.display_name or "").lower()}
-        for ident in getattr(self.bot, 'identifiers', []):
-            idents.add(ident.replace("<@", "").replace("!", "").replace(">", "").lower())
-        return any(ident and len(ident) >= 2 and ident in full_text for ident in idents)
+        return self.bot.identity.text_is_mine(full_text)
 
     async def _parse_quests_v2(self, components, message_data, v2_text=None):
         text = v2_text if v2_text is not None else collect_text(components)

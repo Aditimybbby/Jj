@@ -60,6 +60,30 @@ NO_TEAM_PHRASES = (
     "you don't have a team",
 )
 
+# A battle result is *not* a team listing, even though it reads like one. Its embed
+# author is "<player> goes into battle!" and its two fields are named "<player>'s Team"
+# and "<enemy team name>" - so it matched the same `"'s team" in content` trigger the
+# real `owo team` card does, and battles outnumber team reads by ~30:1. Whichever
+# landed first won, which is how the team watcher ended up parsing a battle card:
+# there the animals are shortcodes and every custom emoji is a *weapon*, and the enemy's
+# animals sit in the same text as ours.
+BATTLE_CARD_PHRASES = ("goes into battle", "enemy team", "battle log")
+
+# both replies to a team change number their slots: the full card as its field names
+# ("[1] :tiger2: **tiger**") and the confirmation line as "your team: [1]<a:gsquid:...>
+# [2]:whale:". A team card's stat block writes numbers like `[211,602/391,625]`, which
+# is why this only accepts one or two digits between the brackets.
+TEAM_SLOT_RE = re.compile(r'\[\s*(\d{1,2})\s*\]')
+
+# owo confirms a change with "Your team has been updated!" and then re-lists the team,
+# so the confirmation is both proof the swap landed and a fresh reading of the team -
+# no second `owo team` needed.
+TEAM_UPDATED_PHRASES = ("your team has been updated", "team has been updated")
+# ...and refuses like this when `team add` is handed no position and the team is full.
+# The shipped template used to do exactly that, so on any farmer who already had a
+# team every single add was rejected and nothing was ever replaced.
+TEAM_POSITION_PHRASES = ("your team is full", "please specify a position")
+
 HUNT_PHRASES = ("you found:", "caught a", "caught an")
 # owo says this when `team add` was handed something it does not recognise
 BAD_ANIMAL_PHRASES = ("invalid animal", "could not find that animal", "is not a valid animal",
@@ -198,12 +222,51 @@ RANK_NAMES = {0: "common", 1: "uncommon", 2: "rare", 3: "epic", 4: "patreon",
               10: "special", 11: "hidden", 12: "distorted"}
 UNOWNED = ("❓", "❔", "question")
 
+# the tier word owo prints next to a catch, matched as a whole word. A plain
+# substring test read the *item* emoji `<:egem3:123>` as the word "gem" and told the
+# hunt watcher a gem-tier animal had been caught, which re-checked the team after
+# almost every hunt. Zoo rows keep their substring match: there the tier word arrives
+# inside a badge name (`<:legendaryTier:...>` -> "legendarytier") and a word boundary
+# would never fire.
+TIER_WORD_RE = tuple(
+    (re.compile(rf'\b{word}\b'), rank) for word, rank in RARITY_RANK
+)
+
 # animals whose tier we know without ever reading the zoo
 STATIC_RANKS = {
     name: rank
     for tier, rank in RARITY_RANK
     for name in ZOO_TIERS.get(tier, ())
 }
+
+# The rarest animals are drawn as custom emoji whose *name* carries a one or two letter
+# prefix: <a:gsquid:...> is the legendary squid, <a:glion:...> the lion, <:hkoala:...>
+# the koala. That prefix is not part of the animal's name, and owo answers
+# `owo team add gsquid` with nothing at all - no error, no reply - so a farmer whose
+# rarest animal was a legendary got a team command that silently did nothing, every
+# time. Longest suffix wins, and a name that is already an animal is left alone, which
+# is what keeps the patreon animals (`ptiger`, `pbird`, `pdolphin`) from being read as
+# prefixed spellings of `tiger` and `bird`.
+CANONICAL_ANIMALS = tuple(sorted(STATIC_RANKS, key=len, reverse=True))
+
+
+def canonical_animal(name, tier_names=()):
+    """The plain animal name `owo team add` accepts, or None if this is not one."""
+    name = str(name or '').strip().lower()
+    if not name:
+        return None
+    if name in STATIC_RANKS:
+        return name
+    for pool in (tuple(tier_names or ()), CANONICAL_ANIMALS):
+        best = None
+        for candidate in pool:
+            gap = len(name) - len(candidate)
+            if 1 <= gap <= 2 and name.endswith(candidate) and name[:gap].isalpha():
+                if best is None or len(candidate) > len(best):
+                    best = candidate
+        if best:
+            return best
+    return None
 
 
 def emoji_key(emoji):
@@ -220,7 +283,8 @@ def animal_from_token(token):
     """
     custom = CUSTOM_EMOJI_RE.fullmatch(token or '')
     if custom:
-        return custom.group(1).lower()
+        name = custom.group(1).lower()
+        return canonical_animal(name) or name
     short = SHORTCODE_RE.fullmatch(token or '')
     if short:
         return SHORTCODE_ANIMALS.get(short.group(1).lower())
@@ -289,6 +353,17 @@ class Others(commands.Cog):
         self._want_team_check = False
         self._last_team_action = 0
         self._team = []
+        # a team change is one command per slot and the queue drains one of them
+        # every ~15-20s, so a scan started right after issuing a plan reads the
+        # *old* team card and re-issues the very same swaps. These three track the
+        # plan in flight so that cannot happen, and so a plan that owo never
+        # applied is reported once instead of retried forever.
+        self._team_plan = []
+        self._team_busy_until = 0.0
+        self._team_verify_until = 0.0
+        self._team_retry_after = 0.0
+        self._team_fail_streak = 0
+        self._team_unreadable_warned = 0.0
         self._want_level_until = 0.0
         self._level_image_warned = False
         self._level_parse_warned = 0.0
@@ -535,9 +610,11 @@ class Others(commands.Cog):
         """What `owo team add` should be handed for this zoo slot."""
         custom = CUSTOM_EMOJI_RE.fullmatch(emoji)
         if custom:
-            # owo names every animal emoji after the animal, and this is the only
-            # thing that works for legendary/fabled/hidden rows we have no list for
-            return custom.group(1).lower()
+            name = custom.group(1).lower()
+            # owo names every animal emoji after the animal, but prefixes the rarest
+            # tiers (<a:gsquid:...>). Strip the prefix; keep the raw name when it is not
+            # a prefixed spelling of anything, which is how event animals still work.
+            return canonical_animal(name, tier_names) or name
         short = SHORTCODE_RE.fullmatch(emoji)
         if short:
             name = short.group(1).lower()
@@ -616,29 +693,129 @@ class Others(commands.Cog):
                 best[animal] = rank
         return sorted(best.items(), key=lambda item: -item[1])
 
+    def _known_animal(self, name):
+        """True when this name is an animal we can actually rank.
+
+        Every animal that can be on the battle team is one we own, and the zoo read
+        that always precedes a team read names all of them (`_animal_ranks`), on top
+        of the fixed tier lists in STATIC_RANKS. So membership here is the test for
+        "is this an animal" - a weapon code, a gem, a tier badge or a ui icon is in
+        none of those.
+        """
+        return str(name).lower() in self._animal_ranks
+
     def parse_team(self, raw):
-        """Animal names currently on the battle team, in slot order."""
-        names = [name.lower() for name in CUSTOM_EMOJI_RE.findall(raw)]
-        if not names:
-            for token in ZOO_TOKEN_RE.finditer(raw):
-                # unicode glyph or ":shortcode:" - the team card uses the same
-                # rendering as the zoo row it was picked from
-                known = animal_from_token(token.group('emoji'))
-                if known:
-                    names.append(known)
-        if not names:
-            # a text-only team listing quotes the names instead
-            names = [n.lower() for n in re.findall(r'`\s*([a-z][a-z_\- ]{1,20})\s*`', raw, re.IGNORECASE)]
-        seen = []
-        for name in names:
-            if name in UNOWNED or name in seen:
-                continue
-            # the rarity badge owo prints in front of a team row (<:LegendaryTier:..>)
-            # is not an animal - drop it so `team add` never gets handed "legendarytier"
-            if self._is_tier_badge(f"<:{name}:0>"):
-                continue
-            seen.append(name)
-        return seen
+        """(animals in slot order, tokens we could not name, slots we could not read).
+
+        `owo team` prints each slot's *weapon* next to its animal and owo draws both
+        as custom emoji, so an unfiltered emoji sweep read the team as
+        "ebhstaff, esafeguard, mrstaff" - three weapon codes. None of those rank as
+        an animal, so the caller then believed the team held nothing worth keeping
+        and re-issued the same three swaps on every single scan.
+
+        Both cards owo answers a team change with number their slots - the full card
+        as `[1] :tiger2: **tiger**` fields, the confirmation as
+        `Your team: [1]<a:gsquid:...> [2]:whale:` - so when those markers are there the
+        first animal token after each one *is* that slot, in order, and nothing else on
+        the card can be mistaken for one. The scan below is the fallback for a card
+        that does not number itself.
+
+        The second return value separates "the team is empty" (nothing on the card at
+        all) from "we cannot read this card" (plenty of emoji, none of them an animal):
+        wiping a team we merely failed to parse is exactly the bug above. The third
+        names the slots that are filled by something we could not identify, which is
+        the one case where overwriting a slot could cost a rarer animal than it gains.
+        """
+        animals, unknown, blank = [], [], []
+
+        def name_of(candidate):
+            candidate = str(candidate).lower()
+            if candidate in UNOWNED:
+                return None
+            if self._known_animal(candidate):
+                return candidate
+            fixed = canonical_animal(candidate)
+            return fixed if fixed and self._known_animal(fixed) else None
+
+        def note(candidate):
+            named = name_of(candidate)
+            if named:
+                if named not in animals:
+                    animals.append(named)
+                return True
+            candidate = str(candidate).lower()
+            if (candidate and candidate not in unknown and candidate not in UNOWNED
+                    and not self._is_tier_badge(f"<:{candidate}:0>")):
+                # tier badges are expected furniture, not a failure to read
+                unknown.append(candidate)
+            return False
+
+        slots = self._slot_chunks(raw)
+        if slots:
+            for index, chunk in slots:
+                named = None
+                for token in ZOO_TOKEN_RE.finditer(chunk):
+                    named = name_of(animal_from_token(token.group('emoji')))
+                    if named:
+                        break
+                if not named:
+                    # `[2] <a:glion:...> **glion**` - the bold word is the name owo
+                    # takes, unless the animal has been renamed
+                    for word in re.findall(r'\*\*\s*([a-z][a-z_\- ]{1,20})\s*\*\*',
+                                           chunk, re.IGNORECASE):
+                        named = name_of(word)
+                        if named:
+                            break
+                if named:
+                    if named not in animals:
+                        animals.append(named)
+                else:
+                    blank.append(index)
+                    for token in CUSTOM_EMOJI_RE.findall(chunk):
+                        if token.lower() not in unknown:
+                            unknown.append(token.lower())
+            return animals, unknown, blank
+
+        for name in CUSTOM_EMOJI_RE.findall(raw):
+            note(name)
+        for token in ZOO_TOKEN_RE.finditer(raw):
+            emoji = token.group('emoji')
+            if CUSTOM_EMOJI_RE.fullmatch(emoji):
+                continue  # already handled above, and its name is the animal
+            named = animal_from_token(emoji)
+            if named:
+                note(named)
+        if not animals:
+            # a text-only team listing quotes the names instead of drawing them
+            for name in re.findall(r'`\s*([a-z][a-z_\- ]{1,20})\s*`', raw, re.IGNORECASE):
+                if name_of(name):
+                    note(name)
+        if not animals:
+            # last resort: the card names its slots in plain text. This branch is the
+            # one that reads a card whose animals are drawn as a picture with only
+            # their weapons written out - but a bare word is weak evidence next to an
+            # emoji, so it has to name an animal the zoo says we actually own. That
+            # rules out an animal word in a footer or an error line.
+            owned_names = {animal for animal, _rank in self._owned}
+            for word in re.findall(r'[a-z][a-z_]{1,20}', raw.lower()):
+                if word in owned_names:
+                    note(word)
+        return animals, unknown, blank
+
+    @staticmethod
+    def _slot_chunks(raw):
+        """[(slot number, the text owo drew in it)] for a card that numbers its slots.
+
+        Each chunk stops at the first newline because `get_full_content` renders a field
+        as "name: value" on one line - the animal is in the name, and everything after
+        it is stats and weapons.
+        """
+        marks = list(TEAM_SLOT_RE.finditer(raw))
+        chunks = []
+        for i, mark in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(raw)
+            chunks.append((int(mark.group(1)), raw[mark.end():end].split('\n', 1)[0]))
+        return chunks
 
     def _weakest_team_rank(self):
         if not self._team:
@@ -650,22 +827,50 @@ class Others(commands.Cog):
         cfg = self._team_cfg()
         if not cfg.get('enabled', True):
             return
-        cooldown = max(20, int(cfg.get('min_action_gap_s', 45) or 45))
-        if time.time() - self._last_team_action < cooldown:
+        now = time.time()
+        if now < self._team_busy_until:
+            # swaps from the last plan are still queued; the team card we would read
+            # now is the one before them
             return
-        self._last_team_action = time.time()
+        if now < self._team_retry_after:
+            return
+        cooldown = max(20, int(cfg.get('min_action_gap_s', 45) or 45))
+        if now - self._last_team_action < cooldown:
+            return
+        self._last_team_action = now
         self.zoo = True
         self._want_team_check = True
         await self.bot.neura_enqueue("zoo", priority=3, _cmd_id="zoo")
         if reason:
             self.bot.log("TEAM", f"Checking the zoo for a better team ({reason})")
 
+    def _add_command(self, animal, slot):
+        """`owo team add <animal> <position>`, whatever the configured template says.
+
+        The position is not optional: owo answers a positionless add on a full team with
+        "Your team is full! Please specify a position with `owo team add {animal}
+        {position}`!", and the template this ships with used to omit it - so on every
+        farmer that already had a team, every single add was refused and the team never
+        changed. Old per-account overrides still carry that template, which is why the
+        position is appended here rather than only fixed in the defaults.
+        """
+        template = str(self._team_cfg().get('add_template') or 'team add {animal} {pos}')
+        template = template.replace('{slot}', '{pos}')
+        if '{pos}' not in template:
+            template = f"{template} {{pos}}"
+        if '{animal}' not in template:
+            template = 'team add {animal} {pos}'
+        return template.format(animal=animal, pos=slot)
+
     async def _apply_team_upgrade(self, current):
         """Swap the weakest team slots for the rarest animals we own."""
         cfg = self._team_cfg()
         slots = max(1, int(cfg.get('slots', 3) or 3))
-        add_template = cfg.get('add_template', 'team add {animal}')
-        remove_template = cfg.get('remove_template', 'team remove {slot}')
+
+        if time.time() < self._team_busy_until or time.time() < self._team_retry_after:
+            # a plan is still going out, or the last one was not applied and we are
+            # sitting out the backoff. Either way, re-issuing it now is the churn.
+            return
 
         owned = [(animal, rank) for animal, rank in self._owned]
         if not owned:
@@ -696,46 +901,60 @@ class Others(commands.Cog):
                 )
                 return
 
-        free_slots = [i + 1 for i, animal in enumerate(current) if animal not in keep]
-        free_slots += list(range(len(current) + 1, slots + 1))
+        # weakest slot first, so a plan that only gets halfway still traded up
+        order = sorted(
+            (i + 1 for i, animal in enumerate(current) if animal not in keep),
+            key=lambda slot: self.rank_of(current[slot - 1])
+        )
+        free_slots = order + list(range(len(current) + 1, slots + 1))
 
-        replaced = [
-            animal for i, animal in enumerate(current)
-            if (i + 1) in free_slots and animal
-        ]
-
-        # drop the weak ones from the highest slot down so the lower indexes stay valid
-        for slot in sorted([s for s in free_slots if s <= len(current)], reverse=True):
-            await self.bot.neura_enqueue(remove_template.format(slot=slot), priority=3)
-
-        added = []
+        added, replaced = [], []
         for animal, slot in zip(missing, free_slots):
-            await self.bot.neura_enqueue(add_template.format(animal=animal, slot=slot), priority=3)
+            # an add *with* a position overwrites that slot, so there is nothing to
+            # remove first. The old remove-then-add pass emptied the team before
+            # refilling it, which is what left farmers with fewer animals than they
+            # started with whenever an add went missing.
+            await self.bot.neura_enqueue(self._add_command(animal, slot), priority=3)
             added.append(animal)
+            if slot <= len(current):
+                replaced.append(f"{current[slot - 1]} in slot {slot}")
             self.bot.log(
                 "TEAM",
                 f"Team slot {slot}: adding {animal} ({RANK_NAMES.get(self.rank_of(animal), 'unknown')})"
             )
 
         if replaced:
-            self.bot.log("TEAM", f"Dropped {', '.join(replaced)} for rarer animals")
+            self.bot.log("TEAM", f"Replacing {', '.join(replaced)} with rarer animals")
+
+        # hold off every other team read until these have actually gone out. Measured
+        # against a live ten-account deploy the queue puts ~15-20s between two
+        # priority-3 commands.
+        self._team_plan = added
+        self._team_busy_until = time.time() + 25 * len(added) + 30
+        self._team_verify_until = self._team_busy_until + 1800
 
         # remember what the team should look like so the zoo watcher has something to
         # compare a fresh catch against before the next full scan
         self._team = (keep + added)[:slots]
 
     def _animals_in(self, raw, content):
-        """Animal names a hunt result mentions, by emoji or by name."""
+        """Animal names a hunt result mentions, by emoji or by name.
+
+        Filtered to animals we can rank, because the caller feeds these straight into
+        rank lookups: a hunt that also dropped a gem carries `<:egem3:...>`, and an
+        unfiltered sweep reported that as the catch.
+        """
         names = set()
         for name in CUSTOM_EMOJI_RE.findall(raw):
-            names.add(name.lower())
+            if self._known_animal(name):
+                names.add(name.lower())
         for token in ZOO_TOKEN_RE.finditer(raw):
             # covers unicode glyphs AND the ":shortcode:" text owo actually sends -
             # without the shortcode branch a hunt drawn that way named no animal at
             # all, so the watcher fell back to the tier hint and missed every catch
             # whose tier word owo did not spell out
             known = animal_from_token(token.group('emoji'))
-            if known:
+            if known and self._known_animal(known):
                 names.add(known)
         for word in re.findall(r'\*\*\s*([a-z][a-z_\- ]{1,20})\s*\*\*', content):
             candidate = word.strip()
@@ -753,11 +972,22 @@ class Others(commands.Cog):
         if not cfg.get('enabled', True) or not cfg.get('watch_zoo', True):
             return
 
+        # the swaps from the last plan have gone out by now - read the team back so we
+        # know whether owo actually applied them
+        if self._team_plan and time.time() >= self._team_busy_until:
+            if time.time() >= self._team_verify_until:
+                # no readable team card came back inside the window; stop asking for one
+                # rather than turning the watcher into a zoo-read loop
+                self._team_plan = []
+            else:
+                await self.request_team_check("confirming the last team change")
+                return
+
         slots = max(1, int(cfg.get('slots', 3) or 3))
         weakest = self._weakest_team_rank()
         # owo prints the rarity next to the catch, which covers animals we have
         # never seen and therefore cannot rank ourselves
-        tier_hint = next((rank for word, rank in RARITY_RANK if word in content), -1)
+        tier_hint = next((rank for pattern, rank in TIER_WORD_RE if pattern.search(content)), -1)
 
         best_rank, best_name = -1, None
         for name in self._animals_in(message.content or "", content):
@@ -802,14 +1032,113 @@ class Others(commands.Cog):
             await self.bot.neura_enqueue("team", priority=3, _cmd_id="team")
 
     async def _handle_team(self, raw):
+        if any(phrase in raw.lower() for phrase in BATTLE_CARD_PHRASES):
+            # a battle result, not the team card we asked for. Leave _want_team_check
+            # set so the real reply is still read when it arrives.
+            return
         self._want_team_check = False
-        current = self.parse_team(raw)
+        current, unknown, blank = self.parse_team(raw)
+
+        if blank:
+            # a slot holds something we cannot name - a renamed animal, or an emoji we
+            # have no mapping for. Overwriting it could trade a rarer animal for a
+            # commoner one, so the only safe move is to leave the whole team alone.
+            self._team_plan = []
+            self._team_retry_after = max(self._team_retry_after, time.time() + 1800)
+            if time.time() - self._team_unreadable_warned > 900:
+                self._team_unreadable_warned = time.time()
+                slot_list = ", ".join(str(s) for s in blank)
+                self.bot.log(
+                    "WARN",
+                    f"Team slot {slot_list} holds something we could not identify "
+                    f"({', '.join(unknown[:6]) or 'no emoji on the card'}) - team left alone"
+                )
+            return
+
+        # did owo apply the swaps we asked for last time?
+        plan, self._team_plan = self._team_plan, []
+        if plan:
+            landed = [animal for animal in plan if animal in current]
+            if landed:
+                self._team_fail_streak = 0
+            else:
+                self._team_fail_streak += 1
+                # back off instead of re-issuing a plan owo is not taking. Doubling from
+                # 10 minutes caps at ~2.5h, so a card we can never act on costs a
+                # handful of reads a day rather than six commands every two minutes.
+                wait = min(9000, 600 * (2 ** (self._team_fail_streak - 1)))
+                self._team_retry_after = time.time() + wait
+                self.bot.log(
+                    "WARN",
+                    f"Team change did not stick ({', '.join(plan)} still not on the team) - "
+                    f"retrying in {wait // 60}m"
+                )
+
+        if not current and unknown:
+            # emoji on the card, none of them an animal we own: this is a card we
+            # cannot read, not an empty team. Keep the last known team and say so,
+            # because acting on it means removing three slots and re-adding the same
+            # three animals on every scan, forever.
+            self._team_retry_after = max(self._team_retry_after, time.time() + 1800)
+            if time.time() - self._team_unreadable_warned > 900:
+                self._team_unreadable_warned = time.time()
+                self.bot.log(
+                    "WARN",
+                    f"Could not tell which animals are on the battle team - team left "
+                    f"alone. Unrecognised: {', '.join(unknown[:8])}"
+                )
+            return
+
         self._team = current
         self.bot.log("TEAM", f"Current team: {', '.join(current) if current else 'empty'}")
         await self._apply_team_upgrade(current)
+        await self._tell_weapons(self._team or [animal for animal, _r in self._owned[:3]])
+
+    async def _tell_weapons(self, team):
+        """Hand the roster to the weapon manager, and re-arm when it changed.
+
+        A swapped-in animal arrives with no weapon, so a roster change is exactly when
+        a weapon pass is worth a command - otherwise the new animal fights bare until
+        the hourly scan comes round.
+        """
         weapons = self.bot.get_cog('Weapons')
-        if weapons:
-            weapons.note_team(self._team or [animal for animal, _r in self._owned[:3]])
+        if not weapons:
+            return
+        if weapons.note_team(team):
+            await weapons.request_weapon_check("team changed")
+
+    async def _handle_team_reply(self, content):
+        """The one-line answer to a `team add` - proof it landed, and the new team.
+
+        owo re-lists the whole team in that reply ("Your team: [1]<a:gsquid:...>
+        [2]:whale:"), so this both confirms the swap and reads the team back without
+        spending another command on `owo team`.
+        """
+        if any(phrase in content for phrase in TEAM_POSITION_PHRASES):
+            # only reachable from a hand-edited add_template now
+            self._team_plan = []
+            self._team_busy_until = 0.0
+            self._team_retry_after = max(self._team_retry_after, time.time() + 900)
+            self.bot.log(
+                "WARN",
+                "OwO refused the team change: `team add` needs a position. Reset "
+                "commands.team.add_template to `team add {animal} {pos}`"
+            )
+            return
+
+        current, _unknown, blank = self.parse_team(content)
+        if blank or not current:
+            return
+        landed = [animal for animal in self._team_plan if animal in current]
+        self._team = current
+        if landed:
+            self._team_fail_streak = 0
+            self._team_plan = [a for a in self._team_plan if a not in current]
+            self.bot.log("TEAM", f"OwO confirmed the team: {', '.join(current)}")
+        if not self._team_plan:
+            # everything we asked for is on the team; stop holding the next scan off
+            self._team_busy_until = min(self._team_busy_until, time.time() + 5)
+            await self._tell_weapons(self._team)
 
     async def _auto_accept_rules(self, message):
         all_channels = [str(c) for c in self.bot.channels]
@@ -834,12 +1163,7 @@ class Others(commands.Cog):
 
     def _v2_is_mine(self, full_text):
         """components v2 messages are invisible to discord.py-self, so match by name."""
-        if f"<@{self.bot.user.id}>" in full_text or f"<@!{self.bot.user.id}>" in full_text:
-            return True
-        idents = {self.bot.user.name.lower(), (self.bot.display_name or "").lower()}
-        for ident in getattr(self.bot, 'identifiers', []):
-            idents.add(ident.replace("<@", "").replace("!", "").replace(">", "").lower())
-        return any(ident and len(ident) >= 2 and ident in full_text for ident in idents)
+        return self.bot.identity.text_is_mine(full_text)
 
     def _seen_v2(self, data):
         """True the second time the same v2 message reaches us (owo edits its cards)."""
@@ -927,6 +1251,12 @@ class Others(commands.Cog):
                 await self._handle_team(raw_text)
                 return
 
+            if any(phrase in content for phrase in TEAM_UPDATED_PHRASES + TEAM_POSITION_PHRASES):
+                if self._seen_v2(data):
+                    return
+                await self._handle_team_reply(content)
+                return
+
             if time.time() <= self._want_level_until:
                 level, xp, xp_needed = parse_level_xp(content)
                 if level is not None or xp is not None:
@@ -987,8 +1317,17 @@ class Others(commands.Cog):
                 pass
             return
 
+        if any(phrase in content for phrase in TEAM_UPDATED_PHRASES + TEAM_POSITION_PHRASES):
+            # the answer to our own `team add`, which re-lists the team - so the swap is
+            # confirmed (or refused) from the reply itself, not from a later re-read
+            if self.bot.is_message_for_me(message):
+                await self._handle_team_reply(content)
+            return
+
         if any(phrase in content for phrase in BAD_ANIMAL_PHRASES) and "team" in content:
             self.bot.log("WARN", f"OwO rejected a team change: {content.splitlines()[0][:120]}")
+            self._team_plan = []
+            self._team_busy_until = 0.0
             return
 
         level, xp, xp_needed = parse_level_xp(content)
@@ -1021,6 +1360,14 @@ class Others(commands.Cog):
 
         if any(phrase in content for phrase in NO_TEAM_PHRASES):
             if not self.bot.is_message_for_me(message):
+                return
+            if self._want_team_check:
+                # this *is* the answer to the `owo team` we asked for. Route it through
+                # the team handler so an account with no team gets one built: the branch
+                # below only ever re-read the zoo, and because "battle team" appears in
+                # this very phrase the real team branch further down was never reached,
+                # so a team-less account asked the same question forever.
+                await self._handle_team(content)
                 return
             if time.time() - self._team_setup_at < 60:
                 return
