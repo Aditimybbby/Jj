@@ -191,7 +191,7 @@
             "slots": 3,
             "watch_zoo": true,
             "min_action_gap_s": 45,
-            "add_template": "team add {animal}",
+            "add_template": "team add {animal} {pos}",
             "remove_template": "team remove {slot}"
         },
         "weapon": {
@@ -199,7 +199,7 @@
             "check_interval_min": 60,
             "slots": 3,
             "list_command": "weapon",
-            "equip_template": "weapon equip {weapon} {slot}"
+            "equip_template": "equip {weapon} {pos}"
         },
         "custom": {
             "enabled": false,
