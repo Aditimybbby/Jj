@@ -85,10 +85,15 @@
         </div>
     </div>
 
-    <!-- ═══ Mobile sidebar overlay ═══ -->
-    <div class="sidebar-overlay" onclick="toggleMobileMenu()"></div>
-
     <div class="app-shell">
+        <!-- ═══ Mobile sidebar overlay ═══
+             Must live *inside* .app-shell, right before the sidebar: .app-shell is a
+             stacking context (position:relative + z-index:1), so the drawer's z-index
+             only outranks this scrim while both sit in that same context. As a child of
+             <body> the scrim painted above the whole shell instead - blurring and dimming
+             the open drawer, and swallowing every tap meant for a nav item. -->
+        <div class="sidebar-overlay" onclick="toggleMobileMenu()"></div>
+
         <!-- ═══ Icon-rail sidebar (collapses to 72px, expands to 248px on hover) ═══ -->
         <aside class="sidebar">
             <div class="brand">
