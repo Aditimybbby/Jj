@@ -117,12 +117,38 @@ async def _run(bot):
     finally:
         if bot in state.bot_instances:
             state.bot_instances.remove(bot)
+        _release_captcha_hold(bot)
         session = getattr(bot, 'session', None)
         if session is not None and not session.closed:
             try:
                 await session.close()
             except Exception:
                 pass
+
+
+def _release_captcha_hold(bot):
+    """Withdraw anything this account still holds in the captcha machinery.
+
+    A pending challenge is a claim that this account is waiting on a human right now.
+    Once the bot is gone nothing can solve for it, so leaving the claim behind put a
+    permanent entry in the dashboard's notification bell whose Solve button could only
+    ever answer "that account is not running" - and left the single manual-solve slot
+    held against every other account.
+    """
+    user = getattr(bot, 'user', None)
+    bot_id = str(user.id) if user else None
+    if not bot_id:
+        return
+    try:
+        from modules.web_solver import WebSolver
+        WebSolver.abandon_manual_solve(bot_id)
+    except Exception:
+        pass
+    try:
+        from dashboard.app import clear_captcha_challenge
+        clear_captcha_challenge(bot_id)
+    except Exception:
+        pass
 
 
 async def stop_account(owner, name):
@@ -159,6 +185,7 @@ async def stop_account(owner, name):
     # The runner's finally block also removes the bot; guard the double remove.
     if bot in state.bot_instances:
         state.bot_instances.remove(bot)
+    _release_captcha_hold(bot)
 
     # Belt and suspenders: cancel any stray background workers the bot spawned
     # (_track_active_time, _process_pending_commands, neura_queue_worker,

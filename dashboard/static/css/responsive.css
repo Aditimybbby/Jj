@@ -60,7 +60,10 @@
     /* trimmed to leave room for the close button pinned at the row's right edge -
        at the desktop size the wordmark ran underneath it */
     .sidebar .brand-main { font-size: 1em; letter-spacing: 1px; }
-    .sidebar .brand-sub { font-size: 0.7em; letter-spacing: 1.5px; }
+    /* min-width/overflow are the safety net: on a short phone the drawer grows a
+       scrollbar, which narrows the row by ~9px - without them the wordmark would
+       creep under the close button instead of clipping */
+    .sidebar .brand-sub { font-size: 0.7em; letter-spacing: 1px; min-width: 0; overflow: hidden; }
     .sidebar .status-indicator { font-size: 0.78rem !important; }
     .sidebar .space-label { font-size: 0.72rem !important; }
     .sidebar .version { font-size: 0.72rem !important; }

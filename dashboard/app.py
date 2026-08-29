@@ -1774,15 +1774,72 @@ def custom_commands_api():
 
 _pending_captchas = {}
 
+# A pending challenge is a claim that one account is sitting on an unsolved captcha
+# *right now*. Nothing used to withdraw that claim except an actual solve, so stopping
+# an account - or OwO dropping the captcha on its own - left the entry in the
+# notification bell forever, and every Solve button on it answered "Bot not found",
+# which the UI renders as "Failed to get captcha URL".
+CAPTCHA_TTL_S = int(os.environ.get('LAZYFARMERS_CAPTCHA_TTL', str(15 * 60)))
+# some detection paths register the challenge a moment before they pause the account,
+# so never judge an entry by the bot's run state inside this window
+CAPTCHA_LIVENESS_GRACE_S = 30
+
+
+def _live_bot_for_account(account_id):
+    """Find a running bot by discord id, ignoring spaces (used for liveness only)."""
+    for inst in list(state.bot_instances):
+        if inst.user and str(inst.user.id) == str(account_id):
+            return inst
+    return None
+
+
+def _captcha_still_real(account_id, challenge):
+    """(keep?, why-not) - is this pending challenge still something a human can solve?"""
+    age = time.time() - (challenge.get('created_at') or 0)
+    if age > CAPTCHA_TTL_S:
+        return False, 'expired'
+    bot = _live_bot_for_account(account_id)
+    if bot is None:
+        # the account was stopped: nothing can solve for it, so it must not keep
+        # offering a Solve button that can only fail
+        return False, 'account not running'
+    if age < CAPTCHA_LIVENESS_GRACE_S:
+        return True, ''
+    blocked = (bool(bot.paused)
+               or (getattr(bot, 'throttle_until', 0) or 0) > time.time()
+               or getattr(bot, '_solving_captcha', False))
+    if not blocked:
+        # the account is farming again, so whatever the captcha was, it is over
+        return False, 'account already resumed'
+    return True, ''
+
+
+def _reap_stale_captchas():
+    """Drop pending challenges that no longer describe reality. Returns removed ids."""
+    removed = []
+    for acc_id, challenge in list(_pending_captchas.items()):
+        keep, why = _captcha_still_real(acc_id, challenge)
+        if keep:
+            continue
+        _pending_captchas.pop(acc_id, None)
+        removed.append(acc_id)
+        state.log_command("SEC", f"Captcha challenge dropped for account {acc_id} ({why})",
+                          "info", owner=state.owner_of(acc_id))
+    return removed
+
+
 @app.route('/api/captcha_challenge', methods=['GET'])
 @space_required
 def get_captcha_challenge():
     """Get pending captcha challenges for dashboard display."""
+    _reap_stale_captchas()
     account_id = request.args.get('account_id', type=str)
-    if account_id and account_id in _pending_captchas:
-        if not owns_account(account_id, g.owner):
+    if account_id:
+        # an explicit id must never fall through to somebody else's challenge - the
+        # answer would be submitted against the wrong account
+        challenge = _pending_captchas.get(account_id)
+        if not challenge or not owns_account(account_id, g.owner):
             return jsonify({'success': False, 'message': 'No captcha pending'})
-        challenge = _pending_captchas[account_id]
         return jsonify({'success': True, 'challenge': challenge})
 
     for acc_id, challenge in _pending_captchas.items():
@@ -1794,10 +1851,15 @@ def get_captcha_challenge():
 @app.route('/api/captcha_solve', methods=['POST'])
 @space_required
 def submit_captcha_solution():
-    """Submit hCaptcha solution from dashboard."""
-    import socket
-    import requests
+    """Submit an hCaptcha token solved in the dashboard.
 
+    owobot's /api/captcha/verify authenticates the *session*, not the Discord token.
+    This route used to POST the token with nothing but `Authorization: <discord token>`
+    and no owobot cookie at all, which owobot answers 401 - so the Solve box could never
+    succeed, for any account, with any token. The verify now runs through
+    WebSolver.submit_manual_token on the bot loop, which performs the same Discord OAuth
+    handshake modules/web_solver.py already proves works before posting.
+    """
     data = _payload()
     account_id = data.get('account_id', '')
     token = data.get('token', '')
@@ -1807,46 +1869,35 @@ def submit_captcha_solution():
 
     bot = get_bot(account_id, g.owner)
     if not bot:
-        return jsonify({'success': False, 'error': 'Bot not found'})
-    
-    _original_getaddrinfo = socket.getaddrinfo
-    
-    def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        if host == 'owobot.com':
+        # a Solve button on a challenge whose account is gone: withdraw the challenge
+        # instead of leaving it in the bell to fail again
+        _reap_stale_captchas()
+        return jsonify({'success': False,
+                        'error': 'That account is not running any more - the captcha '
+                                 'notification has been cleared.'})
 
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.21.35.189', port))]
-        return _original_getaddrinfo(host, port, family, type, proto, flags)
-    
-    socket.getaddrinfo = patched_getaddrinfo
-    
-    headers = {
-        "Authorization": bot.token,
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    payload = {"token": token}
-    
-    try:
-        verify_url = "https://owobot.com/api/captcha/verify"
-        response = requests.post(verify_url, json=payload, headers=headers, verify=False, timeout=10)
-        
-        socket.getaddrinfo = _original_getaddrinfo
-        
-        if response.status_code == 200:
-            from modules.web_solver import WebSolver
-            WebSolver.mark_verification_done(account_id)
-            clear_captcha_challenge(account_id)
-            state.log_command("SEC", f"Captcha verified for account {account_id}", "success",
-                              owner=g.owner)
-            return jsonify({'success': True, 'message': 'Captcha verified successfully'})
+    outcome, loop_error = _bot_loop_call(bot.web_solver.submit_manual_token(token), timeout=90)
+    if loop_error:
+        return jsonify({'success': False, 'error': loop_error}), 503
+    ok, detail = outcome
+
+    if ok:
+        security_cog = bot.get_cog('Security')
+        if security_cog:
+            # one chokepoint unpauses, clears the challenge, resolves the manual-solve
+            # future and notifies - same as a DM confirmation
+            _bot_loop_fire(_resume_account(security_cog,
+                                           "Captcha solved from the dashboard."))
         else:
-            state.log_command("SEC", f"Captcha verification failed: {response.text}", "error",
-                              owner=g.owner)
-            return jsonify({'success': False, 'error': 'Invalid captcha token'})
-    except Exception as e:
-        socket.getaddrinfo = _original_getaddrinfo
-        state.log_command("SEC", f"Verification error: {e}", "error", owner=g.owner)
-        return jsonify({'success': False, 'error': str(e)})
+            from modules.web_solver import WebSolver
+            WebSolver.mark_verification_done(str(account_id))
+            clear_captcha_challenge(str(account_id))
+        state.log_command("SEC", f"Captcha verified for account {account_id}", "success",
+                          owner=g.owner)
+        return jsonify({'success': True, 'message': 'Captcha verified successfully'})
+
+    state.log_command("SEC", f"Captcha verification failed: {detail}", "error", owner=g.owner)
+    return jsonify({'success': False, 'error': detail or 'owobot rejected the captcha token'})
 
 
 @app.route('/api/captcha/oauth_url', methods=['POST'])
@@ -1864,7 +1915,10 @@ def captcha_oauth_url():
 
     bot = get_bot(account_id, g.owner)
     if not bot:
-        return jsonify({'success': False, 'error': 'Bot not found'})
+        _reap_stale_captchas()
+        return jsonify({'success': False,
+                        'error': 'That account is not running any more - the captcha '
+                                 'notification has been cleared.'})
 
     import aiohttp
 
@@ -1918,7 +1972,10 @@ def captcha_browser_solve():
 
     bot = get_bot(account_id, g.owner)
     if not bot:
-        return jsonify({'success': False, 'error': 'Bot not found'})
+        _reap_stale_captchas()
+        return jsonify({'success': False,
+                        'error': 'That account is not running any more - the captcha '
+                                 'notification has been cleared.'})
 
     solver = getattr(bot, 'browser_solver', None)
     if solver is None:
@@ -1942,8 +1999,12 @@ def captcha_browser_solve():
 
     if result.get('ok'):
         # tear down everything the captcha did to the account, same as a DM confirmation
+        how = result.get('how')
         if security_cog:
-            _bot_loop_fire(_resume_account(security_cog, result.get('how')))
+            _bot_loop_fire(_resume_account(
+                security_cog,
+                "OwO says this account is verified." if how in ('cleared', 'not-required')
+                else "Captcha solved in the browser."))
         else:
             from modules.web_solver import WebSolver
             WebSolver.mark_verification_done(str(account_id))
@@ -1956,16 +2017,17 @@ def captcha_browser_solve():
                     'challenge': result.get('challenge')})
 
 
-async def _resume_account(security_cog, how):
+async def _resume_account(security_cog, why):
     """Call the Security cog's resume on the bot loop (it touches bot state)."""
-    security_cog._resume_after_solve(
-        "Captcha solved in the browser." if how not in ('cleared', 'not-required')
-        else "OwO says this account is verified.")
+    security_cog._resume_after_solve(why)
 
 
 @app.route('/api/captcha/pending', methods=['GET'])
 @space_required
 def pending_captchas():
+    # the bell polls this every 2s, which makes it the natural place to notice that a
+    # challenge has stopped being real
+    _reap_stale_captchas()
     pending = []
     for acc_id, challenge in _pending_captchas.items():
         if not owns_account(acc_id, g.owner):

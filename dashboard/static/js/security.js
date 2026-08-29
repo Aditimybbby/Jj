@@ -391,7 +391,13 @@ window.triggerManualSolve = async function(accountId) {
         });
         const data = await res.json();
         if (!data.success || !data.url) {
-            showToast('Failed to get captcha URL', 'error');
+            // the server says *why* (stopped account, Discord refused the grant, ...);
+            // this used to always read "Failed to get captcha URL", which is what an
+            // operator reports as "it says url not found"
+            showToast(data.error || 'Could not open the captcha for this account', 'error');
+            // a stale notification is withdrawn server-side on that same call, so
+            // refresh the bell instead of leaving the dead entry on screen
+            updatePendingCaptchas();
             return;
         }
         const popup = window.open(data.url, '_blank', 'width=420,height=600,resizable=yes,scrollbars=yes');
@@ -563,6 +569,9 @@ window.submitEmbeddedCaptcha = async function(token) {
             closeEmbeddedCaptcha();
         } else {
             showToast(d.error || 'Captcha rejected', 'error');
+            // the server withdraws a challenge whose account has gone away, so resync
+            // rather than leaving a card that can never succeed
+            updatePendingCaptchas();
             reloadEmbeddedCaptcha();
         }
     } catch (e) {
