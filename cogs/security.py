@@ -100,6 +100,14 @@ class Security(commands.Cog):
         # "captcha solved" is what state.log_command counts, so keep that wording
         self.bot.log("SUCCESS", f"{why} Resuming...")
         self.bot.log("INFO", "All cooldowns reset. Bot will resume in 2 seconds...")
+        # A captcha only ever notified on *detection*. With auto-solving on, the operator
+        # got an @everyone alarm and then silence, with no way to tell a solved captcha
+        # from one still sitting there - which is what "not notifying for solved captchas"
+        # is. Every solve path funnels through here, so one notification here covers all
+        # of them and cannot double up.
+        self._show_desktop_notification(f"Captcha solved for {self.bot.username} - farming again.")
+        self._send_webhook("CAPTCHA SOLVED", f"{why}\n{self.bot.username} is farming again.",
+                           color=0x3BA55D, mention=False)
 
     async def _run_autosolve(self, sol_cfg, where=""):
         """Every way we can clear a captcha without a human, in order. True if cleared.
@@ -119,9 +127,9 @@ class Security(commands.Cog):
                 paid_ok = False
                 self.bot.log("ERROR", f"{service_name} auto-solve crashed{suffix}: {e}")
             if paid_ok:
-                # only _resume_after_solve logs the success - a second "captcha solved"
-                # line here would double-count captchas_solved in state.log_command
-                self._show_desktop_notification(f"{service_name} solved successfully!")
+                # only _resume_after_solve reports the success - it logs the line
+                # state.log_command counts and fires the solved notification, so a
+                # second one here would double-count and double-notify
                 self._resume_after_solve(f"{service_name} cleared the captcha.")
                 return True
             # no "solve manually" notification yet - the free browser path is next
@@ -146,7 +154,6 @@ class Security(commands.Cog):
             if how in ("not-required", "cleared"):
                 self._resume_after_solve("OwO says this account is verified.")
             else:
-                self._show_desktop_notification("Captcha solved in the browser!")
                 self._resume_after_solve("Browser solver cleared the captcha.")
             return True
         self.bot.log("ERROR", f"Browser solve failed{suffix}: {result.get('reason')}")
@@ -173,7 +180,6 @@ class Security(commands.Cog):
         self.enabled = cfg.get('enabled', True)
         self.notifications_enabled = cfg.get('notifications', {}).get('enabled', True)
         self.notification_title = cfg.get('notifications', {}).get('desktop', {}).get('title', "Lazy Farmers Security Alert")
-        self.webhook_url = cfg.get('webhook_url')
         self.monitor_id = str(bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
         self.beep_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "beeps", "security_beep.mp3")
         self.ban_keywords = [
@@ -210,7 +216,6 @@ class Security(commands.Cog):
         self.enabled = cfg.get('enabled', True)
         self.notifications_enabled = cfg.get('notifications', {}).get('enabled', True)
         self.notification_title = cfg.get('notifications', {}).get('desktop', {}).get('title', "Lazy Farmers Security Alert")
-        self.webhook_url = cfg.get('webhook_url')
         self.monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
         self.bot.log("SYS", "Security Module settings refreshed (Live Sync).")
 
@@ -253,18 +258,18 @@ class Security(commands.Cog):
             except:
                 pass
 
-    def _send_webhook(self, title, message):
+    def _send_webhook(self, title, message, color=0xFF3B3B, mention=True):
         cfg = self.bot.config.get('security', {})
         wh_cfg = cfg.get('webhook', {})
         if not wh_cfg.get('enabled', True): return
         url = wh_cfg.get('url')
         if not url: return
         payload = {
-            "content": "@everyone @here",
+            "content": "@everyone @here" if mention else "",
             "embeds": [{
                 "title": title,
                 "description": message,
-                "color": 0xFF3B3B,
+                "color": color,
                 "author": {
                     "name": f"Lazy Farmers Security - {self.bot.username}",
                     "icon_url": "https://media.discordapp.net/attachments/1357951011456684252/1524069544401047773/neuralogo.png?ex=6a4e67df&is=6a4d165f&hm=21deba052462f712808661dc8aac4204eecb781cfcaa1ff189861b79c7db0c92"
@@ -273,10 +278,14 @@ class Security(commands.Cog):
                 "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S')
             }]
         }
-        try:
-            requests.post(url, json=payload, timeout=5)
-        except:
-            pass
+        # off the event loop: this runs from on_message, and a webhook host that hangs
+        # would stall every account's scheduler for the full timeout
+        def _post():
+            try:
+                requests.post(url, json=payload, timeout=5)
+            except Exception:
+                pass
+        threading.Thread(target=_post, daemon=True).start()
 
     async def play_beep(self):
         def _play():

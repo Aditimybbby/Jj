@@ -34,6 +34,26 @@ class WebSolver:
     _processor_task = None
     _verification_futures = {}
 
+    # owobot.com must never see the account's Discord token. It used to be set as a
+    # session-wide header, and aiohttp sends session headers to *every* host - so each
+    # owobot request carried it. That is both a leak of the credential that owns the
+    # Discord account and a plausible reason for owobot to reject its own session check
+    # ("Auth session check failed"), after which the captcha is never solved no matter
+    # which paid service is configured. The token now goes to discord.com only.
+    BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    OAUTH_PAYLOAD = {
+        "authorize": True,
+        "permissions": "0",
+        "integration_type": 0,
+        "location_context": {"guild_id": "10000", "channel_id": "10000",
+                             "channel_type": 10000},
+    }
+    VERIFY_URL = "https://owobot.com/api/captcha/verify"
+    # matches dashboard.app.CAPTCHA_TTL_S - past this a pending captcha is not something
+    # a human is still working on, and holding the queue for it only hurts the rest
+    MANUAL_SOLVE_TIMEOUT_S = 15 * 60
+
     def __init__(self, bot):
         self.bot = bot
         self.site_key = "a6a1d5ce-612d-472d-8e37-7601408fbc09"
@@ -68,6 +88,105 @@ class WebSolver:
         self._reload_service()
         return await self.service.solve_hcaptcha(retries)
 
+    async def _open_owobot_session(self):
+        """(session, error) - an aiohttp session holding a logged-in owobot cookie.
+
+        This handshake is what /api/captcha/verify actually authenticates: it checks
+        owobot's own session cookie, not the Discord token. Discord mints the redirect,
+        GETting that redirect is what sets the cookie on this session, and /api/auth
+        confirms owobot accepted it. Caller owns the returned session and must close it.
+        """
+        session = aiohttp.ClientSession(headers={"User-Agent": self.BROWSER_UA})
+        try:
+            async with session.post(
+                self.auth_url,
+                json=self.OAUTH_PAYLOAD,
+                headers={"Authorization": self.bot.token,
+                         "Content-Type": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    body = (await resp.text())[:200]
+                    await session.close()
+                    # this used to return False with no log at all, so a rejected token
+                    # or a rate-limited OAuth looked like "the solver failed" with
+                    # nothing to act on
+                    return None, (f"Discord refused the owobot OAuth grant "
+                                  f"(HTTP {resp.status}): {body}")
+                redirect_url = (await resp.json()).get("location")
+
+            if not redirect_url:
+                await session.close()
+                return None, "Discord returned no owobot redirect for this account."
+
+            async with session.get(redirect_url) as r:
+                if r.status >= 400:
+                    await session.close()
+                    return None, f"owobot rejected the OAuth redirect (HTTP {r.status})."
+
+            async with session.get("https://owobot.com/captcha") as captcha_resp:
+                if captcha_resp.status != 200:
+                    await session.close()
+                    return None, (f"Could not open owobot's captcha page "
+                                  f"(HTTP {captcha_resp.status}).")
+
+            async with session.get("https://owobot.com/api/auth") as auth_check:
+                if auth_check.status != 200:
+                    await session.close()
+                    return None, (f"owobot did not accept the session "
+                                  f"(HTTP {auth_check.status}) - authorise owobot once "
+                                  f"for this account in a browser and retry.")
+            return session, ""
+        except Exception as e:
+            await session.close()
+            return None, f"{type(e).__name__}: {e}"
+
+    async def _post_verify(self, session, solution):
+        """(ok, detail) - hand one hcaptcha token to owobot on an authenticated session."""
+        verify_headers = {
+            "Referer": "https://owobot.com/captcha",
+            "Origin": "https://owobot.com",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+        }
+        async with session.post(self.VERIFY_URL, json={"token": solution},
+                                headers=verify_headers) as verify_resp:
+            if verify_resp.status == 200:
+                return True, ""
+            body = (await verify_resp.text())[:200]
+            return False, (f"owobot rejected the captcha token "
+                           f"(HTTP {verify_resp.status}): {body}")
+
+    async def submit_manual_token(self, solution):
+        """(ok, detail) - verify an hcaptcha token this account did not solve itself.
+
+        The dashboard's Solve box used to POST straight at /api/captcha/verify carrying
+        only the Discord token and no owobot cookie, which owobot answers 401 - so it
+        could never succeed, for any account, with any token. Reuse the one handshake
+        that is known to work.
+        """
+        if not solution:
+            return False, "No captcha token was supplied."
+        session, error = await self._open_owobot_session()
+        if session is None:
+            self.bot.log("ERROR", f"Dashboard captcha verify could not sign in to "
+                                  f"owobot: {error}")
+            return False, error
+        try:
+            ok, detail = await self._post_verify(session, solution)
+        except Exception as e:
+            self.bot.log("ERROR", f"Dashboard captcha verify failed: {e}")
+            return False, f"{type(e).__name__}: {e}"
+        finally:
+            await session.close()
+        if ok:
+            # deliberately not SUCCESS: state.log_command counts any SUCCESS line
+            # containing "verified"/"resuming" as a solved captcha, and
+            # Security._resume_after_solve is the one place that logs it
+            self.bot.log("INFO", "owobot accepted the captcha token from the dashboard.")
+        else:
+            self.bot.log("ERROR", detail)
+        return ok, detail
+
     async def auto_verify(self, tries=3):
         self._reload_service()
         if not self.active_key and self.active_service_name != 'nopecha':
@@ -89,73 +208,29 @@ class WebSolver:
             self.bot.log("WARN", f"{self.active_service_name.capitalize()} balance could not "
                                  f"be read - attempting the solve anyway.")
 
-        headers = {
-            "Authorization": self.bot.token,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        session, error = await self._open_owobot_session()
+        if session is None:
+            self.bot.log("ERROR", f"Auto-verification could not sign in to owobot: {error}")
+            return False
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            try:
-                auth_payload = {
-                    "authorize": True,
-                    "permissions": "0",
-                    "integration_type": 0,
-                    "location_context": {"guild_id": "10000", "channel_id": "10000", "channel_type": 10000}
-                }
-                async with session.post(self.auth_url, json=auth_payload) as resp:
-                    if resp.status != 200:
-                        # this used to return False with no log at all, so a rejected
-                        # token or a rate-limited OAuth looked like "the solver failed"
-                        # with nothing to act on
-                        body = (await resp.text())[:200]
-                        self.bot.log("ERROR", f"Discord refused the owobot OAuth grant "
-                                              f"(HTTP {resp.status}): {body}")
-                        return False
-                    auth_data = await resp.json()
-                    redirect_url = auth_data.get("location")
-
-                if redirect_url:
-                    async with session.get(redirect_url) as r:
-                        pass
-
-                async with session.get("https://owobot.com/captcha") as captcha_resp:
-                    if captcha_resp.status != 200:
-                        self.bot.log("ERROR", "Failed to visit captcha page.")
-                        return False
-
-                async with session.get("https://owobot.com/api/auth") as auth_check:
-                    if auth_check.status != 200:
-                        self.bot.log("ERROR", "Auth session check failed.")
-                        return False
-
-                solution = await self.solve_hcaptcha(tries)
-                if not solution:
-                    return False
-
-                verify_headers = {
-                    "Referer": "https://owobot.com/captcha",
-                    "Origin": "https://owobot.com",
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                }
-                async with session.post(
-                    "https://owobot.com/api/captcha/verify",
-                    json={"token": solution},
-                    headers=verify_headers
-                ) as verify_resp:
-                    if verify_resp.status == 200:
-                        self.bot.log("SUCCESS", "Captcha verified successfully.")
-                        self.mark_verification_done(str(self.bot.user.id))
-                        return True
-                    else:
-                        error_text = await verify_resp.text()
-                        self.bot.log("ERROR", f"Verification failed (Status {verify_resp.status}): {error_text}")
-                        return False
-
-            except Exception as e:
-                self.bot.log("ERROR", f"Auto-verification failed: {e}")
+        try:
+            solution = await self.solve_hcaptcha(tries)
+            if not solution:
                 return False
+
+            ok, detail = await self._post_verify(session, solution)
+            if ok:
+                # not SUCCESS on purpose - see submit_manual_token
+                self.bot.log("INFO", "owobot accepted the captcha token.")
+                self.mark_verification_done(str(self.bot.user.id))
+                return True
+            self.bot.log("ERROR", f"Verification failed: {detail}")
+            return False
+        except Exception as e:
+            self.bot.log("ERROR", f"Auto-verification failed: {e}")
+            return False
+        finally:
+            await session.close()
 
     @classmethod
     def enqueue_manual_solve(cls, bot_id, captcha_url=None):
@@ -219,9 +294,33 @@ class WebSolver:
                         if not success:
                             bot.log("ERROR", f"[QUEUE] Failed to open browser for {username}")
 
-                    await future
+                    # Bounded on purpose: the future only ever resolves on a real solve,
+                    # so an untimed await held _manual_lock forever - one captcha nobody
+                    # answered blocked the manual queue for every other account, and the
+                    # dashboard kept the challenge in the bell to match.
+                    solved = True
+                    try:
+                        solved = bool(await asyncio.wait_for(
+                            future, timeout=cls.MANUAL_SOLVE_TIMEOUT_S))
+                    except asyncio.TimeoutError:
+                        solved = False
 
-                    bot.log("SUCCESS", f"[QUEUE] {username}: Manual captcha VERIFIED!")
+                    if solved:
+                        # not SUCCESS: state.log_command counts any SUCCESS line holding
+                        # "verified" as a solved captcha, and Security._resume_after_solve
+                        # already logs the one that counts
+                        bot.log("SECURITY", f"[QUEUE] {username}: Manual captcha VERIFIED!")
+                    else:
+                        mins = cls.MANUAL_SOLVE_TIMEOUT_S // 60
+                        bot.log("WARN", f"[QUEUE] {username}: manual solve given up "
+                                        f"(no answer within {mins}m, or the account "
+                                        f"stopped) - releasing the slot for other "
+                                        f"accounts.")
+                        try:
+                            from dashboard.app import clear_captcha_challenge
+                            clear_captcha_challenge(bot_id)
+                        except Exception:
+                            pass
 
                     alert_task.cancel()
                     try:
@@ -260,6 +359,22 @@ class WebSolver:
             bot = cls._get_bot_by_user_id(bot_id)
             if bot:
                 bot.log("ERROR", f"Failed to clear captcha challenge: {e}")
+
+    @classmethod
+    def abandon_manual_solve(cls, bot_id):
+        """Give up this account's manual solve without claiming it was verified.
+
+        Called when the account stops. Without it the processor sat on _manual_lock
+        waiting for a solve that can never arrive, so no other account could take the
+        single manual-solve slot until the timeout expired.
+
+        Resolves the future with False rather than cancelling it - a cancelled future
+        would raise CancelledError inside _manual_processor and kill the processor task
+        for every other account.
+        """
+        future = cls._verification_futures.get(str(bot_id))
+        if future is not None and not future.done():
+            future.set_result(False)
 
     @staticmethod
     async def open_in_browser(captcha_url=None, bot=None):
