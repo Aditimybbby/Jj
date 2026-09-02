@@ -54,6 +54,10 @@ window.fetchAccounts = async function() {
 function updateGlobalAccountName() {
     const nameEl = document.getElementById('currentAccountName');
     if (!nameEl) return;
+    if (currentAccountId === '__combined__') {
+        nameEl.innerText = `ALL ACCOUNTS (${accountsList.length})`;
+        return;
+    }
     if (currentAccountId && Array.isArray(accountsList)) {
         const acc = accountsList.find(a => a.id === currentAccountId);
         if (acc) {
@@ -68,10 +72,15 @@ window.selectAccount = function(id) {
     console.log(`Selecting account: ${id}`);
     currentAccountId = id;
     renderAccountGrid();
-    const acc = Array.isArray(accountsList) ? accountsList.find(a => a.id === id) : null;
-    if (acc) {
-        showToast(`Switched to account: ${acc.username}`, 'success');
-        updateGlobalAccountName(); 
+    if (id === '__combined__') {
+        showToast('Switched to combined view (All Accounts)', 'success');
+        updateGlobalAccountName();
+    } else {
+        const acc = Array.isArray(accountsList) ? accountsList.find(a => a.id === id) : null;
+        if (acc) {
+            showToast(`Switched to account: ${acc.username}`, 'success');
+            updateGlobalAccountName(); 
+        }
     }
     if (lineChart) lineChart.data.datasets[0].data = Array(30).fill(0);
     const configView = document.getElementById('config');
@@ -89,7 +98,50 @@ function renderAccountGrid() {
         grid.innerHTML = '<div class="no-data">No accounts online. Start the bot to see connected accounts here.</div>';
         return;
     }
-    grid.innerHTML = accountsList.map(acc => {
+    // prepend an ALL COMBINED card when there are multiple accounts
+    let combinedCard = '';
+    if (accountsList.length > 1) {
+        const isCombined = currentAccountId === '__combined__';
+        const totalCash = accountsList.reduce((s, a) => s + (a.cash || 0), 0);
+        const totalCmds = accountsList.reduce((s, a) => s + (a.session_total || 0), 0);
+        const totalGems = accountsList.reduce((s, a) => s + (a.gems_used || 0), 0);
+        const onlineCount = accountsList.filter(a => !a.paused && !a.connecting).length;
+        combinedCard = `
+            <div class="account-picker-card ${isCombined ? 'selected' : ''}" onclick="selectAccount('__combined__')" role="button" tabindex="0" style="border-color: var(--primary);">
+                <div class="account-card-top">
+                    <span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url('/static/assets/neura_icons/layers.svg');"></span>
+                    <div class="account-card-meta">
+                        <div class="account-card-name">ALL COMBINED</div>
+                        <div class="account-card-id">${accountsList.length} accounts</div>
+                        <div class="account-card-status running">${onlineCount} online</div>
+                    </div>
+                    ${isCombined ? '<span class="account-selected-badge">Selected</span>' : ''}
+                </div>
+                <div class="account-card-stats">
+                    <div class="account-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/coins.svg');"></span>
+                        <div class="account-stat-val">${totalCash.toLocaleString()}</div>
+                        <div class="account-stat-lbl">Total Balance</div>
+                    </div>
+                    <div class="account-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/chart-column.svg');"></span>
+                        <div class="account-stat-val">${accountsList.length}</div>
+                        <div class="account-stat-lbl">Accounts</div>
+                    </div>
+                    <div class="account-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/terminal.svg');"></span>
+                        <div class="account-stat-val">${totalCmds}</div>
+                        <div class="account-stat-lbl">Session Cmds</div>
+                    </div>
+                    <div class="account-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/bolt.svg');"></span>
+                        <div class="account-stat-val">${totalGems}</div>
+                        <div class="account-stat-lbl">Gems Used</div>
+                    </div>
+                </div>
+            </div>`;
+    }
+    grid.innerHTML = combinedCard + accountsList.map(acc => {
         const isSelected = acc.id === currentAccountId;
         const statusClass = acc.connecting ? 'connecting' : (acc.paused ? 'paused' : 'running');
         const statusLabel = acc.connecting ? 'Connecting' : (acc.paused ? 'Paused' : 'Running');

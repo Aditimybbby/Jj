@@ -45,6 +45,19 @@ class Security(commands.Cog):
         service = str(sol_cfg.get("service") or "yescaptcha").lower()
         return service, cls.CAPTCHA_KEY_FIELDS.get(service, "yescaptcha_api_key")
 
+    @staticmethod
+    def _nopecha_extension_key(sol_cfg):
+        """A NopeCHA key that only the extension can spend, if one is configured.
+
+        Keys handed out for boosting NopeCHA's Discord server carry extension
+        credits: ``api.nopecha.com`` refuses them outright, so they live in their own
+        field and are used by the browser solver, never by the paid API path.
+        """
+        nope = ((sol_cfg.get("browser_solver") or {}).get("nopecha") or {})
+        if not nope.get("enabled", True):
+            return ""
+        return str(nope.get("key") or sol_cfg.get("nopecha_booster_key") or "").strip()
+
     def _should_autosolve(self, sol_cfg):
         """True when the auto-solver is on and the *selected* service is usable."""
         if not sol_cfg.get("enabled", True):
@@ -52,9 +65,18 @@ class Security(commands.Cog):
         service, key_field = self._selected_key_field(sol_cfg)
         if sol_cfg.get(key_field):
             return True
-        # nopecha is the one service with a keyless free tier - web_solver.auto_verify
-        # lets it through without a key too, so agree with it here
         if service == "nopecha":
+            # a booster key cannot buy an API solve, so skip straight to the browser
+            # solver, which loads the extension the key actually belongs to
+            if self._nopecha_extension_key(sol_cfg):
+                self.bot.log(
+                    "SYS",
+                    "NopeCHA booster key set: those are extension-only, so the browser "
+                    "solve will spend it instead of api.nopecha.com."
+                )
+                return False
+            # nopecha is the one service with a keyless free tier - web_solver.auto_verify
+            # lets it through without a key too, so agree with it here
             return True
         # say why we are about to ask a human, instead of silently queueing a manual solve
         self.bot.log(
@@ -143,7 +165,9 @@ class Security(commands.Cog):
             self.bot.log("WARN", f"Key-free browser solve unavailable: {unavailable}")
             return False
 
-        self.bot.log("SYS", f"Attempting key-free browser solve{suffix}...")
+        nope_key = self._nopecha_extension_key(sol_cfg)
+        via = " (NopeCHA extension)" if nope_key else ""
+        self.bot.log("SYS", f"Attempting key-free browser solve{via}{suffix}...")
         try:
             result = await browser_solver.solve(on_challenge=self._on_browser_challenge)
         except Exception as e:
@@ -153,6 +177,8 @@ class Security(commands.Cog):
             how = result.get("how")
             if how in ("not-required", "cleared"):
                 self._resume_after_solve("OwO says this account is verified.")
+            elif how == "nopecha-extension":
+                self._resume_after_solve("NopeCHA's extension cleared the captcha.")
             else:
                 self._resume_after_solve("Browser solver cleared the captcha.")
             return True

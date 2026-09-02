@@ -33,8 +33,14 @@ function initDashCharts() {
 
     
 function update() {
-    const q = currentAccountId ? `?id=${currentAccountId}` : '';
-    fetch(`/api/stats${q}`).then(r => r.json()).then(d => {
+    let url;
+    if (currentAccountId === '__combined__') {
+        url = '/api/stats/combined';
+    } else {
+        const q = currentAccountId ? `?id=${currentAccountId}` : '';
+        url = `/api/stats${q}`;
+    }
+    fetch(url).then(r => r.json()).then(d => {
         if (!d || Object.keys(d).length === 0) return;
         if (d.bot) {
             const nameEl = document.getElementById('currentAccountName');

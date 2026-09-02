@@ -13,7 +13,7 @@
 
 const CAPTCHA_SERVICES = {
     yescaptcha:  { label: 'YesCaptcha',   keyField: 'yescaptcha_api_key',  balanceUnit: 'pts',    color: '#f59e0b', hint: 'Paid service – requires ≥ 30 pts to auto-solve.' },
-    nopecha:     { label: 'NopeCHA',      keyField: 'nopecha_api_key',     balanceUnit: 'credits',color: '#a855f7', hint: 'Free 100 credits daily – resets every day.' },
+    nopecha:     { label: 'NopeCHA',      keyField: 'nopecha_api_key',     balanceUnit: 'credits',color: '#a855f7', hint: 'Free 100 credits daily. Discord-boost keys are extension-only – put those in the NopeCHA Extension section.' },
     anticaptcha: { label: 'Anti-Captcha', keyField: 'anticaptcha_api_key', balanceUnit: '$',      color: '#22c55e', hint: 'Paid service – supports hCaptcha Enterprise too.' },
     captchaly:   { label: 'Captchaly',    keyField: 'captchaly_api_key',   balanceUnit: '$',      color: '#3b82f6', hint: 'Paid service – strict 120s solve times.' },
 };
@@ -159,7 +159,7 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
                 </div>
             </div>
         </div>
-        ${renderBrowserSolverRows(cfg.browser_solver || {}, basePath + '.browser_solver', parentEnabled)}
+        ${renderBrowserSolverRows(cfg.browser_solver || {}, basePath + '.browser_solver', parentEnabled, cfg, basePath)}
     `;
 }
 
@@ -170,7 +170,7 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
 //
 // Deliberately gated on parentEnabled, not on `live`: the browser solver needs no service
 // and no key, so it must stay usable while "Enable Auto-Solver" is off.
-function renderBrowserSolverRows(bs, base, parentEnabled) {
+function renderBrowserSolverRows(bs, base, parentEnabled, solverCfg, solverBase) {
     const on  = bs.enabled !== false;
     const sub = parentEnabled && on;
     return `
@@ -210,10 +210,154 @@ function renderBrowserSolverRows(bs, base, parentEnabled) {
                     </div>
                     <div class="cfg-row-control">${renderStepperInner(base + '.widget_wait_s', '', bs.widget_wait_s ?? 25, 's', sub)}</div>
                 </div>
+                ${renderNopechaRows(bs.nopecha || {}, base + '.nopecha', sub,
+                                    (solverCfg || {}).nopecha_booster_key || '',
+                                    (solverBase || 'security.captcha_solver') + '.nopecha_booster_key')}
             </div>
         </div>
     `;
 }
+
+// The NopeCHA *extension*, not the API. A key earned by boosting NopeCHA's Discord holds
+// extension credits only - api.nopecha.com rejects it - so it gets its own field here
+// rather than sharing the "NopeCHA API Key" box above, where the paid API path would keep
+// trying to spend something it can never spend.
+function renderNopechaRows(nope, base, parentEnabled, boosterKey, boosterPath) {
+    const on  = nope.enabled !== false;
+    const sub = parentEnabled && on;
+    const dis = sub ? '' : ' disabled';
+    return `
+        <div class="cfg-section cfg-section-nested ${on ? '' : 'cfg-section-disabled'}"
+             data-search="nopecha extension booster key boost discord credits">
+            <div class="cfg-section-head">NopeCHA Extension (booster keys)</div>
+            <div class="cfg-section-rows">
+                <div class="cfg-row" data-path="${base}.enabled">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Use NopeCHA Extension</span>
+                        <span class="csw-service-hint">Loads NopeCHA into the solver's Chrome so it answers the challenge in the page. This is the only way a Discord-boost key can be spent.</span>
+                    </div>
+                    <div class="cfg-row-control">${renderNeuraToggle(base + '.enabled', on, parentEnabled, true)}</div>
+                </div>
+                <div class="cfg-row" data-path="${boosterPath}">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Booster Key</span>
+                        <span class="csw-service-hint">The key NopeCHA DMs you for boosting their server. A paid API key works here too.</span>
+                    </div>
+                    <div class="cfg-row-control">
+                        <div class="cfg-input-wrap">
+                            <input type="password" class="cfg-input" value="${escAttr(boosterKey)}"${dis}
+                                placeholder="${sub ? 'Paste your NopeCHA booster key here…' : 'Turn the extension on first'}"
+                                onchange="updateDeepVal('${boosterPath}', this.value)">
+                        </div>
+                    </div>
+                </div>
+                <div class="cfg-row" data-path="${base}.headless">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Headless</span>
+                        <span class="csw-service-hint">Safe to leave on: the extension answers the challenge itself, so nobody needs to watch the window.</span>
+                    </div>
+                    <div class="cfg-row-control">${renderNeuraToggle(base + '.headless', nope.headless !== false, sub)}</div>
+                </div>
+                <div class="cfg-row" data-path="${base}.solve_wait_s">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Solve Wait</span>
+                        <span class="csw-service-hint">How long the extension gets on an open challenge before a human is asked. Image grids take a while.</span>
+                    </div>
+                    <div class="cfg-row-control">${renderStepperInner(base + '.solve_wait_s', '', nope.solve_wait_s ?? 120, 's', sub)}</div>
+                </div>
+                <div class="cfg-row" data-path="${base}.auto_download">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Auto-Download Build</span>
+                        <span class="csw-service-hint">Fetches the automation build from NopeCHA's GitHub releases. Off means you supply it yourself below.</span>
+                    </div>
+                    <div class="cfg-row-control">${renderNeuraToggle(base + '.auto_download', nope.auto_download !== false, sub)}</div>
+                </div>
+                <div class="cfg-row" data-path="${base}.extension_path">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Extension Folder</span>
+                        <span class="csw-service-hint">Optional. Folder holding an unpacked build's manifest.json - it is copied, never edited in place.</span>
+                    </div>
+                    <div class="cfg-row-control">
+                        <div class="cfg-input-wrap">
+                            <input type="text" class="cfg-input" value="${escAttr(nope.extension_path || '')}"${dis}
+                                placeholder="${sub ? 'Leave empty to download it automatically' : ''}"
+                                onchange="updateDeepVal('${base}.extension_path', this.value)">
+                        </div>
+                    </div>
+                </div>
+                <div class="cfg-row">
+                    <div class="cfg-row-label">
+                        <span class="cfg-label-text">Extension Build</span>
+                        <span class="csw-service-hint">Installs it now instead of during your next captcha. Save the key first.</span>
+                    </div>
+                    <div class="cfg-row-control">
+                        <div class="csw-balance-wrap">
+                            <span id="csw-nopecha-badge" class="csw-balance-badge" onclick="fetchCaptchaBalance()">
+                                <span class="csw-balance-dot"></span>
+                                <span id="csw-nopecha-text">Not checked</span>
+                            </span>
+                            <button class="btn-control" id="csw-nopecha-install"${dis}
+                                onclick="installNopechaExtension(this)">Install / Update</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// Fills the "Extension Build" badge from either /api/captcha/balance (extension mode) or
+// the install route's own reply, so both paths report the same thing.
+function _renderNopechaStatus(info, err) {
+    const badge = document.getElementById('csw-nopecha-badge');
+    const text  = document.getElementById('csw-nopecha-text');
+    if (!badge || !text) return;
+    if (err) {
+        text.textContent = err.length > 90 ? err.slice(0, 89) + '…' : err;
+        badge.className = 'csw-balance-badge error';
+        badge.setAttribute('title', err);
+        return;
+    }
+    info = info || {};
+    badge.removeAttribute('title');
+    if (!info.installed) {
+        text.textContent = 'Not installed yet';
+        badge.className = 'csw-balance-badge';
+        return;
+    }
+    const bits = [info.version ? `v${info.version}` : null, info.release || null].filter(Boolean);
+    text.textContent = (info.keyed ? 'Ready' : 'Downloaded, no key written') +
+                       (bits.length ? ` · ${bits.join(' · ')}` : '');
+    badge.className = 'csw-balance-badge ' + (info.keyed ? 'ok' : '');
+}
+
+window.installNopechaExtension = async function(btn) {
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+    _renderNopechaStatus(null, null);
+    const text = document.getElementById('csw-nopecha-text');
+    if (text) text.textContent = 'Downloading…';
+    try {
+        const res = await fetch('/api/captcha/nopecha/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: currentAccountId || null })
+        });
+        const d = await res.json();
+        if (d.success) {
+            _renderNopechaStatus(d.extension, null);
+            showToast(d.message || 'NopeCHA extension ready', 'success');
+        } else {
+            _renderNopechaStatus(d.extension, d.error || 'install failed');
+            showToast(d.error || 'Could not install the NopeCHA extension', 'error');
+        }
+    } catch (e) {
+        _renderNopechaStatus(null, 'request failed');
+        showToast('Install request failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original || 'Install / Update'; }
+    }
+};
 
 window.updateCaptchaService = function(newService) {
     const basePath = 'security.captcha_solver';
@@ -239,6 +383,16 @@ window.fetchCaptchaBalance = async function() {
             body: JSON.stringify({ service: selectedService, api_key: currentKey })
         });
         const d = await res.json();
+        if (d.mode === 'extension') {
+            // A booster key has no API balance to read; reporting "unreadable" over a
+            // working extension setup is what made this look broken. Say what it is.
+            _renderNopechaStatus(d.extension, d.has_key ? null : d.error);
+            balText.textContent = d.has_key
+                ? (d.extension_enabled ? 'Extension key – no API balance' : 'Extension key – extension is off')
+                : 'No NopeCHA key set';
+            badge.className = 'csw-balance-badge ' + (d.has_key && d.extension_enabled ? 'ok' : '');
+            return;
+        }
         if (d.error || d.balance === null || d.balance === undefined) {
             balText.textContent = d.message || d.error || 'Error – check API key';
             badge.className = 'csw-balance-badge error';
@@ -603,6 +757,7 @@ window.solveInBrowser = async function() {
         const d = await res.json();
         if (d.success) {
             const how = d.how === 'passive' ? 'automatically, no key used'
+                      : d.how === 'nopecha-extension' ? 'solved by the NopeCHA extension'
                       : d.how === 'interactive' ? 'answered in the browser'
                       : 'already clear';
             showToast(`Captcha done (${how})`, 'success');

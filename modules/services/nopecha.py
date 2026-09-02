@@ -13,6 +13,14 @@
 import asyncio
 import aiohttp
 
+# NopeCHA's Discord-boost reward keys carry extension credits only: api.nopecha.com
+# answers them with error 15/18 however much credit they hold. There is no format that
+# tells the two apart, so say it here rather than leaving "wrong plan" as the only clue.
+EXTENSION_HINT = ("If this key came from boosting NopeCHA's Discord, it only works in "
+                  "their browser extension - move it to security.captcha_solver."
+                  "nopecha_booster_key and the browser solver will spend it there.")
+
+
 class NopeCaptchaService:
     def __init__(self, bot, api_key, site_key):
         self.bot = bot
@@ -96,10 +104,12 @@ class NopeCaptchaService:
                         self.bot.log("ERROR", f"NopeCHA invalid request: {err.get('message')}")
                     elif code == 15:
                         self.bot.log("ERROR", f"NopeCHA invalid API key: {err.get('message')}")
+                        self.bot.log("WARN", EXTENSION_HINT)
                     elif code == 16:
                         self.bot.log("ERROR", f"NopeCHA out of credit: {err.get('message')}")
                     elif code == 18:
                         self.bot.log("ERROR", f"NopeCHA feature unavailable for current plan: {err.get('message')}")
+                        self.bot.log("WARN", EXTENSION_HINT)
                     elif code == 12:
                         self.bot.log("ERROR", f"NopeCHA free tier ineligible (IP banned): {err.get('message')}")
                     elif code == 14:

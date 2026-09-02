@@ -375,6 +375,15 @@ class NeuraBot(commands.Bot):
                 typing_str = f" ({self.last_typing_time}s)"
                 self.last_typing_time = None
             self.log("CMD", f"Sent: {short_cmd}{typing_str}")
+            # the earning ledger has to know the exact figure we handed the huntbot,
+            # and this is the only place that knows what actually went out. Wrapped
+            # because a bookkeeping bug must never turn into a failed send.
+            try:
+                cog = self.get_cog("Earning")
+                if cog:
+                    cog.note_sent(content)
+            except Exception:
+                pass
             return True
         except Exception as e:
             self.note_send_failure(e)
@@ -617,6 +626,11 @@ class NeuraBot(commands.Bot):
             "utilities": ["ChannelSwitch", "Others"],
             "level_grind": ["LevelQuotes"],
             "coop": ["Coop", "Quest"],
+            "owner": ["Owner"],
+            # the overlay turns an `earning` change into `commands.*` changes as well,
+            # so the grinding cogs are refreshed by cmd_to_cog above - this is only
+            # about the ledger cog noticing that the mode itself flipped
+            "earning": ["Earning"],
         }
         for path in changed_paths:
             if path == "commands" or path.startswith("commands."):
@@ -696,6 +710,10 @@ class NeuraBot(commands.Bot):
         old_config = copy.deepcopy(self.config)
         self._load_config()
         self._deep_merge(self.config, new_config)
+        # the POST body is the operator's document, with no overlay in it, so the merge
+        # above just undid earning mode. Re-apply before diffing or a save from any tab
+        # would quietly hand the account back its gambling timers.
+        self._apply_earning_overlay()
 
         core_cfg = self.config.get("core", {})
         self.prefix = core_cfg.get("prefix", "owo ")
@@ -744,6 +762,76 @@ class NeuraBot(commands.Bot):
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    # switched off by earning mode when `earning.exclusive` is set: each of these
+    # either spends cowoncy the run is trying to accumulate (the gambling three,
+    # battle's ring upkeep) or spends *time* the account could be hunting with.
+    # Everything that feeds the hunt - daily, gems, team, weapon, quest, shop - is
+    # deliberately absent, and so is `owo` itself: it is what keeps the account
+    # ranked and costs nothing.
+    EARNING_DISTRACTIONS = ("battle", "coinflip", "slots", "blackjack", "curse",
+                            "pray", "cookie", "rpp", "giveaway", "sell_sac")
+
+    def _apply_earning_overlay(self):
+        """Point every command gate at hunt + huntbot + sell while earning mode is on.
+
+        This runs *after* all three config layers have merged, so it beats both the
+        space default and the per-account file - "redirect all bots to earning" has to
+        mean the same thing on an account that had battle switched on by hand. It is
+        never written back to disk: the config editor keeps showing what the operator
+        chose, and switching the mode off restores it on the next reload.
+        """
+        earning = self.config.get('earning') or {}
+        if not isinstance(earning, dict) or not earning.get('enabled', False):
+            return
+
+        cmds = self.config.setdefault('commands', {})
+
+        def section(name):
+            sub = cmds.get(name)
+            if not isinstance(sub, dict):
+                sub = {}
+                cmds[name] = sub
+            return sub
+
+        section('hunt')['enabled'] = True
+        huntbot = section('huntbot')
+        huntbot['enabled'] = True
+        try:
+            cash = int(earning.get('huntbot_cash', 3000))
+        except (TypeError, ValueError):
+            cash = 3000
+        if cash > 0:
+            huntbot['cash_to_spend'] = cash
+
+        # sell_sac owns its own loop and reads config on every tick, so the sell half
+        # is enabled here and the sacrifice half left exactly as configured: sacrificing
+        # an animal destroys the thing we are trying to sell.
+        sell_sac = section('sell_sac')
+        sell = sell_sac.get('sell')
+        if not isinstance(sell, dict):
+            sell = {}
+            sell_sac['sell'] = sell
+        sell['enabled'] = True
+        sell['type'] = str(earning.get('sell_type') or 'all')
+        try:
+            interval = int(earning.get('sell_interval_min', 20))
+        except (TypeError, ValueError):
+            interval = 20
+        sell['interval_min'] = max(1, interval)
+
+        if earning.get('exclusive', True):
+            for name in self.EARNING_DISTRACTIONS:
+                if name == 'sell_sac':
+                    continue
+                section(name)['enabled'] = False
+            # a friendly battle is a battle: it burns the ring and the time
+            coop = self.config.setdefault('coop', {})
+            battle = coop.get('battle')
+            if not isinstance(battle, dict):
+                battle = {}
+                coop['battle'] = battle
+            battle['enabled'] = False
 
     def _load_config(self):
         # a mid-way failure must not leave the bot with an empty config - that would
@@ -837,6 +925,10 @@ class NeuraBot(commands.Bot):
             self.prefix = core_cfg.get('prefix', 'owo ')
             if hasattr(self, '_connection'):
                 self.command_prefix = self.prefix
+
+            # last, so it overrides every layer - and after the settings_<uid>.json
+            # write above, so the overlay is never persisted as the operator's choice
+            self._apply_earning_overlay()
 
         except Exception as e:
             print(f"Error loading config: {e}")
