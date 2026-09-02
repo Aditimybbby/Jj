@@ -123,6 +123,17 @@ def empty_earning():
     }
 
 
+def empty_owner_send():
+    """A fresh daily gifting allowance for `farmers send`.
+
+    OwO limits how much cowoncy one account may gift per day, and it does not tell
+    you how much of that is left - so the only way to stop `farmers send` from
+    firing a give OwO will refuse is to count what we sent ourselves. ``day`` is a
+    UTC date string, which is when OwO's day rolls over.
+    """
+    return {'day': None, 'sent': 0}
+
+
 def get_empty_stats():
     return {
         'uptime_start': time.time(),
@@ -167,6 +178,10 @@ def get_empty_stats():
         # survives a restart, unlike uptime_start - an earning run is measured from
         # when the operator switched the mode on, not from the last reboot
         'earning': empty_earning(),
+        # how much `farmers send` has already handed over today. OwO caps a day's
+        # gifting per account, so this has to outlive a restart or a reboot would
+        # hand the account a fresh allowance it does not have.
+        'owner_send': empty_owner_send(),
         'gambling_stats': {
             'total_wins': 0,
             'total_losses': 0,
@@ -216,6 +231,8 @@ def _write_account_stats():
             # an earning run is meant to be read over days; without this the tab
             # reset to zero on every restart and "per hour" became meaningless
             'earning': st.get('earning') or empty_earning(),
+            # the daily gift allowance is only meaningful if it survives a restart
+            'owner_send': st.get('owner_send') or empty_owner_send(),
             'gambling_stats': st.get('gambling_stats', {
                 'total_wins': 0, 'total_losses': 0, 'total_wagered': 0,
                 'net_profit': 0, 'current_streak': 0, 'best_streak': 0,

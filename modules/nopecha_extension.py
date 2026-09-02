@@ -114,11 +114,18 @@ def _read_stamp(root):
 
 
 def _write_stamp(root, data):
+    """Record what is in a cache directory. False if it could not be written.
+
+    The stamp *is* the cache: without it the next solve cannot tell a good build from
+    an empty directory and downloads the whole thing again, so a silent failure here
+    turns into a download on every captcha.
+    """
     try:
         with open(_stamp_file(root), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _is_extension(path):
@@ -289,21 +296,31 @@ async def _ensure_source(path_hint, auto_download, note):
             return None, None, ("no NopeCHA extension cached and auto_download is off - set "
                                 "security.captcha_solver.browser_solver.nopecha.extension_path")
         asset, error = await _discover_asset()
+        if not error:
+            note("SYS", f"NopeCHA: downloading {asset['name']} ({asset['tag'] or 'latest'})...")
+            try:
+                blob = await _download(asset["url"])
+                await asyncio.to_thread(_extract, blob, dest)
+            except Exception as exc:
+                error = (f"could not install the NopeCHA extension: "
+                         f"{type(exc).__name__}: {exc}")
         if error:
+            # a build already on disk beats no solve at all: GitHub rate-limits
+            # unauthenticated callers to 60 requests an hour, so on a farm with several
+            # accounts discovery is the first thing to fail - and it used to take the
+            # cached extension down with it even though it was sitting right there
+            if root:
+                note("WARN", f"NopeCHA: {error} - using the cached build instead.")
+                return root, stamp.get("tag") or "cached", None
             return None, None, error
-        note("SYS", f"NopeCHA: downloading {asset['name']} ({asset['tag'] or 'latest'})...")
-        try:
-            blob = await _download(asset["url"])
-            await asyncio.to_thread(_extract, blob, dest)
-        except Exception as exc:
-            return None, None, (f"could not install the NopeCHA extension: "
-                                f"{type(exc).__name__}: {exc}")
         tag = asset.get("tag") or "latest"
 
     root = find_manifest_root(dest)
     if not root:
         return None, None, "the NopeCHA build contained no manifest.json"
-    _write_stamp(dest, {"source": source, "tag": tag})
+    if not _write_stamp(dest, {"source": source, "tag": tag}):
+        note("WARN", f"NopeCHA: could not write {_stamp_file(dest)} - the build will be "
+                     f"downloaded again on every solve until that path is writable.")
     return root, tag, None
 
 
@@ -333,6 +350,10 @@ async def ensure_extension(key, path_hint=None, auto_download=True, log=None):
     stamp = _read_stamp(dest)
     existing = find_manifest_root(dest)
     if existing and stamp.get("key") == fingerprint and stamp.get("source") == source:
+        # said out loud because a re-download is otherwise indistinguishable from a
+        # cache hit in the log - both used to print nothing at all on the way through
+        note("DEBUG", f"NopeCHA extension: reusing the cached build "
+                      f"(v{stamp.get('version') or '?'}, {stamp.get('tag') or 'cached'}).")
         return existing, None
 
     src_root, tag, error = await _ensure_source(path_hint, auto_download, note)
@@ -355,10 +376,12 @@ async def ensure_extension(key, path_hint=None, auto_download=True, log=None):
     except Exception as exc:
         return None, f"could not write the key into the extension manifest: {exc}"
 
-    _write_stamp(dest, {"key": fingerprint, "source": source, "tag": tag,
-                        "version": version, "fields": written})
+    if not _write_stamp(dest, {"key": fingerprint, "source": source, "tag": tag,
+                               "version": version, "fields": written}):
+        note("WARN", f"NopeCHA: could not write {_stamp_file(dest)} - the extension will "
+                     f"be rebuilt on every solve until that path is writable.")
     note("SYS", f"NopeCHA extension ready (v{version}, {tag}) - key written to "
-                f"{', '.join(written)}, hCaptcha auto-solve on.")
+                f"{', '.join(written)}, hCaptcha auto-solve on. Cached in {cache_root()}.")
     return root, None
 
 

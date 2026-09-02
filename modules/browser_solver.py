@@ -151,6 +151,8 @@ class CDP:
         self.page = None          # sessionId of the top-level page
         self.sessions = {}        # sessionId -> target url
         self._proxy_auth = None
+        self.extensions = []      # ids of extensions that are actually running
+        self.extension_error = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def launch(self, headless=True, proxy_url=None, proxy_auth=None,
@@ -174,9 +176,15 @@ class CDP:
         paths = [p for p in (extensions or []) if p]
         if paths:
             # --disable-extensions wins over --load-extension, so an extension can
-            # only be loaded by swapping it for the -except form
+            # only be loaded by swapping it for the -except form. Both flags are dead
+            # on current Google Chrome (see _load_extensions) but still the whole
+            # mechanism on Chromium, Edge and Chrome < 137, so they stay.
             joined = ",".join(paths)
-            args += [f"--disable-extensions-except={joined}", f"--load-extension={joined}"]
+            args += [f"--disable-extensions-except={joined}", f"--load-extension={joined}",
+                     # re-enables the two flags above on Chrome 137-141
+                     "--disable-features=DisableLoadExtensionCommandLineSwitch",
+                     # unlocks the Extensions CDP domain, which is the supported way in
+                     "--enable-unsafe-extension-debugging"]
         else:
             args.append("--disable-extensions")
         if headless:
@@ -212,6 +220,9 @@ class CDP:
         self._reader = asyncio.create_task(self._read_loop())
         self._handler = asyncio.create_task(self._event_loop())
 
+        if paths:
+            await self._load_extensions(paths)
+
         async with self._http.get(f"http://127.0.0.1:{port}/json/list") as r:
             targets = await r.json()
         pages = [t for t in targets if t.get("type") == "page"]
@@ -240,6 +251,67 @@ class CDP:
             # is to answer the 407 challenge over CDP
             await self.send("Fetch.enable", sess=self.page, handleAuthRequests=True)
         return self
+
+    async def _extension_ids(self, wait=0.0):
+        """Ids of extensions the browser is actually running.
+
+        An extension that loaded owns targets of its own (an MV3 service worker, a
+        background page, maybe a tab), so their ``chrome-extension://<id>/`` urls are
+        proof the load took - which no command-line flag ever reports.
+        """
+        deadline = time.time() + max(0.0, wait)
+        while True:
+            found = []
+            try:
+                res = await self.send("Target.getTargets")
+            except CDPError:
+                return []
+            for info in res.get("targetInfos") or []:
+                url = str(info.get("url") or "")
+                if url.startswith("chrome-extension://"):
+                    ident = url.split("/")[2] if len(url.split("/")) > 2 else ""
+                    if ident and ident not in found:
+                        found.append(ident)
+            if found or time.time() >= deadline:
+                return found
+            await asyncio.sleep(0.4)
+
+    async def _load_extensions(self, paths):
+        """Load unpacked extensions over CDP, and record whether it worked.
+
+        The flags in ``launch`` are no longer enough: Google Chrome ignores
+        ``--load-extension`` from 137, dropped ``--disable-extensions-except`` at 139
+        and stopped honouring the ``DisableLoadExtensionCommandLineSwitch`` opt-out at
+        142 - it just prints "--load-extension is not allowed in Google Chrome,
+        ignoring" and starts with no extension at all. That is silent: the page loads,
+        the captcha appears, and nothing ever answers it. ``Extensions.loadUnpacked``
+        is the supported replacement.
+
+        Either route is fine, so this only fails when *neither* produced a running
+        extension - and then it says so, instead of leaving the solve to blame the
+        wait on NopeCHA credits.
+        """
+        problems = []
+        for path in paths:
+            try:
+                res = await self.send("Extensions.loadUnpacked", path=path, timeout=60)
+            except CDPError as exc:
+                problems.append(f"{os.path.basename(path)}: {exc}")
+                continue
+            ident = res.get("id")
+            if ident:
+                self.extensions.append(ident)
+            else:
+                problems.append(f"{os.path.basename(path)}: no extension id returned")
+        # the command-line flags may have loaded it already, in which case
+        # loadUnpacked is redundant and its complaint means nothing
+        running = await self._extension_ids(wait=0.0 if self.extensions else 6.0)
+        for ident in running:
+            if ident not in self.extensions:
+                self.extensions.append(ident)
+        if not self.extensions:
+            self.extension_error = ("; ".join(problems)
+                                    or "no extension target ever appeared")
 
     async def close(self):
         for task in (self._reader, self._handler):
@@ -608,6 +680,17 @@ class BrowserSolver:
                 await browser.launch(headless=headless, proxy_url=proxy_url,
                                      proxy_auth=creds,
                                      extensions=[extension] if extension else None)
+                if extension_active and browser.extension_error:
+                    # blaming the wait on NopeCHA credits when the extension never
+                    # loaded sent operators off buying credits they already had
+                    extension_active = False
+                    self.bot.log("WARN",
+                                 f"Browser solver: this browser would not load the "
+                                 f"NopeCHA extension ({browser.extension_error}) - "
+                                 f"Google Chrome 137+ blocks extension loading for "
+                                 f"automation. Install Chromium or Edge and the "
+                                 f"extension will be used. Falling back to a "
+                                 f"human/manual solve for this one.")
                 await browser.set_cookie("connect.sid", sid, "owobot.com")
                 await browser.navigate(CAPTCHA_PAGE, wait=3.0)
 

@@ -1854,31 +1854,6 @@ def captcha_nopecha_install():
                     'message': f"NopeCHA extension ready (v{info.get('version') or '?'})"})
 
 
-    if service == 'nopecha':
-        from modules.services.nopecha import NopeCaptchaService
-        temp_solver = NopeCaptchaService(bot, api_key, "")
-    elif service == 'anticaptcha':
-        from modules.services.anticaptcha import AntiCaptchaService
-        temp_solver = AntiCaptchaService(bot, api_key, "")
-    elif service == 'captchaly':
-        from modules.services.captchaly import CaptchalyService
-        temp_solver = CaptchalyService(bot, api_key, "")
-    else:
-        from modules.services.yescaptcha import YesCaptchaService
-        temp_solver = YesCaptchaService(bot, api_key, "")
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(temp_solver.get_balance(), bot.loop)
-        balance = future.result(timeout=10)
-        # the services return -1 for "could not read it", which is not a balance
-        if balance is None or balance < 0:
-            return jsonify({'balance': None, 'service': service,
-                            'enabled': cfg.get('enabled', False),
-                            'error': 'balance unreadable - check the key and the service'})
-        return jsonify({'balance': balance, 'service': service, 'enabled': cfg.get('enabled', False)})
-    except Exception as e:
-        return jsonify({'balance': None, 'service': service, 'error': str(e)})
-
 @app.route('/api/captcha/stats')
 @space_required
 def captcha_stats():

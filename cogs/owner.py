@@ -11,6 +11,7 @@
 
 
 import asyncio
+import datetime
 import json
 import random
 import re
@@ -21,6 +22,11 @@ from component_v2_neura.parser import parse_v2_message, collect_text, buttons
 
 MAX_GIVE = 100000
 DEFAULT_SEND_PERCENT = 90
+
+# What one account may gift in a day. OwO enforces this itself and simply refuses
+# the give once it is used up - it never says how much is left - so the only way
+# to keep `farmers send` from firing a doomed transfer is to meter it here.
+DEFAULT_DAILY_SEND_LIMIT = 78000
 
 # OwO labels the two buttons on the give prompt; anything that reads like a
 # cancel/decline must never be clicked, everything else on that prompt is the
@@ -58,6 +64,7 @@ class Owner(commands.Cog):
 
         if str(message.author.id) == self.bot.owo_bot_id:
             await self._handle_cash_reply(message, owner_id)
+            await self._handle_gift_limit_reply(message)
             await self._handle_give_confirm(message, owner_id)
         elif str(message.author.id) == owner_id:
             await self._handle_trigger(message, owner_id)
@@ -138,6 +145,60 @@ class Owner(commands.Cog):
             pct = DEFAULT_SEND_PERCENT
         return max(1.0, min(100.0, pct))
 
+    def _daily_limit(self):
+        """How much this account may gift per day. 0 means "do not meter it"."""
+        try:
+            limit = int(self._config().get('daily_send_limit', DEFAULT_DAILY_SEND_LIMIT))
+        except (TypeError, ValueError):
+            return DEFAULT_DAILY_SEND_LIMIT
+        return max(0, limit)
+
+    def _allowance(self):
+        """The account's gifting record for *today*, rolled over if the day changed.
+
+        Kept on ``account_stats`` so it is written to stats.json with everything
+        else: a restart must not hand the account an allowance OwO will not honour.
+        """
+        st = state.account_stats.setdefault(self.bot.user_id, state.get_empty_stats())
+        rec = st.get('owner_send')
+        if not isinstance(rec, dict):
+            rec = state.empty_owner_send()
+            st['owner_send'] = rec
+        today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+        if rec.get('day') != today:
+            rec['day'] = today
+            rec['sent'] = 0
+        return rec
+
+    def _remaining_today(self):
+        """Cowoncy still giftable today, or None when metering is switched off."""
+        limit = self._daily_limit()
+        if limit <= 0:
+            return None
+        try:
+            sent = int(self._allowance().get('sent') or 0)
+        except (TypeError, ValueError):
+            sent = 0
+        return max(0, limit - sent)
+
+    def _book_sent(self, amount):
+        """Charge a *confirmed* transfer against today's allowance.
+
+        Booked on the confirm click, not on the give: an unconfirmed or refused
+        give moves no cowoncy, and charging it would starve the next `farmers send`
+        of an allowance the account still has.
+        """
+        amount = int(amount or 0)
+        if amount <= 0:
+            return
+        rec = self._allowance()
+        rec['sent'] = int(rec.get('sent') or 0) + amount
+        state.save_account_stats()
+        left = self._remaining_today()
+        if left is not None:
+            self.bot.log("INFO", f"Owner command 'send': {rec['sent']:,} of "
+                                 f"{self._daily_limit():,} sent today, {left:,} left.")
+
     async def _handle_cash_reply(self, message, owner_id):
         if not self._cash_requested_at:
             return
@@ -163,10 +224,22 @@ class Owner(commands.Cog):
             return
 
         pct = self._send_percent()
-        amount = min(int(balance * pct / 100), MAX_GIVE)
+        share = int(balance * pct / 100)
+        amount = min(share, MAX_GIVE)
         if amount < 1:
             self.bot.log("INFO", f"Owner command 'send': {pct:g}% of {balance} rounds to zero, nothing to transfer.")
             return
+
+        # OwO refuses the give outright once the day's gift allowance is spent, and a
+        # refused give still burns a command and leaves the operator thinking the
+        # cowoncy is on its way - so cap the amount instead of firing a doomed transfer
+        remaining = self._remaining_today()
+        if remaining is not None:
+            if remaining < 1:
+                self.bot.log("INFO", f"Owner command 'send': today's {self._daily_limit():,} cowoncy gift "
+                                     f"limit is used up - nothing more can be sent until it resets at UTC midnight.")
+                return
+            amount = min(amount, remaining)
 
         self._awaiting_give_confirm = time.time()
         self._give_amount = amount
@@ -176,10 +249,45 @@ class Owner(commands.Cog):
             priority=2,
             target_channel_id=self._transfer_channel_id
         )
-        if amount >= MAX_GIVE and balance * pct / 100 > MAX_GIVE:
-            self.bot.log("INFO", f"Owner command 'send': sending {amount} cowoncy (owo per-transfer cap), keeping {balance - amount}.")
+        if amount < share:
+            capped_by = ("today's gift limit" if remaining is not None and amount == remaining
+                         else 'owo per-transfer cap')
+            self.bot.log("INFO", f"Owner command 'send': sending {amount:,} cowoncy ({capped_by}), "
+                                 f"keeping {balance - amount:,}.")
         else:
-            self.bot.log("SUCCESS", f"Owner command 'send': sending {amount} cowoncy ({pct:g}% of {balance}) to the owner.")
+            self.bot.log("SUCCESS", f"Owner command 'send': sending {amount:,} cowoncy "
+                                    f"({pct:g}% of {balance:,}) to the owner.")
+
+    # OwO's own refusal, whatever the exact wording: "you can't gift any more today",
+    # "gift limit reached". Only read while we are waiting on a give we just fired.
+    GIFT_LIMIT_RE = re.compile(
+        r"(?:gift|give|send)\w*[^.!?]{0,60}(?:limit|max(?:imum)?)"
+        r"|(?:limit|max(?:imum)?)[^.!?]{0,60}(?:gift|give|send)"
+        r"|can(?:'?t|not)[^.!?]{0,60}(?:gift|give|send)[^.!?]{0,60}(?:today|24)"
+    )
+
+    async def _handle_gift_limit_reply(self, message):
+        """Believe OwO over our own counter when it says the day is spent.
+
+        `daily_send_limit` is a guess at somebody else's number, so it can be wrong
+        or go stale. If OwO refuses the give we just fired, treat the allowance as
+        gone for the day rather than retrying into the same wall.
+        """
+        if not self._confirm_window_open() or self._daily_limit() <= 0:
+            return
+        if not self.bot.is_message_for_me(message):
+            return
+        text = self.bot.get_full_content(message).lower()
+        if not self.GIFT_LIMIT_RE.search(text):
+            return
+
+        self._awaiting_give_confirm = 0
+        rec = self._allowance()
+        rec['sent'] = max(int(rec.get('sent') or 0), self._daily_limit())
+        state.save_account_stats()
+        self.bot.log("WARN", "Owner command 'send': owo refused the transfer as over the daily gift "
+                             "limit - no more sends today. Lower owner.daily_send_limit if this keeps "
+                             "happening early.")
 
     def _confirm_window_open(self):
         """True while we are still waiting for OwO's give confirmation prompt."""
@@ -285,6 +393,7 @@ class Owner(commands.Cog):
         if ok:
             self._awaiting_give_confirm = 0
             self.bot.log("SUCCESS", f"Owner command 'send': confirmed the transfer of {self._give_amount} cowoncy{f' ({label})' if label else ''}.")
+            self._book_sent(self._give_amount)
         else:
             # let the next MESSAGE_UPDATE retry - a rejected interaction is not a
             # confirmed one, and dropping it silently loses the whole transfer
@@ -330,6 +439,7 @@ class Owner(commands.Cog):
                     await btn.click()
                     self._awaiting_give_confirm = 0
                     self.bot.log("SUCCESS", "Owner command 'send': clicked confirm to complete the transfer.")
+                    self._book_sent(self._give_amount)
                     return
         except Exception as e:
             self.bot.log("ERROR", f"Owner command 'send': failed to click confirm button: {e}")
@@ -340,7 +450,11 @@ class Owner(commands.Cog):
         owner_id = self._owner_id()
         trigger = str(cfg.get('trigger', 'farmers')).lower().strip()
         if owner_id:
-            self.bot.log("SYS", f"Owner commands active for {owner_id} - '{trigger} pay | {trigger} send ({self._send_percent():g}% of balance) | {trigger} showbal | {trigger} <any owo command>'")
+            limit = self._daily_limit()
+            cap = f", up to {limit:,}/day" if limit > 0 else ""
+            self.bot.log("SYS", f"Owner commands active for {owner_id} - '{trigger} pay | {trigger} send "
+                                f"({self._send_percent():g}% of balance{cap}) | {trigger} showbal | "
+                                f"{trigger} <any owo command>'")
         elif cfg.get('enabled', False):
             self.bot.log("WARN", f"Owner commands enabled but owner.user_id is not a Discord ID: {cfg.get('user_id')!r}")
 

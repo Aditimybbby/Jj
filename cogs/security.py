@@ -65,16 +65,20 @@ class Security(commands.Cog):
         service, key_field = self._selected_key_field(sol_cfg)
         if sol_cfg.get(key_field):
             return True
+        # The extension is a whole solver on its own and holds no account with any of
+        # the paid services, so its key settles the "is this configured" question
+        # whatever `service` says: that field only picks *which paid provider* would be
+        # used, and insisting on one made an extension-only setup log a warning telling
+        # the operator to go buy a key they do not need. Checked before the per-service
+        # branch so it holds for the shipped default (yescaptcha) too.
+        if self._nopecha_extension_key(sol_cfg):
+            self.bot.log(
+                "SYS",
+                "NopeCHA extension key set: no paid captcha service is needed - the "
+                "browser solve will spend it in-page instead."
+            )
+            return False
         if service == "nopecha":
-            # a booster key cannot buy an API solve, so skip straight to the browser
-            # solver, which loads the extension the key actually belongs to
-            if self._nopecha_extension_key(sol_cfg):
-                self.bot.log(
-                    "SYS",
-                    "NopeCHA booster key set: those are extension-only, so the browser "
-                    "solve will spend it instead of api.nopecha.com."
-                )
-                return False
             # nopecha is the one service with a keyless free tier - web_solver.auto_verify
             # lets it through without a key too, so agree with it here
             return True
