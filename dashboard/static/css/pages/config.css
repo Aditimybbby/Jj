@@ -445,6 +445,26 @@
     margin-top: 4px;
     font-weight: normal;
 }
+/* A NopeCHA extension key makes the paid service, its API key and its balance
+   irrelevant. Faded rather than hidden or disabled: an operator who holds both keys
+   must still be able to reach them, they just should not read as required. */
+.csw-row-optional { opacity: 0.55; }
+.csw-row-optional:hover, .csw-row-optional:focus-within { opacity: 1; }
+.csw-optional-tag {
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 1px 6px;
+    margin-left: 6px;
+    border-radius: 999px;
+    color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-soft);
+    vertical-align: middle;
+}
+.csw-optional-note { color: var(--accent-2); }
 .csw-dropdown-wrap {
     display: flex;
     align-items: center;

@@ -109,6 +109,17 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
     // so every captcha still came back to the operator to solve by hand.
     const live       = enabled && parentEnabled;
     const dis        = live ? '' : ' disabled';
+    // Mirrors nopecha_extension.resolve_key / Security._nopecha_extension_key: with an
+    // extension key configured the paid path is skipped entirely, so the three rows
+    // below are dead weight. They stay editable - somebody may hold both - but they
+    // stop presenting themselves as something that has to be filled in.
+    const nope       = (cfg.browser_solver || {}).nopecha || {};
+    const extOnly    = nope.enabled !== false
+        && !!String(nope.key || cfg.nopecha_booster_key || '').trim();
+    const optional   = extOnly ? ' csw-row-optional' : '';
+    const optHint    = extOnly
+        ? '<span class="csw-service-hint csw-optional-note">Not needed &mdash; the NopeCHA extension below is solving these.</span>'
+        : '';
     const serviceOptions = Object.entries(CAPTCHA_SERVICES).map(([id, s]) => `
         <option value="${id}" ${id === service ? 'selected' : ''}>${s.label}</option>
     `).join('');
@@ -117,10 +128,11 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
             <div class="cfg-row-label"><span class="cfg-label-text">Enable Auto-Solver</span></div>
             <div class="cfg-row-control">${renderNeuraToggle(basePath + '.enabled', enabled, parentEnabled, true)}</div>
         </div>
-        <div class="cfg-row csw-service-row" data-path="${basePath}.service">
+        <div class="cfg-row csw-service-row${optional}" data-path="${basePath}.service">
             <div class="cfg-row-label">
-                <span class="cfg-label-text">Service</span>
+                <span class="cfg-label-text">Service${extOnly ? ' <span class="csw-optional-tag">optional</span>' : ''}</span>
                 <span class="csw-service-hint">${svcInfo.hint}</span>
+                ${optHint}
             </div>
             <div class="cfg-row-control">
                 <div class="csw-dropdown-wrap">
@@ -132,10 +144,11 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
                 </div>
             </div>
         </div>
-        <div class="cfg-row csw-key-row" data-path="${basePath}.${svcInfo.keyField}" id="csw-key-row">
+        <div class="cfg-row csw-key-row${optional}" data-path="${basePath}.${svcInfo.keyField}" id="csw-key-row">
             <div class="cfg-row-label">
-                <span class="cfg-label-text">${svcInfo.label} API Key</span>
+                <span class="cfg-label-text">${svcInfo.label} API Key${extOnly ? ' <span class="csw-optional-tag">optional</span>' : ''}</span>
                 ${live ? '' : '<span class="csw-service-hint">Turn on Enable Auto-Solver first, then pick your service.</span>'}
+                ${live ? optHint : ''}
             </div>
             <div class="cfg-row-control">
                 <div class="cfg-input-wrap">
@@ -145,7 +158,7 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
                 </div>
             </div>
         </div>
-        <div class="cfg-row csw-balance-row">
+        <div class="cfg-row csw-balance-row${optional}">
             <div class="cfg-row-label"><span class="cfg-label-text">Live Balance</span></div>
             <div class="cfg-row-control">
                 <div class="csw-balance-wrap">

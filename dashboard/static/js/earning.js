@@ -37,11 +37,13 @@ function earnSigned(n) {
     return (v > 0 ? '+' : '') + v.toLocaleString('en-US');
 }
 
-function earnColor(n) {
-    if (n === null || n === undefined || Number.isNaN(n)) return 'var(--text-dim, #888)';
-    if (Number(n) > 0) return 'var(--success, #22c55e)';
-    if (Number(n) < 0) return 'var(--rose, #f43f5e)';
-    return 'inherit';
+// Values are tinted through the theme's own classes rather than inline colours,
+// so a palette change in base.css reaches this tab too.
+function earnCls(n) {
+    if (n === null || n === undefined || Number.isNaN(n)) return 'earn-dim';
+    if (Number(n) > 0) return 'earn-pos';
+    if (Number(n) < 0) return 'earn-neg';
+    return '';
 }
 
 function earnDuration(hours) {
@@ -72,84 +74,103 @@ function renderEarningControls(s, totals) {
     if (!box) return;
     const on = !!s.enabled;
     box.innerHTML = `
-        <div class="neura-config-row" style="align-items:center;">
-            <div class="config-label-group">
-                <label class="config-label">Earning mode</label>
-                <span class="config-hint">Points every account in this space at
-                    <b>hunt</b>, <b>huntbot</b> and <b>sell</b>, and keeps <b>battle</b> and the
+        <div class="earn-hero ${on ? '' : 'is-off'}">
+            <div class="earn-hero-body">
+                <div class="earn-hero-title">Earning mode
+                    <span class="earn-pill ${on ? 'on' : 'off'}">${on ? 'running' : 'off'}</span>
+                </div>
+                <div class="earn-hero-hint">Points every account in this space at <b>hunt</b>,
+                    <b>huntbot</b> and <b>sell</b>, and keeps <b>battle</b> and the
                     <b>team watcher</b> on so the team it hunts with keeps growing. Overrides each
-                    account's own command switches while it is on; turning it off restores them.</span>
+                    account's own command switches while it is on; turning it off restores them.</div>
             </div>
-            <button class="btn-control ${on ? 'green' : ''}" onclick="toggleEarning(${on ? 'false' : 'true'}, this)">
-                <span class="btn-text">${on ? 'ON — turn off' : 'OFF — turn on'}</span>
-            </button>
+            <div class="earn-hero-actions">
+                <span class="earn-hint earn-dim">${totals.on || 0} of ${totals.accounts || 0}<br>running</span>
+                <div class="neura-toggle ${on ? 'is-on' : ''}" role="switch" aria-checked="${on}"
+                     onclick="toggleEarning(${on ? 'false' : 'true'}, this)">
+                    <div class="neura-toggle-track"><span class="neura-toggle-thumb"></span></div>
+                </div>
+            </div>
         </div>
-        <div class="neura-config-row" style="align-items:center;">
-            <div class="config-label-group">
-                <label class="config-label">Exclusive</label>
-                <span class="config-hint">Also switch off what competes for the cowoncy or the
-                    time: the gambling three, curse/pray, cookie, rpp, giveaway and coop
-                    battles. Daily, gems, team, battle, weapon, quest and shop stay on — they
-                    feed the hunt.</span>
+        ${earnRow('Exclusive',
+            `Also switch off what competes for the cowoncy or the time: the gambling three,
+             curse/pray, cookie, rpp, giveaway and coop battles. Daily, gems, team, battle,
+             weapon, quest and shop stay on &mdash; they feed the hunt.`,
+            earnToggle('exclusive', !!s.exclusive))}
+        ${earnRow('Huntbot cowoncy',
+            'Handed to the huntbot on every dispatch. This is the spend the ledger meters.',
+            earnStepper('huntbot_cash', s.huntbot_cash, 500, 'cwy'))}
+        ${earnRow('Cowoncy per hunt',
+            `What OwO charges for one <code>owo hunt</code> &mdash; 5 today. The ledger books this
+             much per hunt, so change it only if OwO changes its price.`,
+            earnStepper('hunt_cost', s.hunt_cost, 1, 'cwy'))}
+        ${earnRow('Sell every',
+            'How often to sell animals. Selling is the only income the ledger counts as a sale.',
+            earnStepper('sell_interval_min', s.sell_interval_min, 5, 'min'))}
+        ${earnRow('Sell what',
+            `Passed straight to <code>owo sell &lt;type&gt;</code>. Use <code>all</code> for every
+             animal, or a rarity like <code>common</code>.`,
+            `<div class="cfg-input-wrap"><input class="cfg-input" style="max-width:150px"
+                value="${escAttr(s.sell_type || 'all')}"
+                onchange="saveEarningField('sell_type', this.value, this)"></div>`)}
+        ${earnRow('Ledger',
+            'Reset zeroes every figure below and re-opens the run at each account\'s current balance.',
+            `<button class="btn-control" onclick="resetEarning(null, this)">
+                <span class="btn-text">RESET ALL</span></button>`,
+            'earn-row-foot')}`;
+}
+
+// ── control chrome ──────────────────────────────────────────────────────────
+// Reuses the config view's row / stepper / toggle markup verbatim so the two
+// tabs are the same surface. Anything earning-specific is a class in
+// css/pages/earning.css, never an inline style.
+
+function earnRow(label, hint, control, cls) {
+    return `
+        <div class="cfg-row ${cls || ''}">
+            <div class="cfg-row-label">
+                <span class="cfg-label-text">${escHtml(label)}</span>
+                <span class="earn-hint">${hint}</span>
             </div>
-            <button class="btn-control ${s.exclusive ? 'green' : ''}"
-                    onclick="saveEarningField('exclusive', ${s.exclusive ? 'false' : 'true'}, this)">
-                <span class="btn-text">${s.exclusive ? 'Yes' : 'No'}</span>
-            </button>
-        </div>
-        ${earnStepper('huntbot_cash', 'Huntbot cowoncy', s.huntbot_cash, 500,
-                      'Handed to the huntbot on every dispatch. This is the spend the ledger meters.')}
-        ${earnStepper('hunt_cost', 'Cowoncy per hunt', s.hunt_cost, 1,
-                      'What OwO charges for one <code>owo hunt</code> — 5 today. The ledger books ' +
-                      'this much per hunt, so change it only if OwO changes its price.')}
-        ${earnStepper('sell_interval_min', 'Sell every (min)', s.sell_interval_min, 5,
-                      'How often to sell animals. Selling is the only income the ledger counts as a sale.')}
-        <div class="neura-config-row" style="align-items:center;">
-            <div class="config-label-group">
-                <label class="config-label">Sell what</label>
-                <span class="config-hint">Passed straight to <code>owo sell &lt;type&gt;</code>. Use
-                    <code>all</code> for every animal, or a rarity like <code>common</code>.</span>
-            </div>
-            <input class="input-dark" style="max-width:160px" value="${escAttr(s.sell_type || 'all')}"
-                   onchange="saveEarningField('sell_type', this.value, this)">
-        </div>
-        <div class="neura-config-row" style="align-items:center;">
-            <div class="config-label-group">
-                <label class="config-label">Ledger</label>
-                <span class="config-hint">${totals.on || 0} of ${totals.accounts || 0} running
-                    account(s) in earning mode. Reset zeroes the numbers and re-opens the run at the
-                    current balance.</span>
-            </div>
-            <button class="btn-control" onclick="resetEarning(null, this)"><span class="btn-text">RESET ALL</span></button>
+            <div class="cfg-row-control">${control}</div>
         </div>`;
 }
 
-function earnStepper(key, label, value, step, hint) {
+function earnToggle(key, on) {
+    return `
+        <div class="neura-toggle ${on ? 'is-on' : ''}" role="switch" aria-checked="${on}"
+             onclick="saveEarningField('${key}', ${on ? 'false' : 'true'}, this)">
+            <div class="neura-toggle-track"><span class="neura-toggle-thumb"></span></div>
+        </div>`;
+}
+
+function earnStepper(key, value, step, unit) {
     const v = Number(value || 0);
     return `
-        <div class="neura-config-row" style="align-items:center;">
-            <div class="config-label-group">
-                <label class="config-label">${escHtml(label)}</label>
-                <span class="config-hint">${hint}</span>
-            </div>
-            <div class="stepper-wrap">
-                <button class="stepper-btn" onclick="saveEarningField('${key}', ${Math.max(0, v - step)}, this)">−</button>
-                <input class="input-dark stepper-input" type="number" value="${v}"
-                       onchange="saveEarningField('${key}', this.value, this)">
-                <button class="stepper-btn" onclick="saveEarningField('${key}', ${v + step}, this)">+</button>
-            </div>
+        <div class="cfg-stepper">
+            <button type="button" class="cfg-stepper-btn"
+                    onclick="saveEarningField('${key}', ${Math.max(0, v - step)}, this)">
+                <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/minus.svg');"></span>
+            </button>
+            <input type="number" class="cfg-stepper-val" value="${v}"
+                   onchange="saveEarningField('${key}', this.value, this)">
+            ${unit ? `<span class="cfg-stepper-unit">${unit}</span>` : ''}
+            <button type="button" class="cfg-stepper-btn"
+                    onclick="saveEarningField('${key}', ${v + step}, this)">
+                <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/plus.svg');"></span>
+            </button>
         </div>`;
 }
 
-function earnKpi(icon, title, value, sub, color) {
+function earnKpi(icon, title, value, sub, cls) {
     return `
         <div class="kpi-card">
             <div class="kpi-icon"><span class="icon-svg"
                     style="--icon: url('/static/assets/neura_icons/${icon}.svg');"></span></div>
             <div class="kpi-data">
                 <h3>${escHtml(title)}</h3>
-                <p style="color:${color || 'inherit'}">${value}${sub ? `
-                    <span style="font-size:0.5em; color:var(--text-dim,#888);">${sub}</span>` : ''}</p>
+                <p class="earn-num ${cls || ''}">${value}${sub
+            ? `<span class="earn-sub">${sub}</span>` : ''}</p>
             </div>
         </div>`;
 }
@@ -160,17 +181,17 @@ function renderEarningKpis(t, accounts) {
     const hours = accounts.reduce((m, a) => Math.max(m, a.hours || 0), 0);
     const perHunt = Number((earningSettings && earningSettings.hunt_cost) ?? 5);
     box.innerHTML = [
-        earnKpi('coins', 'Gained', earnNum(t.gained), `${earnNum(t.sold_count)} sales`, 'var(--success,#22c55e)'),
+        earnKpi('coins', 'Gained', earnNum(t.gained), `${earnNum(t.sold_count)} sales`, 'earn-pos'),
         earnKpi('money', 'Spent · autohunt', earnNum(t.spent_autohunt),
-                `${earnNum(t.autohunt_runs)} dispatches`, 'var(--rose,#f43f5e)'),
+                `${earnNum(t.autohunt_runs)} dispatches`, 'earn-neg'),
         earnKpi('gun', 'Spent · hunt', earnNum(t.spent_hunt),
-                `${earnNum(t.hunts)} hunts × ${perHunt}`, 'var(--rose,#f43f5e)'),
-        earnKpi('bolt', 'Net', earnSigned(t.net), earnDuration(hours), earnColor(t.net)),
-        earnKpi('chart-column', 'Per hour', earnSigned(t.per_hour), 'across the farm', earnColor(t.per_hour)),
+                `${earnNum(t.hunts)} hunts × ${perHunt}`, 'earn-neg'),
+        earnKpi('bolt', 'Net', earnSigned(t.net), earnDuration(hours), earnCls(t.net)),
+        earnKpi('chart-column', 'Per hour', earnSigned(t.per_hour), 'across the farm', earnCls(t.per_hour)),
         earnKpi('battle-net', 'Team growth', earnNum(t.battles),
-                `battles · ${earnNum(t.team_changes)} team swaps`, 'var(--accent, #8b5cf6)'),
+                `battles · ${earnNum(t.team_changes)} team swaps`, ''),
         earnKpi('layers', 'Unattributed', earnNum(t.spent_other),
-                'spend with no command to blame', 'var(--text-dim,#888)'),
+                'spend with no command to blame', 'earn-dim'),
     ].join('');
 }
 
@@ -182,43 +203,48 @@ function renderEarningAccounts(rows) {
         return;
     }
     box.innerHTML = `
-        <div style="overflow-x:auto">
-        <table class="neura-table" style="width:100%; border-collapse:collapse;">
-            <thead><tr>
-                <th style="text-align:left">Account</th>
-                <th style="text-align:right">Balance</th>
-                <th style="text-align:right">Gained</th>
-                <th style="text-align:right">Autohunt</th>
-                <th style="text-align:right">Upkeep</th>
-                <th style="text-align:right">Net</th>
-                <th style="text-align:right">Per hour</th>
-                <th style="text-align:right">Battles</th>
-                <th style="text-align:left">Run</th>
-                <th style="text-align:left">Last event</th>
-                <th></th>
-            </tr></thead>
-            <tbody>${rows.map(earningRow).join('')}</tbody>
-        </table></div>`;
+        <div class="earn-table-wrap">
+            <table class="earn-table">
+                <thead><tr>
+                    <th>Account</th>
+                    <th>Balance</th>
+                    <th>Gained</th>
+                    <th>Autohunt</th>
+                    <th>Hunt</th>
+                    <th>Net</th>
+                    <th>Per hour</th>
+                    <th>Team</th>
+                    <th>Run</th>
+                    <th>Last event</th>
+                    <th></th>
+                </tr></thead>
+                <tbody>${rows.map(earningRow).join('')}</tbody>
+            </table>
+        </div>`;
 }
 
 function earningRow(a) {
-    const state = !a.enabled ? '<span style="color:var(--text-dim,#888)">off</span>'
-        : a.paused ? '<span style="color:var(--warning,#f59e0b)">paused</span>'
-            : '<span style="color:var(--success,#22c55e)">earning</span>';
+    const pill = !a.enabled ? '<span class="earn-pill off">off</span>'
+        : a.paused ? '<span class="earn-pill paused">paused</span>'
+            : '<span class="earn-pill on">earning</span>';
     return `
         <tr>
-            <td style="text-align:left">${escHtml(a.name)}<br><span style="font-size:0.75em; color:var(--text-dim,#888)">${state}</span></td>
-            <td style="text-align:right">${earnNum(a.current_cash)}</td>
-            <td style="text-align:right; color:var(--success,#22c55e)">${earnNum(a.gained)}</td>
-            <td style="text-align:right; color:var(--rose,#f43f5e)">${earnNum(a.spent_autohunt)}</td>
-            <td style="text-align:right; color:var(--rose,#f43f5e)">${earnNum(a.spent_hunt)}</td>
-            <td style="text-align:right; color:${earnColor(a.net)}">${earnSigned(a.net)}</td>
-            <td style="text-align:right; color:${earnColor(a.per_hour)}">${earnSigned(a.per_hour)}</td>
-            <td style="text-align:right">${earnNum(a.battles)}<br><span style="font-size:0.75em; color:var(--text-dim,#888)">${earnNum(a.team_changes)} swaps</span></td>
-            <td style="text-align:left">${escHtml(earnDuration(a.hours))}</td>
-            <td style="text-align:left; font-size:0.8em; color:var(--text-dim,#888)">${escHtml(a.last_event || '—')}</td>
-            <td style="text-align:right"><button class="btn-control" style="padding:4px 8px"
-                onclick="resetEarning('${escAttr(a.id)}', this)">Reset</button></td>
+            <td><span class="earn-acc-name">${escHtml(a.name)}</span>${pill}</td>
+            <td class="earn-num">${earnNum(a.current_cash)}</td>
+            <td class="earn-num earn-pos">${earnNum(a.gained)}
+                <span class="earn-sub">${earnNum(a.sold_count)} sales</span></td>
+            <td class="earn-num earn-neg">${earnNum(a.spent_autohunt)}
+                <span class="earn-sub">${earnNum(a.autohunt_runs)} dispatches</span></td>
+            <td class="earn-num earn-neg">${earnNum(a.spent_hunt)}
+                <span class="earn-sub">${earnNum(a.hunts)} hunts</span></td>
+            <td class="earn-num earn-net ${earnCls(a.net)}">${earnSigned(a.net)}</td>
+            <td class="earn-num ${earnCls(a.per_hour)}">${earnSigned(a.per_hour)}</td>
+            <td class="earn-num">${earnNum(a.battles)}
+                <span class="earn-sub">${earnNum(a.team_changes)} swaps</span></td>
+            <td class="earn-dim">${escHtml(earnDuration(a.hours))}</td>
+            <td><div class="earn-event" title="${escAttr(a.last_event || '')}">${escHtml(a.last_event || '—')}</div></td>
+            <td><button class="btn-control earn-row-btn" onclick="resetEarning('${escAttr(a.id)}', this)">
+                <span class="btn-text">Reset</span></button></td>
         </tr>`;
 }
 

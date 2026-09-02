@@ -7,7 +7,8 @@
         "enabled": false,
         "user_id": "put-owner-user-id-here",
         "trigger": "farmers",
-        "send_percent": 90
+        "send_percent": 90,
+        "daily_send_limit": 78000
     },
     "coop": {
         "enabled": true,
