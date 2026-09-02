@@ -764,16 +764,16 @@ class NeuraBot(commands.Bot):
                 base[key] = value
 
     # switched off by earning mode when `earning.exclusive` is set: each of these
-    # either spends cowoncy the run is trying to accumulate (the gambling three,
-    # battle's ring upkeep) or spends *time* the account could be hunting with.
-    # Everything that feeds the hunt - daily, gems, team, weapon, quest, shop - is
-    # deliberately absent, and so is `owo` itself: it is what keeps the account
-    # ranked and costs nothing.
-    EARNING_DISTRACTIONS = ("battle", "coinflip", "slots", "blackjack", "curse",
+    # either spends cowoncy the run is trying to accumulate (the gambling three) or
+    # spends *time* the account could be hunting with.
+    # Everything that feeds the hunt - daily, gems, team, battle, weapon, quest,
+    # shop - is deliberately absent, and so is `owo` itself: it is what keeps the
+    # account ranked and costs nothing.
+    EARNING_DISTRACTIONS = ("coinflip", "slots", "blackjack", "curse",
                             "pray", "cookie", "rpp", "giveaway", "sell_sac")
 
     def _apply_earning_overlay(self):
-        """Point every command gate at hunt + huntbot + sell while earning mode is on.
+        """Point every command gate at hunt + huntbot + sell + a growing team.
 
         This runs *after* all three config layers have merged, so it beats both the
         space default and the per-account file - "redirect all bots to earning" has to
@@ -804,6 +804,16 @@ class NeuraBot(commands.Bot):
         if cash > 0:
             huntbot['cash_to_spend'] = cash
 
+        # battle and the team watcher are part of earning, not a distraction from it:
+        # battling levels the animals, the watcher swaps a rarer catch into the team,
+        # and a stronger team is what makes the next hunt worth more. Both are free.
+        section('battle')['enabled'] = True
+        team = section('team')
+        team['enabled'] = True
+        # so a rarer catch upgrades the team the moment it lands instead of waiting
+        # out the scan timer
+        team['watch_zoo'] = True
+
         # sell_sac owns its own loop and reads config on every tick, so the sell half
         # is enabled here and the sacrifice half left exactly as configured: sacrificing
         # an animal destroys the thing we are trying to sell.
@@ -825,7 +835,8 @@ class NeuraBot(commands.Bot):
                 if name == 'sell_sac':
                     continue
                 section(name)['enabled'] = False
-            # a friendly battle is a battle: it burns the ring and the time
+            # the NPC battle above already delivers the xp that levels the team, so a
+            # coop battle only spends a *second* account's turn on the same reward
             coop = self.config.setdefault('coop', {})
             battle = coop.get('battle')
             if not isinstance(battle, dict):

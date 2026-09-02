@@ -114,6 +114,9 @@ def empty_earning():
         'sold_count': 0,
         'hunts': 0,
         'autohunt_runs': 0,
+        # free, but they are the reinvestment: a stronger team hunts better
+        'battles': 0,
+        'team_changes': 0,
         'last_sell_amount': None,
         'last_event': None,
         'last_event_at': None,

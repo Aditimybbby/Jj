@@ -1992,7 +1992,8 @@ def _space_config(owner, account_id=None):
 
 
 EARNING_DEFAULTS = {'enabled': False, 'exclusive': True, 'sell_interval_min': 20,
-                    'sell_type': 'all', 'huntbot_cash': 3000, 'cash_poll_min': 5}
+                    'sell_type': 'all', 'huntbot_cash': 3000, 'hunt_cost': 5,
+                    'cash_poll_min': 5}
 
 
 def _earning_row(bot):
@@ -2047,6 +2048,8 @@ def _earning_row(bot):
         'sold_count': int(led.get('sold_count') or 0),
         'hunts': int(led.get('hunts') or 0),
         'autohunt_runs': int(led.get('autohunt_runs') or 0),
+        'battles': int(led.get('battles') or 0),
+        'team_changes': int(led.get('team_changes') or 0),
         'last_sell_amount': led.get('last_sell_amount'),
         'last_event': led.get('last_event'),
         'last_event_at': led.get('last_event_at'),
@@ -2068,10 +2071,12 @@ def earning_api():
 
     totals = {'gained': 0, 'spent': 0, 'spent_autohunt': 0, 'spent_hunt': 0,
               'spent_other': 0, 'net': 0, 'sold_count': 0, 'hunts': 0,
-              'autohunt_runs': 0, 'per_hour': 0, 'accounts': len(rows), 'on': 0}
+              'autohunt_runs': 0, 'battles': 0, 'team_changes': 0,
+              'per_hour': 0, 'accounts': len(rows), 'on': 0}
     for row in rows:
         for key in ('gained', 'spent', 'spent_autohunt', 'spent_hunt', 'spent_other',
-                    'net', 'sold_count', 'hunts', 'autohunt_runs'):
+                    'net', 'sold_count', 'hunts', 'autohunt_runs', 'battles',
+                    'team_changes'):
             totals[key] += row[key] or 0
         totals['per_hour'] += row['per_hour'] or 0
         if row['enabled']:
@@ -2102,7 +2107,7 @@ def earning_toggle():
     if 'exclusive' in data:
         settings['exclusive'] = bool(data.get('exclusive'))
     for key, low, high in (('sell_interval_min', 1, 1440), ('huntbot_cash', 0, 250000),
-                           ('cash_poll_min', 1, 120)):
+                           ('hunt_cost', 0, 10000), ('cash_poll_min', 1, 120)):
         if key in data:
             try:
                 settings[key] = max(low, min(high, int(data[key])))

@@ -28,6 +28,7 @@
         "sell_interval_min": 20,
         "sell_type": "all",
         "huntbot_cash": 3000,
+        "hunt_cost": 5,
         "cash_poll_min": 5
     },
     "commands": {

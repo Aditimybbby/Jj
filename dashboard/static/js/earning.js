@@ -16,7 +16,8 @@
 */
 
 // The Earning tab. One switch that points every account in the space at
-// hunt + huntbot + sell, and the ledger those accounts keep while it is on.
+// hunt + huntbot + sell, keeps battle and the team watcher on so the team the
+// hunt depends on keeps growing, and the ledger those accounts keep while it is on.
 //
 // Every figure here comes from the server's cash-flow ledger (cogs/earning.py):
 // gained minus spent always equals the account's real cowoncy movement, so a
@@ -75,8 +76,9 @@ function renderEarningControls(s, totals) {
             <div class="config-label-group">
                 <label class="config-label">Earning mode</label>
                 <span class="config-hint">Points every account in this space at
-                    <b>hunt</b>, <b>huntbot</b> and <b>sell</b>. Overrides each account's own
-                    command switches while it is on; turning it off restores them.</span>
+                    <b>hunt</b>, <b>huntbot</b> and <b>sell</b>, and keeps <b>battle</b> and the
+                    <b>team watcher</b> on so the team it hunts with keeps growing. Overrides each
+                    account's own command switches while it is on; turning it off restores them.</span>
             </div>
             <button class="btn-control ${on ? 'green' : ''}" onclick="toggleEarning(${on ? 'false' : 'true'}, this)">
                 <span class="btn-text">${on ? 'ON — turn off' : 'OFF — turn on'}</span>
@@ -86,8 +88,9 @@ function renderEarningControls(s, totals) {
             <div class="config-label-group">
                 <label class="config-label">Exclusive</label>
                 <span class="config-hint">Also switch off what competes for the cowoncy or the
-                    time: battle, the gambling three, curse/pray, cookie, rpp, giveaway and coop
-                    battles. Daily, gems, team, weapon, quest and shop stay on — they feed the hunt.</span>
+                    time: the gambling three, curse/pray, cookie, rpp, giveaway and coop
+                    battles. Daily, gems, team, battle, weapon, quest and shop stay on — they
+                    feed the hunt.</span>
             </div>
             <button class="btn-control ${s.exclusive ? 'green' : ''}"
                     onclick="saveEarningField('exclusive', ${s.exclusive ? 'false' : 'true'}, this)">
@@ -96,6 +99,9 @@ function renderEarningControls(s, totals) {
         </div>
         ${earnStepper('huntbot_cash', 'Huntbot cowoncy', s.huntbot_cash, 500,
                       'Handed to the huntbot on every dispatch. This is the spend the ledger meters.')}
+        ${earnStepper('hunt_cost', 'Cowoncy per hunt', s.hunt_cost, 1,
+                      'What OwO charges for one <code>owo hunt</code> — 5 today. The ledger books ' +
+                      'this much per hunt, so change it only if OwO changes its price.')}
         ${earnStepper('sell_interval_min', 'Sell every (min)', s.sell_interval_min, 5,
                       'How often to sell animals. Selling is the only income the ledger counts as a sale.')}
         <div class="neura-config-row" style="align-items:center;">
@@ -152,14 +158,17 @@ function renderEarningKpis(t, accounts) {
     const box = document.getElementById('earning-kpis');
     if (!box) return;
     const hours = accounts.reduce((m, a) => Math.max(m, a.hours || 0), 0);
+    const perHunt = Number((earningSettings && earningSettings.hunt_cost) ?? 5);
     box.innerHTML = [
         earnKpi('coins', 'Gained', earnNum(t.gained), `${earnNum(t.sold_count)} sales`, 'var(--success,#22c55e)'),
         earnKpi('money', 'Spent · autohunt', earnNum(t.spent_autohunt),
                 `${earnNum(t.autohunt_runs)} dispatches`, 'var(--rose,#f43f5e)'),
-        earnKpi('gun', 'Spent · hunt upkeep', earnNum(t.spent_hunt),
-                `${earnNum(t.hunts)} hunts sent`, 'var(--rose,#f43f5e)'),
+        earnKpi('gun', 'Spent · hunt', earnNum(t.spent_hunt),
+                `${earnNum(t.hunts)} hunts × ${perHunt}`, 'var(--rose,#f43f5e)'),
         earnKpi('bolt', 'Net', earnSigned(t.net), earnDuration(hours), earnColor(t.net)),
         earnKpi('chart-column', 'Per hour', earnSigned(t.per_hour), 'across the farm', earnColor(t.per_hour)),
+        earnKpi('battle-net', 'Team growth', earnNum(t.battles),
+                `battles · ${earnNum(t.team_changes)} team swaps`, 'var(--accent, #8b5cf6)'),
         earnKpi('layers', 'Unattributed', earnNum(t.spent_other),
                 'spend with no command to blame', 'var(--text-dim,#888)'),
     ].join('');
@@ -183,6 +192,7 @@ function renderEarningAccounts(rows) {
                 <th style="text-align:right">Upkeep</th>
                 <th style="text-align:right">Net</th>
                 <th style="text-align:right">Per hour</th>
+                <th style="text-align:right">Battles</th>
                 <th style="text-align:left">Run</th>
                 <th style="text-align:left">Last event</th>
                 <th></th>
@@ -204,6 +214,7 @@ function earningRow(a) {
             <td style="text-align:right; color:var(--rose,#f43f5e)">${earnNum(a.spent_hunt)}</td>
             <td style="text-align:right; color:${earnColor(a.net)}">${earnSigned(a.net)}</td>
             <td style="text-align:right; color:${earnColor(a.per_hour)}">${earnSigned(a.per_hour)}</td>
+            <td style="text-align:right">${earnNum(a.battles)}<br><span style="font-size:0.75em; color:var(--text-dim,#888)">${earnNum(a.team_changes)} swaps</span></td>
             <td style="text-align:left">${escHtml(earnDuration(a.hours))}</td>
             <td style="text-align:left; font-size:0.8em; color:var(--text-dim,#888)">${escHtml(a.last_event || '—')}</td>
             <td style="text-align:right"><button class="btn-control" style="padding:4px 8px"
