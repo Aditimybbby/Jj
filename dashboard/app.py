@@ -830,6 +830,161 @@ def stats():
     
     return jsonify(response_data)
 
+@app.route('/api/stats/combined')
+@space_required
+def stats_combined():
+    """Aggregate stats across every bot in the caller's space."""
+    bots = state.bots_for(g.owner)
+    if not bots:
+        return jsonify({})
+
+    total_cash = 0
+    total_hunt = 0
+    total_battle = 0
+    total_owo = 0
+    total_other = 0
+    total_cmd = 0
+    total_captchas = 0
+    total_bans = 0
+    total_warnings = 0
+    total_gems = 0
+    session_hunt = 0
+    session_battle = 0
+    session_owo = 0
+    session_other = 0
+    earliest_uptime = time.time()
+    all_logs = []
+    online_count = 0
+    paused_count = 0
+    accounts_summary = []
+
+    for bot in bots:
+        uid = str(bot.user.id) if bot.user else None
+        if not uid:
+            continue
+        st = state.account_stats.get(uid, {})
+        total_cash += st.get('current_cash', 0)
+        total_hunt += st.get('hunt_count', 0)
+        total_battle += st.get('battle_count', 0)
+        total_owo += st.get('owo_count', 0)
+        total_other += st.get('other_count', 0)
+        total_cmd += st.get('total_cmd_count', 0)
+        total_captchas += st.get('captchas_solved', 0)
+        total_bans += st.get('bans_detected', 0)
+        total_warnings += st.get('warnings_detected', 0)
+        total_gems += st.get('gems_used', 0)
+        session_hunt += st.get('session_hunt_count', 0)
+        session_battle += st.get('session_battle_count', 0)
+        session_owo += st.get('session_owo_count', 0)
+        session_other += st.get('session_other_count', 0)
+        up = st.get('uptime_start', time.time())
+        if up < earliest_uptime:
+            earliest_uptime = up
+
+        bot_status = "PAUSED" if bot.paused else "ONLINE"
+        if bot.paused:
+            paused_count += 1
+        else:
+            online_count += 1
+
+        accounts_summary.append({
+            'id': uid,
+            'username': bot.username,
+            'cash': st.get('current_cash', 0),
+            'hunt': st.get('hunt_count', 0),
+            'battle': st.get('battle_count', 0),
+            'status': bot_status,
+        })
+
+    elapsed = time.time() - earliest_uptime
+    session_cmds = session_hunt + session_battle + session_owo + session_other
+    mins = elapsed / 60
+    cpm = round(session_cmds / mins, 1) if mins > 0.1 else 0
+
+    combined_status = "ONLINE" if online_count > 0 else ("PAUSED" if paused_count > 0 else "OFFLINE")
+
+    # aggregate cowoncy history across all bots for CPH
+    cph = 0
+    all_histories = []
+    for bot in bots:
+        uid = str(bot.user.id) if bot.user else None
+        if uid:
+            st = state.account_stats.get(uid, {})
+            all_histories.extend(st.get('cowoncy_history', []))
+    if len(all_histories) > 1:
+        all_histories.sort(key=lambda x: x[0])
+        first = all_histories[0]
+        last = all_histories[-1]
+        time_diff_hrs = (last[0] - first[0]) / 3600
+        if time_diff_hrs > 0.01:
+            # sum cash diffs per account
+            cph = round((total_cash - sum(
+                state.account_stats.get(str(b.user.id), {}).get('start_cash', 0)
+                for b in bots if b.user
+            )) / max(time_diff_hrs, 0.01))
+
+    # combined logs from all bots
+    combined_logs = [l for l in state.command_logs
+                     if any(b.user and str(l.get('bot_id')) == str(b.user.id) for b in bots)][:200]
+
+    return jsonify({
+        'uptime': utils.format_seconds(elapsed),
+        'cash': total_cash,
+        'status': combined_status,
+        'accounts_online': online_count,
+        'accounts_paused': paused_count,
+        'accounts_total': len(accounts_summary),
+        'accounts': accounts_summary,
+        'logs': combined_logs,
+        'security': {
+            'captchas': total_captchas,
+            'bans': total_bans,
+            'warnings': total_warnings,
+            'last_message': ''
+        },
+        'analytics': {
+            'cph': cph,
+            'gems_used': total_gems
+        },
+        'chart_data': {
+            'hunt': total_hunt,
+            'battle': total_battle,
+            'session_hunt': session_hunt,
+            'session_battle': session_battle,
+            'session_owo': session_owo,
+            'other': total_other,
+            'owo': total_owo,
+            'total': total_cmd,
+            'perf_bpm': cpm
+        },
+        'bot': {
+            'user_id': '__combined__',
+            'username': f'All Accounts ({len(accounts_summary)})',
+            'channel_id': None,
+            'paused': online_count == 0,
+            'throttled': False,
+            'cooldown_remaining': 0,
+            'cooldown_command': None
+        },
+        'level': None,
+        'xp': None,
+        'xp_needed': None,
+        'rank': None,
+        'level_source': None,
+        'level_card_url': None,
+        'last_level_update': None,
+        'team': {'slots': [], 'watching': False, 'owned': 0, 'zoo': []},
+        'system': {'last_cash_update': 0, 'pending_commands': 0},
+        'quest_data': [],
+        'quest_source': None,
+        'quest_card_url': None,
+        'quest_seals': None,
+        'next_quest_timer': None,
+        'next_quest_at': None,
+        'cmd_states': {},
+        'gambling_stats': {}
+    })
+
 @app.route('/api/debug')
 @admin_required
 def debug():
@@ -1565,18 +1720,18 @@ def captcha_balance():
     bot = get_bot(account_id, g.owner)
     if not bot:
         return jsonify({'balance': None, 'service': 'unknown', 'error': 'Bot not found'})
-    
+
     cfg = bot.config.get('security', {}).get('captcha_solver', {})
     service = cfg.get('service', 'yescaptcha')
     api_key = ''
-    
+
     if request.method == 'POST':
         data = _payload()
         if 'service' in data:
             service = data['service']
         if 'api_key' in data:
             api_key = data['api_key']
-            
+
     if not api_key:
         if service == 'nopecha':
             api_key = cfg.get('nopecha_api_key', cfg.get('api_key', ''))
@@ -1587,8 +1742,118 @@ def captcha_balance():
         else:
             api_key = cfg.get('yescaptcha_api_key', cfg.get('api_key', ''))
 
+    # A NopeCHA booster key has no API balance to read - api.nopecha.com refuses the
+    # key outright - so asking for one would paint a red "balance unreadable" badge
+    # over a setup that is working. Report what the extension cache holds instead.
+    if service == 'nopecha' and not str(api_key or '').strip():
+        return jsonify(_nopecha_extension_status(cfg))
 
     temp_solver = None
+    if service == 'nopecha':
+        from modules.services.nopecha import NopeCaptchaService
+        temp_solver = NopeCaptchaService(bot, api_key, "")
+    elif service == 'anticaptcha':
+        from modules.services.anticaptcha import AntiCaptchaService
+        temp_solver = AntiCaptchaService(bot, api_key, "")
+    elif service == 'captchaly':
+        from modules.services.captchaly import CaptchalyService
+        temp_solver = CaptchalyService(bot, api_key, "")
+    else:
+        from modules.services.yescaptcha import YesCaptchaService
+        temp_solver = YesCaptchaService(bot, api_key, "")
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(temp_solver.get_balance(), bot.loop)
+        balance = future.result(timeout=10)
+        # the services return -1 for "could not read it", which is not a balance
+        if balance is None or balance < 0:
+            return jsonify({'balance': None, 'service': service,
+                            'enabled': cfg.get('enabled', False),
+                            'error': 'balance unreadable - check the key and the service'})
+        return jsonify({'balance': balance, 'service': service, 'enabled': cfg.get('enabled', False)})
+    except Exception as e:
+        return jsonify({'balance': None, 'service': service, 'error': str(e)})
+
+
+def _nopecha_extension_status(cfg):
+    """What the NopeCHA extension path can report in place of an API balance."""
+    from modules import nopecha_extension
+    nope = (cfg.get('browser_solver') or {}).get('nopecha') or {}
+    key = nopecha_extension.resolve_key(cfg)
+    body = {
+        'balance': None,
+        'service': 'nopecha',
+        'mode': 'extension',
+        'enabled': cfg.get('enabled', False),
+        'extension_enabled': bool(nope.get('enabled', True)),
+        'has_key': bool(key),
+    }
+    if not key:
+        body['error'] = ('no NopeCHA key set - paste your booster key into the '
+                         'booster key field')
+        return body
+    try:
+        body['extension'] = nopecha_extension.cached_info(key)
+    except Exception as exc:
+        body['extension'] = {'installed': False}
+        body['error'] = f'could not read the extension cache: {exc}'
+    return body
+
+
+@app.route('/api/captcha/nopecha/install', methods=['POST'])
+@space_required
+def captcha_nopecha_install():
+    """Download and patch the NopeCHA extension now, instead of at the first captcha.
+
+    Worth its own button: the first solve after configuring a booster key otherwise
+    spends its opening seconds on a GitHub download, and any problem with the key or
+    the release shows up only in the log of an account that is already in trouble.
+    """
+    data = _payload()
+    account_id = data.get('id')
+    bot = get_bot(account_id, g.owner)
+    if bot:
+        cfg = bot.config.get('security', {}).get('captcha_solver', {}) or {}
+    else:
+        # no account picked (or not one of ours): the cache is process-wide, so a
+        # config-only install is still meaningful - read the space's settings instead
+        cfg = ((_space_config(g.owner).get('security') or {}).get('captcha_solver') or {})
+
+    from core import supervisor
+    from modules import nopecha_extension
+    key = nopecha_extension.resolve_key(cfg)
+    if not key:
+        return jsonify({'success': False, 'error': 'no NopeCHA key set - paste your '
+                                                   'booster key in first'})
+    nope = (cfg.get('browser_solver') or {}).get('nopecha') or {}
+    loop = supervisor.get_loop()
+    if not loop:
+        return jsonify({'success': False, 'error': 'the bot loop is not running yet - '
+                                                   'start an account first'})
+
+    log = bot.log if bot else (lambda kind, msg: state.log_command(kind, msg, owner=g.owner))
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            nopecha_extension.ensure_extension(
+                key,
+                path_hint=nope.get('extension_path'),
+                auto_download=bool(nope.get('auto_download', True)),
+                log=log,
+            ),
+            loop,
+        )
+        path, error = future.result(timeout=240)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'{type(exc).__name__}: {exc}'})
+
+    if error:
+        return jsonify({'success': False, 'error': error,
+                        'extension': nopecha_extension.cached_info(key)})
+    info = nopecha_extension.cached_info(key)
+    return jsonify({'success': True, 'path': path, 'extension': info,
+                    'message': f"NopeCHA extension ready (v{info.get('version') or '?'})"})
+
+
     if service == 'nopecha':
         from modules.services.nopecha import NopeCaptchaService
         temp_solver = NopeCaptchaService(bot, api_key, "")
@@ -1690,6 +1955,214 @@ def _read_settings_for(owner, account_id):
         except Exception:
             continue
     return {}
+
+
+def _merge_dicts(base, override):
+    """Deep-merge ``override`` into ``base`` in place (same rule as NeuraBot)."""
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge_dicts(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _space_config(owner, account_id=None):
+    """The config a bot in this space would see, layered the same way it layers it.
+
+    ``_read_settings_for`` returns the *first* readable file, which is right for
+    handing a whole document back to the config editor but wrong for asking one
+    question of it: a space file that omits a section would answer "not configured"
+    about a section the shipped defaults do define. Routes with no bot in hand (a
+    process-wide cache, or nothing started yet) need the merged view instead.
+    """
+    merged = {}
+    paths = [os.path.join(state.CONFIG_DIR, 'settings.json'), spaces.settings_path(owner)]
+    if account_id:
+        paths.append(spaces.settings_path(owner, account_id))
+    for path in paths:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            _merge_dicts(merged, data)
+    return merged
+
+
+EARNING_DEFAULTS = {'enabled': False, 'exclusive': True, 'sell_interval_min': 20,
+                    'sell_type': 'all', 'huntbot_cash': 3000, 'cash_poll_min': 5}
+
+
+def _earning_row(bot):
+    """One account's ledger, flattened into the numbers the tab renders.
+
+    The derived figures are computed here rather than stored: ``net`` has to equal
+    the account's real cowoncy movement, and recomputing it from the buckets on
+    every read is what guarantees a bucket that drifted shows up as a wrong bucket
+    instead of a wrong profit.
+    """
+    from core import state as core_state
+    uid = str(getattr(bot, 'user_id', '') or '')
+    stats = core_state.account_stats.get(uid, {})
+    led = stats.get('earning')
+    if not isinstance(led, dict):
+        led = core_state.empty_earning()
+
+    gained = int(led.get('gained_sell') or 0) + int(led.get('gained_other') or 0)
+    spent_autohunt = int(led.get('spent_autohunt') or 0)
+    spent_hunt = int(led.get('spent_hunt') or 0)
+    spent_other = int(led.get('spent_other') or 0)
+    spent = spent_autohunt + spent_hunt + spent_other
+
+    started = led.get('started_at')
+    hours = max((time.time() - started) / 3600.0, 0.0) if started else 0.0
+    net = gained - spent
+    # under a couple of minutes any rate is noise, and dividing by ~0 hours produced
+    # "earning 4.2M/h" on the first sample
+    per_hour = round(net / hours) if hours >= 0.05 else None
+
+    earning_cfg = (bot.config.get('earning') or {}) if isinstance(bot.config, dict) else {}
+    return {
+        'id': uid,
+        'name': getattr(bot, 'account_name', None) or stats.get('username') or uid,
+        'enabled': bool(earning_cfg.get('enabled', False)),
+        'running': bool(getattr(bot, 'is_ready', False)),
+        'paused': bool(getattr(bot, 'paused', False)),
+        'started_at': started,
+        'hours': round(hours, 3),
+        'start_cash': led.get('start_cash'),
+        'current_cash': stats.get('current_cash'),
+        'last_cash_at': led.get('last_cash_at'),
+        'gained': gained,
+        'gained_sell': int(led.get('gained_sell') or 0),
+        'gained_other': int(led.get('gained_other') or 0),
+        'spent': spent,
+        'spent_autohunt': spent_autohunt,
+        'spent_hunt': spent_hunt,
+        'spent_other': spent_other,
+        'net': net,
+        'per_hour': per_hour,
+        'sold_count': int(led.get('sold_count') or 0),
+        'hunts': int(led.get('hunts') or 0),
+        'autohunt_runs': int(led.get('autohunt_runs') or 0),
+        'last_sell_amount': led.get('last_sell_amount'),
+        'last_event': led.get('last_event'),
+        'last_event_at': led.get('last_event_at'),
+    }
+
+
+@app.route('/api/earning', methods=['GET'])
+@space_required
+def earning_api():
+    """Every account in this space, its ledger, and the space's earning settings."""
+    rows = [_earning_row(bot) for bot in state.bots_for(g.owner)]
+    rows.sort(key=lambda r: r['name'].lower())
+
+    settings = dict(EARNING_DEFAULTS)
+    saved = (_space_config(g.owner).get('earning') or {})
+    for key in EARNING_DEFAULTS:
+        if key in saved:
+            settings[key] = saved[key]
+
+    totals = {'gained': 0, 'spent': 0, 'spent_autohunt': 0, 'spent_hunt': 0,
+              'spent_other': 0, 'net': 0, 'sold_count': 0, 'hunts': 0,
+              'autohunt_runs': 0, 'per_hour': 0, 'accounts': len(rows), 'on': 0}
+    for row in rows:
+        for key in ('gained', 'spent', 'spent_autohunt', 'spent_hunt', 'spent_other',
+                    'net', 'sold_count', 'hunts', 'autohunt_runs'):
+            totals[key] += row[key] or 0
+        totals['per_hour'] += row['per_hour'] or 0
+        if row['enabled']:
+            totals['on'] += 1
+    return jsonify({'success': True, 'settings': settings, 'accounts': rows,
+                    'totals': totals})
+
+
+@app.route('/api/earning/toggle', methods=['POST'])
+@space_required
+def earning_toggle():
+    """Switch earning mode on or off for the whole space, in one write.
+
+    It writes the space default *and* every per-account file, because the per-account
+    file is the last layer the bot merges: leaving those alone would let an account
+    that once had settings saved to it opt itself out of a mode the operator turned
+    on for the farm.
+    """
+    data = _payload() or {}
+    settings = dict(EARNING_DEFAULTS)
+    saved = (_space_config(g.owner).get('earning') or {})
+    for key in EARNING_DEFAULTS:
+        if key in saved:
+            settings[key] = saved[key]
+
+    if 'enabled' in data:
+        settings['enabled'] = bool(data.get('enabled'))
+    if 'exclusive' in data:
+        settings['exclusive'] = bool(data.get('exclusive'))
+    for key, low, high in (('sell_interval_min', 1, 1440), ('huntbot_cash', 0, 250000),
+                           ('cash_poll_min', 1, 120)):
+        if key in data:
+            try:
+                settings[key] = max(low, min(high, int(data[key])))
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'error': f'{key} must be a number'}), 400
+    if 'sell_type' in data:
+        sell_type = str(data.get('sell_type') or 'all').strip().lower()
+        # this string is pasted straight into an outgoing OwO command
+        if not re.fullmatch(r'[a-z]{1,16}', sell_type):
+            return jsonify({'success': False, 'error': 'sell_type must be a single word'}), 400
+        settings['sell_type'] = sell_type
+
+    targets = [spaces.settings_path(g.owner)] + list(spaces.settings_files(g.owner))
+    written = 0
+    for path in dict.fromkeys(targets):
+        try:
+            document = {}
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    document = loaded
+            document['earning'] = settings
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(document, f, indent=4)
+            written += 1
+        except Exception as exc:
+            return jsonify({'success': False, 'error': f'could not save {os.path.basename(path)}: {exc}'}), 500
+
+    for bot in state.bots_for(g.owner):
+        _bot_loop_fire(bot.sync_settings({'earning': settings}))
+
+    state.log_command("SYS", f"Earning mode {'ON' if settings['enabled'] else 'OFF'} "
+                             f"({written} settings file(s)) by {acting_label()}",
+                      "success", owner=g.owner)
+    return jsonify({'success': True, 'settings': settings})
+
+
+@app.route('/api/earning/reset', methods=['POST'])
+@space_required
+def earning_reset():
+    """Zero the ledger - for one account with {"id": ...}, otherwise the whole space."""
+    data = _payload() or {}
+    account_id = data.get('id')
+    if account_id:
+        bot = get_bot(account_id, g.owner)
+        if not bot:
+            return jsonify({'success': False, 'error': 'Account not running'}), 404
+        bots = [bot]
+    else:
+        bots = list(state.bots_for(g.owner))
+
+    reset = 0
+    for bot in bots:
+        cog = bot.get_cog('Earning')
+        if cog and cog.reset():
+            reset += 1
+    state.save_account_stats()
+    return jsonify({'success': True, 'reset': reset})
 
 
 def _normalise_custom_commands(raw):

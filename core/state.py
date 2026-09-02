@@ -91,6 +91,35 @@ STATS_FILE = os.path.join(DATA_DIR, 'stats.json')
 
 account_stats = {}
 
+
+def empty_earning():
+    """A fresh earning ledger.
+
+    The ledger is a *cash-flow* ledger, not a sum of parsed rewards: every figure
+    below comes from a change in ``current_cash``, and an OwO reply only decides
+    which bucket a change lands in. That is what keeps it honest - the buckets
+    always add up to ``current_cash - start_cash``, so no wording change on OwO's
+    side can make the tab claim a profit that is not in the account.
+    """
+    return {
+        'started_at': None,
+        'start_cash': None,
+        'last_cash': None,
+        'last_cash_at': None,
+        'gained_sell': 0,
+        'gained_other': 0,
+        'spent_autohunt': 0,
+        'spent_hunt': 0,
+        'spent_other': 0,
+        'sold_count': 0,
+        'hunts': 0,
+        'autohunt_runs': 0,
+        'last_sell_amount': None,
+        'last_event': None,
+        'last_event_at': None,
+    }
+
+
 def get_empty_stats():
     return {
         'uptime_start': time.time(),
@@ -132,6 +161,9 @@ def get_empty_stats():
         'session_hunt_count': 0,
         'session_battle_count': 0,
         'session_owo_count': 0,
+        # survives a restart, unlike uptime_start - an earning run is measured from
+        # when the operator switched the mode on, not from the last reboot
+        'earning': empty_earning(),
         'gambling_stats': {
             'total_wins': 0,
             'total_losses': 0,
@@ -178,6 +210,9 @@ def _write_account_stats():
             'next_quest_timer': st.get('next_quest_timer'),
             'next_quest_at': st.get('next_quest_at'),
             'current_cash': st.get('current_cash', 0),
+            # an earning run is meant to be read over days; without this the tab
+            # reset to zero on every restart and "per hour" became meaningless
+            'earning': st.get('earning') or empty_earning(),
             'gambling_stats': st.get('gambling_stats', {
                 'total_wins': 0, 'total_losses': 0, 'total_wagered': 0,
                 'net_profit': 0, 'current_streak': 0, 'best_streak': 0,

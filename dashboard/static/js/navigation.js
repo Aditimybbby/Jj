@@ -64,6 +64,7 @@ window.nav = function(id, el) {
         pollForCaptchas();
     }
     if (id === 'users' && typeof loadUsersView === 'function') loadUsersView();
+    if (id === 'earning' && typeof loadEarning === 'function') loadEarning();
 };
 
 window.toggleMobileMenu = function() {

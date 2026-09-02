@@ -52,6 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof loadCustomCommands === 'function') loadCustomCommands();
     initDynamicTilt();
     initConfigSearch();
+    if (typeof startEarningPoll === 'function') startEarningPoll();
 
     // Polling intervals. The bots themselves run in the server's asyncio loop,
     // so they keep farming even when this tab is closed - these polls only

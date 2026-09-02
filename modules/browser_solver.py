@@ -35,6 +35,13 @@ single ``<canvas>`` with no fetchable tiles, and it rotates between them. Guessi
 those would burn the account's attempts, so an unsupported challenge is reported as
 exactly that and handed back to the caller.
 
+What it *can* do instead is let NopeCHA answer it: with a key in
+``security.captcha_solver.nopecha_booster_key`` the NopeCHA extension is loaded into this
+same browser (see ``modules/nopecha_extension.py``) and solves the challenge in-page.
+That is the only way a NopeCHA Discord-boost key can be spent - those keys are
+extension-only and ``api.nopecha.com`` rejects them - and it needs no new token
+plumbing, because the loop below already reads whatever token the page ends up holding.
+
 No new dependencies: the DevTools protocol is plain JSON over a WebSocket, and aiohttp is
 already required.
 """
@@ -147,7 +154,7 @@ class CDP:
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def launch(self, headless=True, proxy_url=None, proxy_auth=None,
-                     window="1280,900", timeout=30):
+                     window="1280,900", timeout=30, extensions=None):
         exe = find_browser()
         if not exe:
             raise CDPError(browser_status())
@@ -159,11 +166,19 @@ class CDP:
             f"--remote-debugging-port={port}",
             f"--user-data-dir={self._profile}",
             f"--window-size={window}",
-            "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+            "--no-first-run", "--no-default-browser-check",
             "--disable-gpu", "--disable-dev-shm-usage",
             # this is what keeps navigator.webdriver false
             "--disable-blink-features=AutomationControlled",
         ]
+        paths = [p for p in (extensions or []) if p]
+        if paths:
+            # --disable-extensions wins over --load-extension, so an extension can
+            # only be loaded by swapping it for the -except form
+            joined = ",".join(paths)
+            args += [f"--disable-extensions-except={joined}", f"--load-extension={joined}"]
+        else:
+            args.append("--disable-extensions")
         if headless:
             args.append("--headless=new")
         if proxy_url:
@@ -199,7 +214,11 @@ class CDP:
 
         async with self._http.get(f"http://127.0.0.1:{port}/json/list") as r:
             targets = await r.json()
-        target = next((t for t in targets if t.get("type") == "page"), None)
+        pages = [t for t in targets if t.get("type") == "page"]
+        # an extension may open its own tab on install; never drive that one
+        target = next((t for t in pages
+                       if not str(t.get("url", "")).startswith("chrome-extension://")),
+                      pages[0] if pages else None)
         if not target:
             raise CDPError("the browser exposed no page target")
         self.page = (await self.send("Target.attachToTarget", targetId=target["id"],
@@ -409,10 +428,48 @@ class BrowserSolver:
         self._busy = asyncio.Lock()
 
     # ── config ──────────────────────────────────────────────────────────────
+    def _solver_cfg(self):
+        return (self.bot.config.get("security", {}).get("captcha_solver", {}) or {})
+
     def _cfg(self):
-        return (self.bot.config.get("security", {})
-                .get("captcha_solver", {})
-                .get("browser_solver", {}) or {})
+        return (self._solver_cfg().get("browser_solver", {}) or {})
+
+    def _nopecha_cfg(self):
+        return (self._cfg().get("nopecha", {}) or {})
+
+    def nopecha_key(self):
+        """The key the NopeCHA *extension* should run with, if any.
+
+        The precedence itself lives in ``modules.nopecha_extension`` so the dashboard
+        resolves the key exactly the way the browser will.
+        """
+        from modules.nopecha_extension import resolve_key
+        return resolve_key(self._solver_cfg())
+
+    def nopecha_enabled(self):
+        return bool(self._nopecha_cfg().get("enabled", True)) and bool(self.nopecha_key())
+
+    async def _prepare_nopecha(self):
+        """Unpack/patch the NopeCHA extension. Returns its directory or None."""
+        if not self.nopecha_enabled():
+            return None
+        nope = self._nopecha_cfg()
+        try:
+            from modules.nopecha_extension import ensure_extension
+            path, error = await ensure_extension(
+                self.nopecha_key(),
+                path_hint=nope.get("extension_path"),
+                auto_download=bool(nope.get("auto_download", True)),
+                log=self.bot.log,
+            )
+        except Exception as exc:
+            self.bot.log("WARN", f"NopeCHA extension unavailable ({type(exc).__name__}: {exc}); "
+                                 f"solving without it.")
+            return None
+        if error:
+            self.bot.log("WARN", f"NopeCHA extension unavailable: {error}")
+            return None
+        return path
 
     @property
     def enabled(self):
@@ -486,21 +543,27 @@ class BrowserSolver:
 
         Returns a dict describing exactly what happened::
 
-            {"ok": bool, "how": "passive"|"interactive"|None, "reason": str|None,
-             "challenge": str|None}
+            {"ok": bool, "how": "passive"|"interactive"|"nopecha-extension"|None,
+             "reason": str|None, "challenge": str|None}
 
         ``how="passive"`` means hCaptcha issued the token from its own risk score and
-        nothing had to be answered. ``how="interactive"`` means a challenge was shown and
-        somebody answered it in the window before the timeout.
+        nothing had to be answered. ``how="nopecha-extension"`` means NopeCHA's
+        extension answered the visual challenge. ``how="interactive"`` means a
+        challenge was shown and somebody answered it in the window before the timeout.
         """
         cfg = self._cfg()
         if timeout is None:
             timeout = float(cfg.get("timeout_s", 180))
+        nope_ready = self.nopecha_enabled()
         if headless is None:
-            # a visual challenge cannot be answered in a window nobody can see
             headless = bool(cfg.get("headless", False))
+            if nope_ready:
+                # nothing for a human to look at when the extension answers the
+                # challenge, and a hidden browser is what works on a server
+                headless = bool(self._nopecha_cfg().get("headless", True))
         passive_window = float(cfg.get("passive_window_s", 20))
         widget_wait = float(cfg.get("widget_wait_s", 25))
+        nope_wait = float(self._nopecha_cfg().get("solve_wait_s", 120))
 
         problem = browser_status()
         if problem:
@@ -536,34 +599,49 @@ class BrowserSolver:
                                          "connection instead.")
                     proxy_url, creds = None, None
 
+            extension = await self._prepare_nopecha()
+            extension_active = bool(extension)
+
             browser = CDP()
             try:
                 started = time.time()
                 await browser.launch(headless=headless, proxy_url=proxy_url,
-                                     proxy_auth=creds)
+                                     proxy_auth=creds,
+                                     extensions=[extension] if extension else None)
                 await browser.set_cookie("connect.sid", sid, "owobot.com")
                 await browser.navigate(CAPTCHA_PAGE, wait=3.0)
 
                 self.bot.log("SECURITY",
                              f"Browser solver: opened OwO's captcha page in "
                              f"{'a hidden' if headless else 'a visible'} browser "
-                             f"({'proxied' if proxy_url else 'direct'}).")
+                             f"({'proxied' if proxy_url else 'direct'})"
+                             f"{' with the NopeCHA extension loaded' if extension_active else ''}.")
 
                 deadline = started + timeout
                 announced = False
+                described = False
                 challenge_text = None
                 saw_widget = False
+                nope_deadline = None
+                nope_expired = False
                 while time.time() < deadline:
                     token = await browser.evaluate(_TOKEN_JS)
                     if token:
-                        how = ("passive" if time.time() < started + passive_window
-                               else "interactive")
+                        if time.time() < started + passive_window:
+                            how = "passive"
+                        elif extension_active and not nope_expired and nope_deadline:
+                            how = "nopecha-extension"
+                        else:
+                            how = "interactive"
                         ok, detail = await self._verify(token, sid)
                         if ok:
-                            self.bot.log("SUCCESS",
-                                         "Browser solver: captcha solved automatically - no "
-                                         "paid service used." if how == "passive" else
-                                         "Browser solver: captcha answered and verified.")
+                            self.bot.log("SUCCESS", {
+                                "passive": "Browser solver: captcha solved automatically - no "
+                                           "paid service used.",
+                                "nopecha-extension": "Browser solver: NopeCHA's extension "
+                                                     "answered the challenge and the token was "
+                                                     "verified.",
+                            }.get(how, "Browser solver: captcha answered and verified."))
                             return {"ok": True, "how": how, "reason": None,
                                     "challenge": challenge_text}
                         return {"ok": False, "how": how, "challenge": challenge_text,
@@ -587,29 +665,53 @@ class BrowserSolver:
                         return {"ok": True, "how": "cleared", "reason": None,
                                 "challenge": None}
 
-                    if state_info.get("challengeOpen") and not announced:
-                        announced = True
-                        challenge_text = await self._describe_challenge(browser)
-                        self.bot.log("SECURITY",
-                                     f"Browser solver: hCaptcha wants a visual answer "
-                                     f"- \"{challenge_text or 'unknown challenge'}\". "
-                                     f"This one needs a human.")
-                        if on_challenge:
-                            shot = await browser.screenshot()
-                            try:
-                                res = on_challenge(challenge_text, shot)
-                                if asyncio.iscoroutine(res):
-                                    await res
-                            except Exception as exc:
-                                self.bot.log("DEBUG",
-                                             f"Browser solver: challenge hook failed: {exc}")
-                        if headless:
-                            return {"ok": False, "how": None, "challenge": challenge_text,
-                                    "reason": "hCaptcha served a visual challenge and the "
-                                              "browser is headless, so nobody can answer "
-                                              "it. Set security.captcha_solver."
-                                              "browser_solver.headless to false to solve "
-                                              "it in a window."}
+                    if state_info.get("challengeOpen"):
+                        if not described:
+                            described = True
+                            challenge_text = await self._describe_challenge(browser)
+
+                        if extension_active and not nope_expired:
+                            if nope_deadline is None:
+                                nope_deadline = time.time() + nope_wait
+                                # do not let the outer timeout cut the extension off
+                                # halfway through a challenge it is already working on
+                                deadline = max(deadline, nope_deadline + 10)
+                                self.bot.log("SECURITY",
+                                             f"Browser solver: hCaptcha wants a visual answer "
+                                             f"- \"{challenge_text or 'unknown challenge'}\". "
+                                             f"NopeCHA's extension is loaded and answering it "
+                                             f"(waiting up to {int(nope_wait)}s).")
+                            elif time.time() > nope_deadline:
+                                nope_expired = True
+                                self.bot.log("WARN",
+                                             f"Browser solver: NopeCHA's extension did not "
+                                             f"answer within {int(nope_wait)}s - out of "
+                                             f"credits, or it cannot do this challenge type.")
+
+                        needs_human = (not extension_active) or nope_expired
+                        if needs_human and not announced:
+                            announced = True
+                            self.bot.log("SECURITY",
+                                         f"Browser solver: hCaptcha wants a visual answer "
+                                         f"- \"{challenge_text or 'unknown challenge'}\". "
+                                         f"This one needs a human.")
+                            if on_challenge:
+                                shot = await browser.screenshot()
+                                try:
+                                    res = on_challenge(challenge_text, shot)
+                                    if asyncio.iscoroutine(res):
+                                        await res
+                                except Exception as exc:
+                                    self.bot.log("DEBUG",
+                                                 f"Browser solver: challenge hook failed: {exc}")
+                            if headless:
+                                return {"ok": False, "how": None, "challenge": challenge_text,
+                                        "reason": "hCaptcha served a visual challenge and the "
+                                                  "browser is headless, so nobody can answer "
+                                                  "it. Set security.captcha_solver."
+                                                  "browser_solver.headless to false to solve "
+                                                  "it in a window, or configure a NopeCHA key "
+                                                  "so the extension can answer it."}
 
                     if not saw_widget and time.time() > started + widget_wait:
                         return {"ok": False, "how": None, "challenge": None,

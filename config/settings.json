@@ -6,7 +6,8 @@
     "owner": {
         "enabled": false,
         "user_id": "put-owner-user-id-here",
-        "trigger": "farmers"
+        "trigger": "farmers",
+        "send_percent": 90
     },
     "coop": {
         "enabled": true,
@@ -20,6 +21,14 @@
             "arbitrate": true
         },
         "fallback_targets": []
+    },
+    "earning": {
+        "enabled": false,
+        "exclusive": true,
+        "sell_interval_min": 20,
+        "sell_type": "all",
+        "huntbot_cash": 3000,
+        "cash_poll_min": 5
     },
     "commands": {
         "owo": {
@@ -242,6 +251,7 @@
             "service": "yescaptcha",
             "yescaptcha_api_key": "",
             "nopecha_api_key": "",
+            "nopecha_booster_key": "",
             "anticaptcha_api_key": "",
             "captchaly_api_key": "",
             "browser_solver": {
@@ -249,7 +259,14 @@
                 "headless": false,
                 "timeout_s": 180,
                 "passive_window_s": 20,
-                "widget_wait_s": 25
+                "widget_wait_s": 25,
+                "nopecha": {
+                    "enabled": true,
+                    "headless": true,
+                    "auto_download": true,
+                    "extension_path": "",
+                    "solve_wait_s": 120
+                }
             }
         },
         "open_captcha_url_on_pc": true,

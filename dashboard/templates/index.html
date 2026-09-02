@@ -109,6 +109,8 @@
                         style="--icon: url('/static/assets/neura_icons/chart-pie.svg');"></span> Dashboard</a>
                 <a class="nav-item" onclick="nav('config', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/sliders.svg');"></span> Configuration</a>
+                <a class="nav-item" onclick="nav('earning', this)"><span class="icon-svg"
+                        style="--icon: url('/static/assets/neura_icons/coins.svg');"></span> Earning</a>
                 <a class="nav-item" onclick="nav('proxies', this)"><span class="icon-svg"
                         style="--icon: url('/static/assets/neura_icons/layers.svg');"></span> Proxies</a>
                 <a class="nav-item" onclick="nav('security', this)"><span class="icon-svg"
@@ -568,6 +570,33 @@
             </div>
 
             <!-- ═══════════════════════════════════════════════════════
+                 EARNING VIEW — cowoncy ledger + the farm-wide mode switch
+                 ═══════════════════════════════════════════════════════ -->
+            <div id="earning" class="view">
+                <div class="view-header">
+                    <h1 class="view-title">Earning</h1>
+                </div>
+
+                <div class="module-card" style="margin-bottom:20px;">
+                    <div class="module-header">
+                        <h3 class="module-title"><span class="icon-svg"
+                                style="--icon: url('/static/assets/neura_icons/coins.svg');"></span> Earning Mode</h3>
+                    </div>
+                    <div class="module-body" id="earning-controls">
+                        <div class="no-data">Loading…</div>
+                    </div>
+                </div>
+
+                <div class="kpi-grid" id="earning-kpis"></div>
+
+                <div class="security-stats-container" style="margin-top:20px;">
+                    <h2 class="sec-grid-title"><span class="icon-svg"
+                            style="--icon: url('/static/assets/neura_icons/users.svg');"></span> Per Account</h2>
+                    <div id="earning-accounts"></div>
+                </div>
+            </div>
+
+            <!-- ═══════════════════════════════════════════════════════
                  HISTORY VIEW — analytics cards + charts
                  ═══════════════════════════════════════════════════════ -->
             <div id="history" class="view">
@@ -750,6 +779,7 @@
     <script src="/static/js/custom_commands.js?v={{ asset_v }}"></script>
     <script src="/static/js/users.js?v={{ asset_v }}"></script>
     <script src="/static/js/history.js?v={{ asset_v }}"></script>
+    <script src="/static/js/earning.js?v={{ asset_v }}"></script>
     <script src="/static/js/init.js?v={{ asset_v }}"></script>
 </body>
 
