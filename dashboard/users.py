@@ -19,12 +19,15 @@ creates a dashboard login which stops working when the key's duration runs out
 or when the admin revokes it. Redeeming also creates that user's space (see
 core/spaces.py) where their own accounts, proxies and history live.
 
-NOTE ON PASSWORDS: they are stored in clear text on purpose - the operator asked
-to be able to read a user's password back from the admin panel. The store file
-therefore holds credentials and is gitignored. Do not expose it.
+NOTE ON PASSWORDS: stored as PBKDF2-SHA256 hashes with a per-user salt, so the
+store file cannot hand anyone a working login even if it leaks. That means a
+password can no longer be read back in the admin panel - the admin panel resets
+one instead (PATCH /api/users/<id> with action=password). Rows written by older
+builds held clear text; the first successful login re-writes them as a hash.
 """
 
 
+import hashlib
 import hmac
 import json
 import os
@@ -46,6 +49,8 @@ _lock = threading.Lock()
 DAY = 86400
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 KEY_ALPHABET = string.ascii_uppercase + string.digits
+_HASH_SCHEME = 'pbkdf2_sha256'
+_HASH_ROUNDS = 210000
 
 
 def _empty_store():
@@ -55,6 +60,37 @@ def _empty_store():
 def same_secret(a, b):
     """Constant-time compare that survives non-ascii passwords."""
     return hmac.compare_digest(str(a or '').encode('utf-8'), str(b or '').encode('utf-8'))
+
+
+def hash_secret(secret):
+    """A salted PBKDF2 hash, in the form scheme$rounds$salt$digest."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', str(secret or '').encode('utf-8'), salt, _HASH_ROUNDS)
+    return f"{_HASH_SCHEME}${_HASH_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def verify_secret(stored, candidate):
+    """(matches, needs_rehash) for a stored password against an attempt.
+
+    needs_rehash is True for a clear-text row written by an older build, so the
+    caller can replace it with a hash while it still knows the password.
+    """
+    stored = str(stored or '')
+    if not stored:
+        return False, False
+
+    if stored.startswith(_HASH_SCHEME + '$'):
+        try:
+            _scheme, rounds, salt_hex, digest_hex = stored.split('$', 3)
+            expected = bytes.fromhex(digest_hex)
+            actual = hashlib.pbkdf2_hmac(
+                'sha256', str(candidate or '').encode('utf-8'), bytes.fromhex(salt_hex), int(rounds)
+            )
+        except (ValueError, TypeError):
+            return False, False
+        return hmac.compare_digest(actual, expected), False
+
+    return same_secret(stored, candidate), True
 
 
 def _read():
@@ -171,8 +207,8 @@ def key_status(key):
 # --------------------------------------------------------------------------
 
 def _public_user(user):
-    """The shape handed to the admin panel - includes the password by request."""
-    out = dict(user)
+    """The shape handed to the admin panel. The password hash never leaves here."""
+    out = {k: v for k, v in user.items() if k != 'password'}
     out['days_left'] = days_left(user)
     out['expired'] = is_expired(user)
     return out
@@ -223,7 +259,7 @@ def redeem_key(key, email, password):
         user = {
             'id': f"u_{uuid.uuid4().hex[:12]}",
             'email': email,
-            'password': password,
+            'password': hash_secret(password),
             'key': entry.get('key'),
             'days': days,
             'created_at': now,
@@ -252,12 +288,16 @@ def authenticate(email, password):
     with _lock:
         store = _read()
         user = next((u for u in store['users'] if u.get('email') == email), None)
-        if not user or not same_secret(user.get('password'), password):
+        matches, needs_rehash = verify_secret(user.get('password') if user else None, password)
+        if not user or not matches:
             return None, 'Invalid Credentials'
         if user.get('revoked'):
             return None, 'Your access has been removed'
         if is_expired(user):
             return None, 'Your access has expired'
+        if needs_rehash:
+            # a clear-text row from an older build, replaced now that we know it is right
+            user['password'] = hash_secret(password)
         user['last_login'] = time.time()
         _write(store)
         return _public_user(user), None
@@ -317,7 +357,7 @@ def set_password(user_id, password):
         return None, 'Password must be at least 6 characters'
 
     def apply(user):
-        user['password'] = password
+        user['password'] = hash_secret(password)
         return None
     return _mutate_user(user_id, apply)
 

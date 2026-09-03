@@ -132,8 +132,7 @@ function renderDashboardUsers() {
             <div class="users-card ${u.revoked || u.expired ? 'off' : ''}">
                 <div class="users-card-info">
                     <strong>${escHtml(u.email)} ${badge}</strong>
-                    <span class="mono users-secret">Password: <span class="users-pw" data-pw="${escAttr(u.password)}">••••••••</span>
-                        <button class="btn-proxy-sm" onclick="togglePassword(this)">Show</button></span>
+                    <span class="mono users-secret">Password: stored as a salted hash - use Password to set a new one</span>
                     <span class="dim">Key ${escHtml(u.key || '—')} · joined ${fmtDate(u.created_at)} · expires ${fmtDate(u.expires_at)} · last login ${fmtDate(u.last_login)}</span>
                 </div>
                 <div class="users-card-actions">
@@ -146,15 +145,6 @@ function renderDashboardUsers() {
         `;
     }).join('');
 }
-
-window.togglePassword = function(btn) {
-    const span = btn.parentElement.querySelector('.users-pw');
-    if (!span) return;
-    const showing = span.dataset.showing === '1';
-    span.textContent = showing ? '••••••••' : span.dataset.pw;
-    span.dataset.showing = showing ? '0' : '1';
-    btn.textContent = showing ? 'Show' : 'Hide';
-};
 
 window.copyActivationLink = function(key) {
     const link = activationLink(key);
