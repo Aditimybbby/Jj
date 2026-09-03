@@ -60,8 +60,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     // down (no point fetching a live chart nobody is looking at), and on focus
     // we refresh immediately so a returning user sees the real, current state
     // instead of a stale snapshot that made accounts look "stopped".
-    let configTimer = setInterval(fetchAccountConfig, 5000);
-    let accountsTimer = setInterval(window.fetchAccounts, 5000);
+    // Farm size scales the two whole-farm polls. Each one walks every account, so
+    // at 500 accounts a fixed 5s cadence is a permanent load on the box for data
+    // nobody is reading that fast. The server also serves both from a 2s per-space
+    // snapshot cache, so extra tabs are free.
+    function farmSize() {
+        try {
+            return Math.max(
+                Array.isArray(accountsList) ? accountsList.length : 0,
+                Array.isArray(accountConfigList) ? accountConfigList.length : 0
+            );
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    function farmPollDelay(base) {
+        const n = farmSize();
+        if (document.hidden) return base * 6;
+        if (n > 200) return base * 6;
+        if (n > 100) return base * 4;
+        if (n > 40) return base * 2;
+        return base;
+    }
+
+    // setTimeout, not setInterval: the delay is re-read after every pass, so it
+    // adapts as accounts are added instead of being fixed at page load
+    function scheduleFarmPoll(fn, base) {
+        setTimeout(async function run() {
+            try {
+                await fn();
+            } finally {
+                setTimeout(run, farmPollDelay(base));
+            }
+        }, farmPollDelay(base));
+    }
+
+    scheduleFarmPoll(fetchAccountConfig, 5000);
+    scheduleFarmPoll(window.fetchAccounts, 5000);
     let statsTimer = setInterval(update, 1000);
     let captchaTimer = setInterval(window.pollForCaptchas, 2000);
 

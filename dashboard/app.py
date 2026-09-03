@@ -93,9 +93,12 @@ ATTEMPT_WINDOW = 900
 MAX_ATTEMPTS = 5
 SESSION_LIFETIME = timedelta(days=7)
 
-# a space may not grow without bound - one tenant should not be able to fill the box
-MAX_ACCOUNTS_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_ACCOUNTS', '25'))
-MAX_PROXIES_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_PROXIES', '200'))
+# a space may not grow without bound - one tenant should not be able to fill the box.
+# 500 is the supported ceiling: the account list and config polls are served from a
+# per-space snapshot cache, and each running account still costs a gateway connection
+# plus ~25-40MB, so the box's RAM and vCPU are the real limit long before this is.
+MAX_ACCOUNTS_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_ACCOUNTS', '500'))
+MAX_PROXIES_PER_SPACE = int(os.environ.get('LAZYFARMERS_MAX_PROXIES', '500'))
 
 # non-GET /api/ calls need the session's csrf token. key_status is the exception:
 # the activate page hits it before there is a session to protect, and it is rate
@@ -604,15 +607,52 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
+# ── dashboard snapshot cache ──────────────────────────────────────────────────
+# Every open tab polls the account list and the account config every 5s. Each
+# call walks every bot (and reads accounts.json), so a 500-account farm with a
+# few tabs open spent most of its web workers rebuilding the same JSON - which
+# is what made the dashboard stop answering at ~25 accounts. Build it at most
+# once per TTL per space and hand the same payload to everyone.
+_SNAPSHOT_TTL = 2.0
+_snapshots = {}
+_snapshot_lock = threading.Lock()
+
+
+def _snapshot(key, build, ttl=_SNAPSHOT_TTL):
+    now = time.time()
+    with _snapshot_lock:
+        cached = _snapshots.get(key)
+        if cached and now - cached[0] < ttl:
+            return cached[1]
+    value = build()
+    with _snapshot_lock:
+        _snapshots[key] = (time.time(), value)
+    return value
+
+
+def _invalidate_snapshots(owner=None):
+    """Drop cached payloads so the next poll shows a just-made change."""
+    with _snapshot_lock:
+        if owner is None:
+            _snapshots.clear()
+        else:
+            for key in [k for k in _snapshots if k[1] == owner]:
+                _snapshots.pop(key, None)
+
+
 @app.route('/api/accounts/list')
 @space_required
 def account_list():
+    return jsonify(_snapshot(('accounts_list', g.owner), lambda: _build_account_list(g.owner)))
+
+
+def _build_account_list(owner):
     # Always a JSON array. The frontend indexes .find()/.map() on this, so an
     # error dict here used to throw "find is not a function" and blank the whole
     # accounts panel whenever the session lapsed or a bot was mid-reconnect.
     accounts = []
     try:
-        for bot in state.bots_for(g.owner):
+        for bot in state.bots_for(owner):
             # A bot with no user is still connecting (or reconnecting after a
             # gateway drop). Keep it in the list as a connecting card instead of
             # hiding it - hiding it is what made accounts "disappear" and look
@@ -670,8 +710,8 @@ def account_list():
             })
     except Exception as e:
         # Never let a stale bot.user / stats lookup turn this into a 500 dict.
-        state.log_command("SYS", f"account_list error: {e}", "error", owner=g.owner)
-    return jsonify(accounts)
+        state.log_command("SYS", f"account_list error: {e}", "error", owner=owner)
+    return accounts
 
 def get_bot(account_id, owner=None):
     """Resolve an account id to a live bot inside one space.
@@ -1182,13 +1222,21 @@ def accounts_config_api():
             for bot in state.bots_for(g.owner):
                 bot.accounts = accounts
             state.log_command("SYS", f"Accounts config updated by {acting_label()}.", "success", owner=g.owner)
+            _invalidate_snapshots(g.owner)
             return jsonify({"status": "success"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
 
+    return jsonify(_snapshot(('accounts_config', g.owner),
+                             lambda: _build_accounts_config(g.owner)))
+
+
+def _build_accounts_config(owner):
+    from utils import proxy_manager
+    from core import supervisor
     try:
-        accounts = proxy_manager.load_accounts(g.owner)
-        running = supervisor.running_states(g.owner)
+        accounts = proxy_manager.load_accounts(owner)
+        running = supervisor.running_states(owner)
         out = []
         for acc in accounts:
             # A Discord user token is full account access. The accounts page only
@@ -1203,9 +1251,9 @@ def accounts_config_api():
             # False while the instance exists but has not logged in yet
             safe['ready'] = bool(running.get(acc.get('name')))
             out.append(safe)
-        return jsonify({'accounts': out})
+        return {'accounts': out}
     except Exception:
-        return jsonify({'accounts': []})
+        return {'accounts': []}
 
 
 def _bot_loop_call(coro, timeout=60):
@@ -1264,6 +1312,7 @@ def account_launch():
         # remember the operator wants this one up, so a restart brings it back
         proxy_manager.set_account_autostart(g.owner, name, True)
     state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
+    _invalidate_snapshots(g.owner)
     return jsonify({'success': ok, 'message': message})
 
 
@@ -1284,6 +1333,7 @@ def account_stop():
         return jsonify({'success': False, 'error': error}), 503
     ok, message = result
     state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
+    _invalidate_snapshots(g.owner)
     return jsonify({'success': ok, 'message': message})
 
 
@@ -1318,6 +1368,7 @@ def account_launch_all():
             proxy_manager.set_account_autostart(g.owner, account.get('name'), True)
     state.log_command("SYS", f"Started {started}/{total} accounts from dashboard",
                       "success" if started else "error", owner=g.owner)
+    _invalidate_snapshots(g.owner)
     if started == 0:
         return jsonify({'success': False, 'error': 'No accounts could be started (check tokens/channels in the logs)'})
     return jsonify({'success': True, 'message': f'Started {started}/{total} accounts'})
@@ -1345,6 +1396,7 @@ def account_stop_all():
         return jsonify({'success': False, 'error': error}), 503
     stopped = sum(1 for ok, _msg in (result or []) if ok) if isinstance(result, list) else len(names)
     state.log_command("SYS", f"Stopped {stopped}/{len(names)} accounts from dashboard", "success", owner=g.owner)
+    _invalidate_snapshots(g.owner)
     return jsonify({'success': True, 'message': f'Stopped {stopped}/{len(names)} accounts'})
 
 
@@ -1474,6 +1526,7 @@ def account_bulk_import():
     proxy_manager.save_accounts(g.owner, accounts)
     proxy_manager.sync_proxy_assignments(g.owner)
     state.log_command("SYS", f"Imported {len(tokens)} accounts ({acting_label()})", "success", owner=g.owner)
+    _invalidate_snapshots(g.owner)
     return jsonify({'success': True, 'message': f'Imported {len(tokens)} accounts'})
 
 
@@ -2432,20 +2485,23 @@ def captcha_browser_solve():
 
     solver = getattr(bot, 'browser_solver', None)
     if solver is None:
-        return jsonify({'success': False, 'error': 'Browser solver not initialised yet'})
+        return jsonify({'success': False, 'error': 'Extension solver not initialised yet'})
+    if not solver.enabled:
+        return jsonify({'success': False,
+                        'error': 'The extension solver needs a NopeCHA booster key - set '
+                                 'security.captcha_solver.nopecha_booster_key, or solve this '
+                                 'captcha here on the dashboard.'})
 
     from modules.browser_solver import browser_status
     unavailable = browser_status()
     if unavailable:
         return jsonify({'success': False, 'error': unavailable})
 
-    # headless=False: a visual challenge cannot be answered in a window nobody sees, and
-    # this route only ever runs because a human asked it to
+    # the extension answers the challenge itself, so nothing needs to be visible
     security_cog = bot.get_cog('Security')
-    hook = getattr(security_cog, '_on_browser_challenge', None) if security_cog else None
     timeout = 240
     result, error = _bot_loop_call(
-        solver.solve(timeout=timeout - 20, headless=False, on_challenge=hook),
+        solver.solve(timeout=timeout - 20),
         timeout=timeout)
     if error:
         return jsonify({'success': False, 'error': error}), 503

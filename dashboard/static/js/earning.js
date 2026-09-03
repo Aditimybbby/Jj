@@ -74,24 +74,20 @@ function renderEarningControls(s, totals) {
     if (!box) return;
     const on = !!s.enabled;
     box.innerHTML = `
-        <div class="earn-hero ${on ? '' : 'is-off'}">
-            <div class="earn-hero-body">
-                <div class="earn-hero-title">Earning mode
-                    <span class="earn-pill ${on ? 'on' : 'off'}">${on ? 'running' : 'off'}</span>
-                </div>
-                <div class="earn-hero-hint">Points every account in this space at <b>hunt</b>,
-                    <b>huntbot</b> and <b>sell</b>, and keeps <b>battle</b> and the
-                    <b>team watcher</b> on so the team it hunts with keeps growing. Overrides each
-                    account's own command switches while it is on; turning it off restores them.</div>
-            </div>
-            <div class="earn-hero-actions">
-                <span class="earn-hint earn-dim">${totals.on || 0} of ${totals.accounts || 0}<br>running</span>
+        ${earnRow('Earning mode',
+            `Points every account in this space at <b>hunt</b>, <b>huntbot</b> and <b>sell</b>,
+             and keeps <b>battle</b> and the <b>team watcher</b> on so the team it hunts with keeps
+             growing. Overrides each account's own command switches while it is on; turning it off
+             restores them.`,
+            `<div class="earn-mode-control">
+                <span class="earn-pill ${on ? 'on' : 'off'}">${on ? 'running' : 'off'}</span>
+                <span class="earn-hint earn-dim">${totals.on || 0}/${totals.accounts || 0} running</span>
                 <div class="neura-toggle ${on ? 'is-on' : ''}" role="switch" aria-checked="${on}"
                      onclick="toggleEarning(${on ? 'false' : 'true'}, this)">
                     <div class="neura-toggle-track"><span class="neura-toggle-thumb"></span></div>
                 </div>
-            </div>
-        </div>
+            </div>`,
+            'earn-row-head')}
         ${earnRow('Exclusive',
             `Also switch off what competes for the cowoncy or the time: the gambling three,
              curse/pray, cookie, rpp, giveaway and coop battles. Daily, gems, team, battle,
@@ -164,7 +160,7 @@ function earnStepper(key, value, step, unit) {
 
 function earnKpi(icon, title, value, sub, cls) {
     return `
-        <div class="kpi-card">
+        <div class="kpi-card analytics-card">
             <div class="kpi-icon"><span class="icon-svg"
                     style="--icon: url('/static/assets/neura_icons/${icon}.svg');"></span></div>
             <div class="kpi-data">
@@ -181,17 +177,15 @@ function renderEarningKpis(t, accounts) {
     const hours = accounts.reduce((m, a) => Math.max(m, a.hours || 0), 0);
     const perHunt = Number((earningSettings && earningSettings.hunt_cost) ?? 5);
     box.innerHTML = [
-        earnKpi('coins', 'Gained', earnNum(t.gained), `${earnNum(t.sold_count)} sales`, 'earn-pos'),
-        earnKpi('money', 'Spent · autohunt', earnNum(t.spent_autohunt),
+        earnKpi('coins', 'Earned', earnNum(t.gained), `${earnNum(t.sold_count)} sales`, 'earn-pos'),
+        earnKpi('money', 'Huntbot spend', earnNum(t.spent_autohunt),
                 `${earnNum(t.autohunt_runs)} dispatches`, 'earn-neg'),
-        earnKpi('gun', 'Spent · hunt', earnNum(t.spent_hunt),
+        earnKpi('gun', 'Hunt spend', earnNum(t.spent_hunt),
                 `${earnNum(t.hunts)} hunts × ${perHunt}`, 'earn-neg'),
+        earnKpi('layers', 'Unattributed', earnNum(t.spent_other),
+                'no command to blame', 'earn-dim'),
         earnKpi('bolt', 'Net', earnSigned(t.net), earnDuration(hours), earnCls(t.net)),
         earnKpi('chart-column', 'Per hour', earnSigned(t.per_hour), 'across the farm', earnCls(t.per_hour)),
-        earnKpi('battle-net', 'Team growth', earnNum(t.battles),
-                `battles · ${earnNum(t.team_changes)} team swaps`, ''),
-        earnKpi('layers', 'Unattributed', earnNum(t.spent_other),
-                'spend with no command to blame', 'earn-dim'),
     ].join('');
 }
 
@@ -203,17 +197,15 @@ function renderEarningAccounts(rows) {
         return;
     }
     box.innerHTML = `
-        <div class="earn-table-wrap">
-            <table class="earn-table">
+        <div class="proxy-table-wrap earn-table-wrap">
+            <table class="proxy-table earn-table">
                 <thead><tr>
                     <th>Account</th>
                     <th>Balance</th>
-                    <th>Gained</th>
-                    <th>Autohunt</th>
-                    <th>Hunt</th>
+                    <th>Earned</th>
+                    <th>Spent</th>
                     <th>Net</th>
                     <th>Per hour</th>
-                    <th>Team</th>
                     <th>Run</th>
                     <th>Last event</th>
                     <th></th>
@@ -227,24 +219,26 @@ function earningRow(a) {
     const pill = !a.enabled ? '<span class="earn-pill off">off</span>'
         : a.paused ? '<span class="earn-pill paused">paused</span>'
             : '<span class="earn-pill on">earning</span>';
+    // autohunt and hunt spend share one column: the split lives in the sub line, so the
+    // table reads left to right as balance -> earned -> spent -> net instead of as
+    // eleven columns of numbers
+    const spent = (a.spent_autohunt || 0) + (a.spent_hunt || 0);
     return `
         <tr>
-            <td><span class="earn-acc-name">${escHtml(a.name)}</span>${pill}</td>
+            <td>
+                <span class="earn-acc-name">${escHtml(a.name)}</span>${pill}
+                <span class="earn-sub">${earnNum(a.battles)} battles · ${earnNum(a.team_changes)} team swaps</span>
+            </td>
             <td class="earn-num">${earnNum(a.current_cash)}</td>
             <td class="earn-num earn-pos">${earnNum(a.gained)}
                 <span class="earn-sub">${earnNum(a.sold_count)} sales</span></td>
-            <td class="earn-num earn-neg">${earnNum(a.spent_autohunt)}
-                <span class="earn-sub">${earnNum(a.autohunt_runs)} dispatches</span></td>
-            <td class="earn-num earn-neg">${earnNum(a.spent_hunt)}
-                <span class="earn-sub">${earnNum(a.hunts)} hunts</span></td>
+            <td class="earn-num earn-neg">${earnNum(spent)}
+                <span class="earn-sub">${earnNum(a.spent_autohunt)} huntbot · ${earnNum(a.spent_hunt)} hunt</span></td>
             <td class="earn-num earn-net ${earnCls(a.net)}">${earnSigned(a.net)}</td>
             <td class="earn-num ${earnCls(a.per_hour)}">${earnSigned(a.per_hour)}</td>
-            <td class="earn-num">${earnNum(a.battles)}
-                <span class="earn-sub">${earnNum(a.team_changes)} swaps</span></td>
             <td class="earn-dim">${escHtml(earnDuration(a.hours))}</td>
             <td><div class="earn-event" title="${escAttr(a.last_event || '')}">${escHtml(a.last_event || '—')}</div></td>
-            <td><button class="btn-control earn-row-btn" onclick="resetEarning('${escAttr(a.id)}', this)">
-                <span class="btn-text">Reset</span></button></td>
+            <td><button class="btn-proxy-sm" onclick="resetEarning('${escAttr(a.id)}', this)">Reset</button></td>
         </tr>`;
 }
 

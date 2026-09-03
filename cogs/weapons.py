@@ -268,28 +268,17 @@ class Weapons(commands.Cog):
             return
         await self._equip(weapons, equipped)
 
-    @commands.Cog.listener()
-    async def on_socket_raw_receive(self, msg):
+    @commands.Cog.listener('on_owo_gateway_message')
+    async def on_owo_gateway_message(self, raw_data):
         """The inventory is a components v2 card, invisible to discord.py-self.
 
         `owo weapon` answers with type-10 text blocks and an empty `content`, so the
         on_message path below never saw the list at all: the cog asked for it every
-        hour and threw the answer away.
+        hour and threw the answer away. core.bot hands us the parsed frame.
         """
         if not self._cfg().get('enabled', True):
             return
-        if isinstance(msg, (bytes, bytearray)):
-            try:
-                msg = msg.decode('utf-8', errors='replace')
-            except Exception:
-                return
         if not getattr(self.bot, 'is_ready', False):
-            return
-        try:
-            raw_data = json.loads(msg)
-        except Exception:
-            return
-        if raw_data.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             return
 
         data = raw_data.get("d") or {}

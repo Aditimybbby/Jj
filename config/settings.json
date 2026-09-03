@@ -258,10 +258,7 @@
             "captchaly_api_key": "",
             "browser_solver": {
                 "enabled": true,
-                "headless": false,
                 "timeout_s": 180,
-                "passive_window_s": 20,
-                "widget_wait_s": 25,
                 "nopecha": {
                     "enabled": true,
                     "headless": true,

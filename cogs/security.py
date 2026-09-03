@@ -162,20 +162,21 @@ class Security(commands.Cog):
             self.bot.log("ERROR", f"{service_name} auto-solve failed{suffix}!")
 
         browser_solver = getattr(self.bot, "browser_solver", None)
-        if not browser_solver or not browser_solver.enabled:
+        nope_key = self._nopecha_extension_key(sol_cfg)
+        if not browser_solver or not browser_solver.enabled or not nope_key:
+            # extension-only: without a NopeCHA key there is nothing free to try,
+            # so fall through to the dashboard's manual solve
             return False
         unavailable = browser_solver_status()
         if unavailable:
-            self.bot.log("WARN", f"Key-free browser solve unavailable: {unavailable}")
+            self.bot.log("WARN", f"NopeCHA extension solve unavailable: {unavailable}")
             return False
 
-        nope_key = self._nopecha_extension_key(sol_cfg)
-        via = " (NopeCHA extension)" if nope_key else ""
-        self.bot.log("SYS", f"Attempting key-free browser solve{via}{suffix}...")
+        self.bot.log("SYS", f"Attempting NopeCHA extension solve{suffix}...")
         try:
-            result = await browser_solver.solve(on_challenge=self._on_browser_challenge)
+            result = await browser_solver.solve()
         except Exception as e:
-            self.bot.log("ERROR", f"Browser solve crashed{suffix}: {e}")
+            self.bot.log("ERROR", f"NopeCHA extension solve crashed{suffix}: {e}")
             return False
         if result.get("ok"):
             how = result.get("how")
@@ -184,25 +185,10 @@ class Security(commands.Cog):
             elif how == "nopecha-extension":
                 self._resume_after_solve("NopeCHA's extension cleared the captcha.")
             else:
-                self._resume_after_solve("Browser solver cleared the captcha.")
+                self._resume_after_solve("The captcha cleared without a challenge.")
             return True
-        self.bot.log("ERROR", f"Browser solve failed{suffix}: {result.get('reason')}")
+        self.bot.log("ERROR", f"NopeCHA extension solve failed{suffix}: {result.get('reason')}")
         return False
-
-    def _on_browser_challenge(self, prompt, screenshot_b64):
-        """Put the live hCaptcha challenge on the dashboard so it can be answered there."""
-        try:
-            from dashboard.app import register_captcha_challenge
-            register_captcha_challenge(str(self.bot.user.id), {
-                'account_name': self.bot.username,
-                'url': "https://owobot.com/captcha",
-                'type': 'hcaptcha',
-                'browser_prompt': prompt,
-                'browser_screenshot': screenshot_b64,
-            })
-        except Exception as e:
-            self.bot.log("DEBUG", f"Could not publish the browser challenge: {e}")
-        self._show_desktop_notification(f"hCaptcha challenge: {prompt or 'needs a human'}")
 
     def __init__(self, bot):
         self.bot = bot

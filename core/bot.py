@@ -90,6 +90,13 @@ class NeuraBot(commands.Bot):
             enable_debug_events=True,
             proxy=proxy_url,
             proxy_auth=proxy_auth,
+            # nothing here reads message history out of the cache, and a farm of
+            # a few hundred clients paying for one is what fills the box's memory
+            max_messages=None,
+            # member chunking on connect is a burst of gateway traffic and CPU per
+            # account; identity falls back to username/display name when a member
+            # is not cached, so the farm does not need it
+            chunk_guilds_at_startup=False,
         )
         
         self.username = "Bot"
@@ -550,6 +557,38 @@ class NeuraBot(commands.Bot):
             proxy_manager.set_account_user_id(self.space_owner, name, self.user_id)
         except Exception as e:
             _log.warning("could not record account user id: %s", e)
+
+    async def on_socket_raw_receive(self, msg):
+        """Parse each gateway frame once and hand the result to every cog.
+
+        Five cogs (quest, others, weapons, boss, owner) all want the raw
+        components-v2 payload. Each used to decode and json.loads the same frame
+        itself, so one message cost five parses per account - the dominant CPU
+        cost of the whole process once a farm passes ~20 accounts. Now the frame
+        is filtered and parsed here and re-dispatched as ``owo_gateway_message``,
+        which the cogs listen for instead.
+        """
+        if isinstance(msg, (bytes, bytearray)):
+            try:
+                msg = msg.decode('utf-8', errors='replace')
+            except Exception:
+                return
+        if not isinstance(msg, str):
+            return
+
+        # a substring test is ~100x cheaper than a parse, and every listener only
+        # ever wants these two frame types
+        if '"MESSAGE_CREATE"' not in msg and '"MESSAGE_UPDATE"' not in msg:
+            return
+
+        try:
+            payload = json.loads(msg)
+        except Exception:
+            return
+        if payload.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
+            return
+
+        self.dispatch('owo_gateway_message', payload)
 
     def note_send_failure(self, exc):
         """Classify a failed send, flag the account and stop hammering Discord."""

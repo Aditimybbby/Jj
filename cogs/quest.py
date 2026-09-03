@@ -79,30 +79,14 @@ class Quest(commands.Cog):
         if 'quest' in self.bot.cmd_states:
             self.bot.cmd_states['quest']['delay'] = ih * 3600
 
-    @commands.Cog.listener()
-    async def on_socket_raw_receive(self, msg):
+    @commands.Cog.listener('on_owo_gateway_message')
+    async def on_owo_gateway_message(self, raw_data):
+        # core.bot decodes, filters and parses the frame once for every cog.
         # deliberately not gated on bot.paused: reading a card is passive, and an
         # unsolved captcha holds `paused` for as long as it takes the operator to
         # answer it - dropping quest cards for that whole stretch is exactly when the
         # dashboard went stale. The outgoing side (_claim_rewards) checks paused itself.
         if not self.active:
-            return
-
-        # discord.py-self hands us a str (it zlib-decompresses binary frames
-        # before dispatching socket_raw_receive), but decode defensively so a
-        # future change or an edge case can never silently drop quest cards.
-        if isinstance(msg, (bytes, bytearray)):
-            try:
-                msg = msg.decode('utf-8', errors='replace')
-            except Exception:
-                return
-
-        try:
-            raw_data = json.loads(msg)
-        except Exception:
-            return
-
-        if raw_data.get("t") not in ["MESSAGE_CREATE", "MESSAGE_UPDATE"]:
             return
 
         data = raw_data.get("d") or {}

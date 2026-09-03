@@ -49,52 +49,10 @@
     background: var(--accent-gradient);
     opacity: 0.85;
 }
-/* the rows and the hero carry their own padding, so the card must not */
+/* the rows carry their own padding, so the card must not */
 #earning .module-header { padding: 20px 22px 0; }
 #earning .module-title { margin-bottom: 16px; }
 #earning .module-body { margin-bottom: 0; }
-#earning .security-stats-container { padding: 20px 22px 22px; }
-#earning .sec-grid-title { margin-bottom: 14px; font-size: 1rem; letter-spacing: 1.4px; }
-
-/* ── the mode hero: one switch, its state, and what it does ─── */
-.earn-hero {
-    display: flex;
-    align-items: center;
-    gap: 22px;
-    padding: 20px 22px;
-    border-bottom: 1px solid var(--border-soft);
-    background:
-        radial-gradient(120% 140% at 0% 0%, rgba(16, 185, 129, 0.09), transparent 60%),
-        radial-gradient(120% 140% at 100% 100%, rgba(6, 182, 212, 0.07), transparent 55%);
-}
-.earn-hero.is-off {
-    background: radial-gradient(120% 140% at 0% 0%, rgba(255, 255, 255, 0.03), transparent 60%);
-}
-.earn-hero-body { flex: 1; min-width: 0; }
-.earn-hero-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-family: var(--font-heading);
-    font-size: 1.15rem;
-    font-weight: 700;
-    color: #fff;
-    letter-spacing: -0.2px;
-}
-.earn-hero-hint {
-    margin-top: 6px;
-    font-size: 0.78rem;
-    line-height: 1.55;
-    color: var(--text-muted);
-    max-width: 68ch;
-}
-.earn-hero-hint b { color: var(--text-main); font-weight: 600; }
-.earn-hero-actions {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-shrink: 0;
-}
 
 /* ── state pill (shared by the hero and the ledger table) ───── */
 .earn-pill {
@@ -165,49 +123,17 @@
     border-top: 1px solid var(--border-soft);
 }
 
-/* ── ledger table ───────────────────────────────────────────── */
-.earn-table-wrap {
-    overflow-x: auto;
-    margin-top: 8px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border-soft);
-}
-.earn-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: var(--font-mono);
-    font-size: 0.82rem;
-}
-.earn-table th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: rgba(7, 8, 16, 0.95);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 0.66rem;
-    font-weight: 700;
-    text-align: right;
-    padding: 11px 12px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-}
+/* ── ledger table ──────────────────────────────────────────────
+   Chrome comes from .proxy-table / .proxy-table-wrap so this page looks like
+   the proxies page instead of inventing a second table style. Only the bits
+   the ledger adds live here. */
+.earn-table-wrap { margin-bottom: 26px; }
+.earn-table th,
+.earn-table td { text-align: right; vertical-align: top; }
 .earn-table th:first-child,
 .earn-table td:first-child { text-align: left; }
 .earn-table th:last-child,
 .earn-table td:last-child { text-align: center; }
-.earn-table td {
-    text-align: right;
-    padding: 10px 12px;
-    color: var(--text-main);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    white-space: nowrap;
-    vertical-align: middle;
-}
-.earn-table tbody tr:last-child td { border-bottom: none; }
-.earn-table tbody tr { transition: background 0.15s; }
-.earn-table tbody tr:hover td { background: rgba(255, 255, 255, 0.03); }
 
 .earn-acc-name {
     display: block;
@@ -246,11 +172,25 @@
 }
 
 @media (max-width: 720px) {
-    .earn-hero {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 14px;
-    }
-    .earn-hero-actions { width: 100%; justify-content: space-between; }
-    .earn-hint, .earn-hero-hint { max-width: none; }
+    /* the mode row's control cluster drops under its label on a phone */
+    .earn-mode-control { width: 100%; justify-content: space-between; }
+    .earn-hint { max-width: none; }
 }
+
+/* ── earning mode row ──────────────────────────────────────────── */
+.earn-mode-control {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.earn-row-head {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 4px;
+}
+
+/* the two section headings on this page follow the accounts page spacing */
+#earning .section-subtitle { margin-top: 26px; }
+#earning .accounts-page-hint { margin-bottom: 14px; }

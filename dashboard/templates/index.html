@@ -554,8 +554,8 @@
                             <button class="btn-control green" onclick="reloadEmbeddedCaptcha()">Reload</button>
                             <button class="btn-control gold" id="browser-solve-btn"
                                 onclick="solveInBrowser()"
-                                title="Opens OwO's captcha page in Chrome/Edge on the machine running the bot, already logged in. No solver key needed.">Solve
-                                in browser (no key)</button>
+                                title="Hands this captcha to NopeCHA's extension in a local Chromium. Needs a NopeCHA booster key.">Solve
+                                with NopeCHA</button>
                         </div>
                     </div>
                 </div>
@@ -578,7 +578,7 @@
                     <h1 class="view-title">Earning</h1>
                 </div>
 
-                <div class="module-card" style="margin-bottom:20px;">
+                <div class="module-card">
                     <div class="module-header">
                         <h3 class="module-title"><span class="icon-svg"
                                 style="--icon: url('/static/assets/neura_icons/coins.svg');"></span> Earning Mode</h3>
@@ -588,13 +588,14 @@
                     </div>
                 </div>
 
-                <div class="kpi-grid" id="earning-kpis"></div>
+                <h3 class="section-subtitle">Farm Totals</h3>
+                <p class="accounts-page-hint">Every figure is a change in the balance OwO itself
+                    reports, bucketed by the command that caused it.</p>
+                <div class="analytics-grid" id="earning-kpis"></div>
 
-                <div class="security-stats-container" style="margin-top:20px;">
-                    <h2 class="sec-grid-title"><span class="icon-svg"
-                            style="--icon: url('/static/assets/neura_icons/users.svg');"></span> Per Account</h2>
-                    <div id="earning-accounts"></div>
-                </div>
+                <h3 class="section-subtitle">Per Account</h3>
+                <p class="accounts-page-hint">One row per running account for this run of the ledger.</p>
+                <div id="earning-accounts"></div>
             </div>
 
             <!-- ═══════════════════════════════════════════════════════

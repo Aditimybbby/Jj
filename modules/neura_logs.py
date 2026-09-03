@@ -15,9 +15,26 @@ import json
 import os
 from rich.console import Console
 
+def _plain_logs_wanted():
+    """Colour costs ~557us a line and holds rich's console lock.
+
+    That is invisible for one account and 4.5s of CPU per minute at 500, all of it
+    serialising every bot behind one lock, for markup a hosting provider's log
+    viewer renders as escape codes anyway. So: plain lines when running on a host,
+    colour when a human is watching a terminal. LAZYFARMERS_PLAIN_LOGS overrides.
+    """
+    override = os.environ.get('LAZYFARMERS_PLAIN_LOGS', '').strip().lower()
+    if override in ('1', 'true', 'yes'):
+        return True
+    if override in ('0', 'false', 'no'):
+        return False
+    return any(key.startswith('RAILWAY_') for key in os.environ)
+
+
 class NeuraLogs:
     def __init__(self):
         self.console = Console()
+        self.plain = _plain_logs_wanted()
         self.log_config = {}
         self.last_logs = {}
         self._load_config()
@@ -49,6 +66,13 @@ class NeuraLogs:
             cutoff = now - 60
             self.last_logs = {k: v for k, v in self.last_logs.items() if v > cutoff}
         self.last_logs[dedup_key] = now
+
+        username = bot.username if hasattr(bot, 'username') else "Bot"
+        if self.plain:
+            # one write, no markup parsing, no shared console lock
+            print(f"[{username}] {time.strftime('%I:%M:%S %p')} [{log_type}]  {message}", flush=True)
+            self._record(bot, log_type, message, username)
+            return
 
         type_colors = self.log_config.get("colors", {})
         colors = {
@@ -82,6 +106,10 @@ class NeuraLogs:
             else:
                 self.console.print(f"\r{name_tag}[dim]{t}[/dim] [[bold {color}]{log_type}[/bold {color}]]  {message}")
 
+        self._record(bot, log_type, message, username)
+
+    def _record(self, bot, log_type, message, username):
+        """Feed the dashboard log view and the stats counters behind it."""
         import core.state as state
         bot_id = str(bot.user.id) if (hasattr(bot, '_connection') and bot.user) else (getattr(bot, 'user_id', None))
         # pass the space explicitly: before the first READY there is no bot_id for
@@ -89,5 +117,6 @@ class NeuraLogs:
         # and every other startup line would only ever reach the admin's log view
         state.log_command(log_type, message, "info", bot_name=username, bot_id=bot_id,
                           owner=getattr(bot, 'space_owner', None))
+
 
 neura_logger = NeuraLogs()

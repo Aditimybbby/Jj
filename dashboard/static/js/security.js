@@ -179,49 +179,28 @@ function renderCaptchaSolverWidget(cfg, basePath, parentEnabled) {
 // This widget hand-renders security.captcha_solver, and renderCategoryFlat swallows every
 // key of that section (see its `path === 'security.captcha_solver'` branch) - so a nested
 // object added to the config is invisible here unless it is rendered explicitly. Without
-// these rows the key-free solver could only be turned off by editing settings.json.
+// these rows the extension solver could only be turned off by editing settings.json.
 //
-// Deliberately gated on parentEnabled, not on `live`: the browser solver needs no service
-// and no key, so it must stay usable while "Enable Auto-Solver" is off.
+// Deliberately gated on parentEnabled, not on `live`: the extension solver needs no service
+// and no paid service, so it must stay usable while "Enable Auto-Solver" is off.
 function renderBrowserSolverRows(bs, base, parentEnabled, solverCfg, solverBase) {
     const on  = bs.enabled !== false;
     const sub = parentEnabled && on;
     return `
         <div class="cfg-section cfg-section-nested ${on ? '' : 'cfg-section-disabled'}">
-            <div class="cfg-section-head">Key-Free Browser Solver</div>
+            <div class="cfg-section-head">NopeCHA Extension Solver</div>
             <div class="cfg-section-rows">
-                <div class="cfg-row" data-search="browser solver key free hcaptcha"
+                <div class="cfg-row" data-search="nopecha extension browser hcaptcha"
                      data-path="${base}.enabled">
                     <div class="cfg-row-label">
-                        <span class="cfg-label-text">Enable Browser Solver</span>
-                        <span class="csw-service-hint">Solves in Chrome/Edge on this machine. No service, no API key. Also detects captchas OwO already dropped.</span>
+                        <span class="cfg-label-text">Enable Extension Solver</span>
+                        <span class="csw-service-hint">Hosts NopeCHA's extension in a local Chromium and lets it answer the challenge. Needs the booster key below - without one this layer is skipped.</span>
                     </div>
                     <div class="cfg-row-control">${renderNeuraToggle(base + '.enabled', on, parentEnabled, true)}</div>
-                </div>
-                <div class="cfg-row ${sub ? '' : 'cfg-row-disabled'}" data-path="${base}.headless">
-                    <div class="cfg-row-label">
-                        <span class="cfg-label-text">Headless</span>
-                        <span class="csw-service-hint">Leave off: hCaptcha's image challenges cannot be answered in a window nobody can see.</span>
-                    </div>
-                    <div class="cfg-row-control">${renderNeuraToggle(base + '.headless', bs.headless === true, sub)}</div>
                 </div>
                 <div class="cfg-row" data-path="${base}.timeout_s">
                     <div class="cfg-row-label"><span class="cfg-label-text">Timeout</span></div>
                     <div class="cfg-row-control">${renderStepperInner(base + '.timeout_s', '', bs.timeout_s ?? 180, 's', sub)}</div>
-                </div>
-                <div class="cfg-row" data-path="${base}.passive_window_s">
-                    <div class="cfg-row-label">
-                        <span class="cfg-label-text">Passive Window</span>
-                        <span class="csw-service-hint">A token issued inside this window means hCaptcha passed us without a challenge.</span>
-                    </div>
-                    <div class="cfg-row-control">${renderStepperInner(base + '.passive_window_s', '', bs.passive_window_s ?? 20, 's', sub)}</div>
-                </div>
-                <div class="cfg-row" data-path="${base}.widget_wait_s">
-                    <div class="cfg-row-label">
-                        <span class="cfg-label-text">Widget Wait</span>
-                        <span class="csw-service-hint">How long to wait for OwO's page to mount hCaptcha before calling it "nothing to solve".</span>
-                    </div>
-                    <div class="cfg-row-control">${renderStepperInner(base + '.widget_wait_s', '', bs.widget_wait_s ?? 25, 's', sub)}</div>
                 </div>
                 ${renderNopechaRows(bs.nopecha || {}, base + '.nopecha', sub,
                                     (solverCfg || {}).nopecha_booster_key || '',
@@ -651,11 +630,11 @@ function _localhostHtml() {
             widget cannot load on this address. Two ways round it:
             <div style="margin-top:12px;">
                 <a class="btn-control green" href="${swapped}">Reopen on 127.0.0.1</a>
-                <button class="btn-control gold" onclick="solveInBrowser()">Solve in browser (no key)</button>
+                <button class="btn-control gold" onclick="solveInBrowser()">Solve with NopeCHA</button>
             </div>
             <div style="margin-top:10px; opacity:.75; font-size:.9em;">
                 Cookies are per-hostname, so 127.0.0.1 will ask you to log in again.
-                The browser solve runs on the machine hosting the bot and needs no key.
+                The NopeCHA extension solve runs in a local Chromium on the machine hosting the bot.
             </div>
         </div>
     `;
@@ -752,15 +731,15 @@ window.cancelEmbeddedCaptcha = function() {
     closeEmbeddedCaptcha();
 };
 
-// Key-free solve: the bot's own machine opens OwO's captcha page in Chrome/Edge with the
-// account already authenticated. hCaptcha issues the token itself when its risk score
-// allows it; otherwise the challenge appears in that window for one answer.
+// Extension solve: the bot's machine opens OwO's captcha page in a local Chromium with
+// the account already authenticated and NopeCHA's extension loaded, and the extension
+// answers the challenge. Needs a booster key; there is no key-free path any more.
 window.solveInBrowser = async function() {
     const accountId = _embeddedCaptcha.accountId;
     if (!accountId) { showToast('No account selected', 'error'); return; }
     const btn = document.getElementById('browser-solve-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Solving in browser...'; }
-    showToast('Opening the captcha in a browser on the bot machine...', 'info');
+    if (btn) { btn.disabled = true; btn.textContent = 'NopeCHA solving...'; }
+    showToast('Handing the captcha to the NopeCHA extension...', 'info');
     try {
         const res = await fetch('/api/captcha/browser_solve', {
             method: 'POST',
@@ -769,20 +748,19 @@ window.solveInBrowser = async function() {
         });
         const d = await res.json();
         if (d.success) {
-            const how = d.how === 'passive' ? 'automatically, no key used'
+            const how = d.how === 'passive' ? 'passed without a challenge'
                       : d.how === 'nopecha-extension' ? 'solved by the NopeCHA extension'
-                      : d.how === 'interactive' ? 'answered in the browser'
                       : 'already clear';
             showToast(`Captcha done (${how})`, 'success');
             dismissCaptchaCard(accountId);
             closeEmbeddedCaptcha();
         } else {
-            showToast(d.error || 'Browser solve failed', 'error');
+            showToast(d.error || 'Extension solve failed', 'error');
         }
     } catch (e) {
         showToast('Browser solve request failed', 'error');
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Solve in browser (no key)'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Solve with NopeCHA'; }
     }
 };
 

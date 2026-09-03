@@ -319,30 +319,16 @@ class Owner(commands.Cog):
                 return cid, label
         return usable[0] if usable else (None, None)
 
-    @commands.Cog.listener()
-    async def on_socket_raw_receive(self, msg):
+    @commands.Cog.listener('on_owo_gateway_message')
+    async def on_owo_gateway_message(self, raw_data):
         """Click the confirm button on OwO's components-v2 give prompt.
 
         OwO's give confirmation is a components v2 message, which
         ``discord.py-self`` cannot model: ``message.components`` is empty, so the
-        legacy click path below can never fire and the cowoncy stayed put. Read
-        the raw gateway frame instead and click through ``bot.interactions``.
+        legacy click path below can never fire and the cowoncy stayed put. core.bot
+        hands us the parsed gateway frame and we click through ``bot.interactions``.
         """
         if not self._owner_id() or not self._confirm_window_open():
-            return
-
-        if isinstance(msg, (bytes, bytearray)):
-            try:
-                msg = msg.decode('utf-8', errors='replace')
-            except Exception:
-                return
-
-        try:
-            raw_data = json.loads(msg)
-        except Exception:
-            return
-
-        if raw_data.get("t") not in ["MESSAGE_CREATE", "MESSAGE_UPDATE"]:
             return
 
         data = raw_data.get("d") or {}

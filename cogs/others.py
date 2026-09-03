@@ -1176,30 +1176,16 @@ class Others(commands.Cog):
         self._handled_v2[key] = stamp
         return False
 
-    @commands.Cog.listener()
-    async def on_socket_raw_receive(self, msg):
+    @commands.Cog.listener('on_owo_gateway_message')
+    async def on_owo_gateway_message(self, raw_data):
         """`owo level`, `owo zoo` and `owo team` now answer with components v2 cards.
 
         discord.py-self models none of that, so message.content is empty and the
         on_message path below never sees them - hence reading the raw payload.
+        core.bot decodes and parses the frame once and re-dispatches it here, so a
+        farm of hundreds of accounts pays for one parse per frame, not five.
         """
-        # discord.py-self zlib-decompresses binary frames before dispatching
-        # socket_raw_receive, so we normally get a str. Decode defensively anyway -
-        # the old `isinstance(msg, bytes): return` would have silently thrown away
-        # every large V2 card (zoo/team/level) if a future change ever passed bytes
-        # through, which is exactly the "panels always empty" failure mode.
-        if isinstance(msg, (bytes, bytearray)):
-            try:
-                msg = msg.decode('utf-8', errors='replace')
-            except Exception:
-                return
         if not getattr(self.bot, 'is_ready', False):
-            return
-        try:
-            raw_data = json.loads(msg)
-        except Exception:
-            return
-        if raw_data.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             return
 
         data = raw_data.get("d") or {}

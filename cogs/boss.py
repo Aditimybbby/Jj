@@ -113,20 +113,10 @@ class Boss(commands.Cog):
             self.bot.log("BOSS", f"Synced tickets with OwO: {self.tickets}/3")
             self._save_state()
 
-    @commands.Cog.listener()
-    async def on_socket_raw_receive(self, msg):
+    @commands.Cog.listener('on_owo_gateway_message')
+    async def on_owo_gateway_message(self, raw_data):
+        # core.bot parses each gateway frame once and re-dispatches it here
         if not self.enabled or self.bot.paused:
-            return
-
-        if isinstance(msg, bytes):
-            return
-
-        try:
-            raw_data = json.loads(msg)
-        except Exception:
-            return
-
-        if raw_data.get("t") not in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             return
 
         data = raw_data.get("d") or {}
