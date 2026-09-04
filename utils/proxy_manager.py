@@ -113,16 +113,27 @@ def set_account_autostart(owner, name, autostart):
     poking the current process - so an account they stopped has to stay stopped
     across a redeploy, a crash or a plain restart.
     """
-    if not name:
-        return False
+    return set_accounts_autostart(owner, [name], autostart)
+
+
+def set_accounts_autostart(owner, names, autostart):
+    """Same, for many accounts in one read-modify-write.
+
+    Start All / Stop All used to call the single-name version once per account:
+    200 accounts meant 200 full reads and up to 200 fsync'd rewrites of
+    accounts.json, all inside one web request, while the browser waited.
+    """
+    wanted = {str(n) for n in (names or []) if n}
+    if not wanted:
+        return 0
     accounts = load_accounts(owner)
-    changed = False
+    changed = 0
     for account in accounts:
-        if str(account.get("name")) != str(name):
+        if str(account.get("name")) not in wanted:
             continue
         if wants_autostart(account) != bool(autostart):
             account["autostart"] = bool(autostart)
-            changed = True
+            changed += 1
     if changed:
         save_accounts(owner, accounts)
     return changed
@@ -266,21 +277,27 @@ def get_proxy_auth(proxy_dict):
     return None
 
 
-def get_proxy_by_id(owner, proxy_id):
+def get_proxy_by_id(owner, proxy_id, proxies=None):
     if not proxy_id:
         return None
-    for proxy in load_proxies(owner):
+    for proxy in (proxies if proxies is not None else load_proxies(owner)):
         if proxy.get("id") == proxy_id and proxy.get("enabled", True):
             return proxy
     return None
 
 
-def resolve_account_proxy(owner, account):
+def resolve_account_proxy(owner, account, proxies=None):
+    """Turn an account's proxy_id into (url, auth, label).
+
+    `proxies` lets a caller that resolves many accounts in a row read the pool
+    once: without it, starting a 200-account farm re-read and re-parsed
+    proxies.json 200 times, on the event loop, before the first login.
+    """
     proxy_id = account.get("proxy_id") if account else None
     if not proxy_id:
         return None, None, "direct"
 
-    proxy = get_proxy_by_id(owner, proxy_id)
+    proxy = get_proxy_by_id(owner, proxy_id, proxies=proxies)
     if not proxy:
         return None, None, "direct"
 

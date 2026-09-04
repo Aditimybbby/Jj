@@ -96,17 +96,17 @@ function renderActivationKeys() {
         const usedLine = used
             ? `<span class="dim">Redeemed by ${escHtml(k.used_by)} · ${fmtDate(k.used_at)}</span>`
             : `<span class="users-link mono" title="${escAttr(activationLink(k.key))}">${escHtml(activationLink(k.key))}</span>`;
-        const copyBtn = used ? '' : `<button class="btn-proxy-sm" onclick="copyActivationLink('${escAttr(k.key)}')"><span class="icon-svg" style="--icon: url('/static/assets/neura_icons/link.svg');"></span> Copy link</button>`;
+        const copyBtn = used ? '' : `<button class="btn-proxy-sm" onclick="copyActivationLink(decodeURIComponent('${jsArg(k.key)}'))"><span class="icon-svg" style="--icon: url('/static/assets/neura_icons/link.svg');"></span> Copy link</button>`;
         return `
             <div class="users-card ${used ? 'off' : ''}">
                 <div class="users-card-info">
-                    <strong class="mono">${escHtml(k.key)} ${badge} <span class="dim">${k.days}d</span></strong>
+                    <strong class="mono">${escHtml(k.key)} ${badge} <span class="dim">${escHtml(k.days)}d</span></strong>
                     ${usedLine}
                     ${note}
                 </div>
                 <div class="users-card-actions">
                     ${copyBtn}
-                    <button class="btn-proxy-sm danger" onclick="deleteActivationKey('${escAttr(k.key)}')">Delete</button>
+                    <button class="btn-proxy-sm danger" onclick="deleteActivationKey('${jsArg(k.key)}')">Delete</button>
                 </div>
             </div>
         `;
@@ -126,8 +126,8 @@ function renderDashboardUsers() {
         else if (u.expired) badge = '<span class="users-badge revoked">EXPIRED</span>';
         else badge = `<span class="users-badge fresh">${u.days_left} DAYS LEFT</span>`;
         const revokeBtn = u.revoked
-            ? `<button class="btn-proxy-sm" onclick="setUserRevoked('${escAttr(u.id)}', false)">Restore</button>`
-            : `<button class="btn-proxy-sm danger" onclick="setUserRevoked('${escAttr(u.id)}', true)">Revoke</button>`;
+            ? `<button class="btn-proxy-sm" onclick="setUserRevoked('${jsArg(u.id)}', false)">Restore</button>`
+            : `<button class="btn-proxy-sm danger" onclick="setUserRevoked('${jsArg(u.id)}', true)">Revoke</button>`;
         return `
             <div class="users-card ${u.revoked || u.expired ? 'off' : ''}">
                 <div class="users-card-info">
@@ -136,16 +136,26 @@ function renderDashboardUsers() {
                     <span class="dim">Key ${escHtml(u.key || '—')} · joined ${fmtDate(u.created_at)} · expires ${fmtDate(u.expires_at)} · last login ${fmtDate(u.last_login)}</span>
                 </div>
                 <div class="users-card-actions">
-                    <button class="btn-proxy-sm" onclick="extendUser('${escAttr(u.id)}')">+ Days</button>
-                    <button class="btn-proxy-sm" onclick="changeUserPassword('${escAttr(u.id)}')">Password</button>
+                    <button class="btn-proxy-sm" onclick="extendUser('${jsArg(u.id)}')">+ Days</button>
+                    <button class="btn-proxy-sm" onclick="changeUserPassword('${jsArg(u.id)}')">Password</button>
                     ${revokeBtn}
-                    <button class="btn-proxy-sm danger" onclick="deleteUser('${escAttr(u.id)}', '${escAttr(u.email)}')">Delete</button>
+                    <button class="btn-proxy-sm danger" onclick="deleteUser('${jsArg(u.id)}', '${jsArg(u.email)}')">Delete</button>
                 </div>
             </div>
         `;
     }).join('');
 }
 
+// The onclick attributes above pass these through jsArg(), so every handler that is
+// only reachable from one undoes that with decodeURIComponent. escAttr() is not
+// usable there: an activated user picks their own email and dashboard/users.py's
+// EMAIL_RE allows an apostrophe, and the HTML parser turns &#39; back into ' before
+// the JS is parsed - so an escAttr'd email could close the string literal and run
+// its own code inside the *admin's* session, the one that mints keys and deletes
+// spaces. See jsArg in core.js.
+//
+// This one is also called straight from generateKeys() with a raw key, so it keeps
+// taking a raw key and the onclick decodes at the boundary instead.
 window.copyActivationLink = function(key) {
     const link = activationLink(key);
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -173,7 +183,8 @@ window.generateKeys = async function() {
     if (data.keys.length === 1) copyActivationLink(data.keys[0].key);
 };
 
-window.deleteActivationKey = async function(key) {
+window.deleteActivationKey = async function(rawKey) {
+    const key = decodeURIComponent(rawKey);
     if (!confirm(`Delete key ${key}? Anyone holding the link will no longer be able to use it.`)) return;
     const data = await usersRequest(`/api/users/keys/${encodeURIComponent(key)}`, 'DELETE');
     if (data.success) {
@@ -182,7 +193,8 @@ window.deleteActivationKey = async function(key) {
     }
 };
 
-window.setUserRevoked = async function(userId, revoked) {
+window.setUserRevoked = async function(rawUserId, revoked) {
+    const userId = decodeURIComponent(rawUserId);
     const data = await usersRequest(`/api/users/${encodeURIComponent(userId)}`, 'PATCH', {
         action: revoked ? 'revoke' : 'restore',
     });
@@ -192,7 +204,8 @@ window.setUserRevoked = async function(userId, revoked) {
     }
 };
 
-window.extendUser = async function(userId) {
+window.extendUser = async function(rawUserId) {
+    const userId = decodeURIComponent(rawUserId);
     const raw = prompt('Add how many days? (use a negative number to take days away)', '7');
     if (raw === null) return;
     const days = parseFloat(raw);
@@ -207,7 +220,8 @@ window.extendUser = async function(userId) {
     }
 };
 
-window.changeUserPassword = async function(userId) {
+window.changeUserPassword = async function(rawUserId) {
+    const userId = decodeURIComponent(rawUserId);
     const password = prompt('New password (at least 6 characters)');
     if (password === null) return;
     const data = await usersRequest(`/api/users/${encodeURIComponent(userId)}`, 'PATCH', { action: 'password', password });
@@ -217,7 +231,9 @@ window.changeUserPassword = async function(userId) {
     }
 };
 
-window.deleteUser = async function(userId, email) {
+window.deleteUser = async function(rawUserId, rawEmail) {
+    const userId = decodeURIComponent(rawUserId);
+    const email = decodeURIComponent(rawEmail);
     if (!confirm(`Delete ${email}?\n\nThis stops their bots and permanently wipes their space — accounts, tokens, proxies, settings and history. It cannot be undone.`)) return;
     const data = await usersRequest(`/api/users/${encodeURIComponent(userId)}`, 'DELETE');
     if (data.success) {

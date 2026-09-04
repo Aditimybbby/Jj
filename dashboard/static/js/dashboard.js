@@ -32,7 +32,14 @@ function initDashCharts() {
 }
 
     
+// One poll at a time. The interval fires on a fixed timer regardless of whether the
+// previous request came back, so on a big farm - or a slow link - the browser piled
+// up overlapping /api/stats requests, each one heavier than the last response it was
+// still waiting on. That queue is what turned a slow dashboard into a stuck one.
+let _updateInFlight = false;
+
 function update() {
+    if (_updateInFlight) return;
     let url;
     if (currentAccountId === '__combined__') {
         url = '/api/stats/combined';
@@ -40,7 +47,10 @@ function update() {
         const q = currentAccountId ? `?id=${currentAccountId}` : '';
         url = `/api/stats${q}`;
     }
-    fetch(url).then(r => r.json()).then(d => {
+    _updateInFlight = true;
+    // the promise is returned so the poller in init.js can wait for this pass to
+    // finish before queueing the next one
+    return fetch(url).then(r => r.json()).then(d => {
         if (!d || Object.keys(d).length === 0) return;
         if (d.bot) {
             const nameEl = document.getElementById('currentAccountName');
@@ -93,7 +103,8 @@ function update() {
         try { renderQuests(d.quest_data, d.next_quest_timer, d.next_quest_at, d.quest_source, d.quest_card_url, d.quest_seals); } catch(e) { console.error("Quest Render Error:", e); }
         try { if (d.cmd_states) renderScheduler(d.cmd_states); } catch(e) { console.error("Scheduler Render Error in update():", e); }
         try { fetchSecuritySummary(); } catch(e) { console.error("Security Summary Error:", e); }
-    }).catch(e => console.error("Stats poll failed:", e));
+    }).catch(e => console.error("Stats poll failed:", e))
+      .finally(() => { _updateInFlight = false; });
 }
 
 // this runs once a second, so a missing element must not throw

@@ -49,51 +49,64 @@ async function testSecurity(btn) {
     }
 }
 
+// One request for the whole grid.
+//
+// This used to loop over accountsList and `await fetch('/api/stats?id=' + acc.id)`
+// per account - serially, from the 1s dashboard tick - to read three integers out
+// of a payload that also carries the battle team, the whole zoo, the quest card and
+// every scheduled command. At 200 accounts that is 200 requests a second against 16
+// web workers: the queue never drains, and the browser cannot even fetch a
+// stylesheet, which is the "website stops loading" symptom. /api/security/summary
+// returns exactly what is drawn below, cached per space.
 async function fetchSecuritySummary() {
-    if (!document.getElementById('security').classList.contains('active-view')) return;
+    const view = document.getElementById('security');
+    if (!view || !view.classList.contains('active-view')) return;
     const container = document.getElementById('security-accounts-grid');
     if (!container) return;
-    let html = '';
-    for (const acc of accountsList) {
-        try {
-            const res = await fetch(`/api/stats?id=${acc.id}`);
-            const d = await res.json();
-            if (!d || !d.security) continue;
-            const isActive = acc.id === currentAccountId;
-            const statusColor = d.status === "PAUSED" ? "var(--danger)" : "var(--success)";
-            html += `
-                <div class="sec-account-card ${d.status === "PAUSED" ? 'alert-active' : ''} ${isActive ? 'selected' : ''}">
-                    <div class="sec-acc-header">
-                        <div class="sec-acc-info">
-                            ${acc.avatar ? `<img src="${escAttr(acc.avatar)}" class="account-avatar-lg" alt="">` : '<span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url(\'/static/assets/neura_icons/discord.svg\');"></span>'}
-                            <div class="sec-acc-text">
-                                <div class="sec-acc-name">${escHtml(acc.username)}</div>
-                                <div class="sec-acc-id">User ID · ${escHtml(acc.id)}</div>
-                                <div class="sec-acc-status" style="color:${statusColor}">${escHtml(d.status)}</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="sec-acc-stats">
-                        <div class="sec-mini-stat">
-                            <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/check-to-slot.svg'); background-color: var(--success);"></span>
-                            <div class="val">${d.security.captchas}</div>
-                            <div class="lbl">Solved</div>
-                        </div>
-                        <div class="sec-mini-stat">
-                            <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/user-slash.svg'); background-color: var(--danger);"></span>
-                            <div class="val">${d.security.bans}</div>
-                            <div class="lbl">Bans</div>
-                        </div>
-                        <div class="sec-mini-stat">
-                            <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/warning.svg'); background-color: var(--warning);"></span>
-                            <div class="val">${d.security.warnings}</div>
-                            <div class="lbl">Warns</div>
+    let rows = [];
+    try {
+        const res = await fetch('/api/security/summary');
+        const d = await res.json();
+        if (!d || !d.success) return;
+        rows = d.accounts || [];
+    } catch (e) {
+        return;
+    }
+    const html = rows.map(a => {
+        const paused = a.status === 'PAUSED';
+        const statusColor = paused ? 'var(--danger)' : 'var(--success)';
+        return `
+            <div class="sec-account-card ${paused ? 'alert-active' : ''} ${a.id === currentAccountId ? 'selected' : ''}">
+                <div class="sec-acc-header">
+                    <div class="sec-acc-info">
+                        ${a.avatar ? `<img src="${escAttr(a.avatar)}" class="account-avatar-lg" alt="">` : '<span class="icon-svg account-avatar-lg account-avatar-fallback" style="--icon: url(\'/static/assets/neura_icons/discord.svg\');"></span>'}
+                        <div class="sec-acc-text">
+                            <div class="sec-acc-name">${escHtml(a.username)}</div>
+                            <div class="sec-acc-id">User ID · ${escHtml(a.id)}</div>
+                            <div class="sec-acc-status" style="color:${statusColor}">${escHtml(a.status)}</div>
                         </div>
                     </div>
                 </div>
-            `;
-        } catch (e) {}
-    }
+                <div class="sec-acc-stats">
+                    <div class="sec-mini-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/check-to-slot.svg'); background-color: var(--success);"></span>
+                        <div class="val">${escHtml(String(a.captchas ?? 0))}</div>
+                        <div class="lbl">Solved</div>
+                    </div>
+                    <div class="sec-mini-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/user-slash.svg'); background-color: var(--danger);"></span>
+                        <div class="val">${escHtml(String(a.bans ?? 0))}</div>
+                        <div class="lbl">Bans</div>
+                    </div>
+                    <div class="sec-mini-stat">
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/warning.svg'); background-color: var(--warning);"></span>
+                        <div class="val">${escHtml(String(a.warnings ?? 0))}</div>
+                        <div class="lbl">Warns</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
     container.innerHTML = html || '<div class="no-data">Initializing system details...</div>';
 }
 

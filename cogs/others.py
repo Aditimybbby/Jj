@@ -1249,15 +1249,15 @@ class Others(commands.Cog):
                     self._want_level_until = 0.0
                     self._store_level(level, xp, xp_needed, source="v2")
                 elif data.get("attachments"):
-                    # OwO rendered the level as an image card - download and OCR it
+                    # OwO rendered the level as an image card - download and OCR it.
+                    # _read_level_image returns the reader's *dict*, so unpacking it
+                    # into four names raised ValueError and the whole OCR branch was
+                    # dead. _handle_level_image is the one consumer that reads the
+                    # dict correctly (and owns the "is this card ours" check and the
+                    # unreadable fallback), so defer to it rather than re-deriving.
                     att = data["attachments"][0]
                     img_url = att.get("proxy_url") or att.get("url")
-                    lvl, xpv, xpn, rank = await self._read_level_image(img_url)
-                    if lvl is not None or xpv is not None:
-                        self._want_level_until = 0.0
-                        self._store_level(lvl, xpv, xpn, source="image", rank=rank)
-                    else:
-                        self._note_level_unreadable()
+                    await self._handle_level_image(img_url)
                 elif ("level" in content or "lvl" in content) and not any(
                         noise in content for noise in LEVEL_NOISE):
                     self._note_level_unparsed(raw_text)
@@ -1331,12 +1331,8 @@ class Others(commands.Cog):
                 and self.bot.is_message_for_me(message, role="header")):
             att = message.attachments[0]
             img_url = getattr(att, 'proxy_url', None) or getattr(att, 'url', None)
-            lvl, xpv, xpn, rank = await self._read_level_image(img_url)
-            if lvl is not None or xpv is not None:
-                self._want_level_until = 0.0
-                self._store_level(lvl, xpv, xpn, source="image", rank=rank)
-            else:
-                self._note_level_unreadable()
+            # dict in, dict out - see the note on the v2 branch above
+            await self._handle_level_image(img_url)
             return
 
         if any(phrase in content for phrase in HUNT_PHRASES):

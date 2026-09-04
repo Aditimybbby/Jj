@@ -614,6 +614,10 @@ def logout():
 # is what made the dashboard stop answering at ~25 accounts. Build it at most
 # once per TTL per space and hand the same payload to everyone.
 _SNAPSHOT_TTL = 2.0
+# /api/stats is polled once a second per open tab, so it gets a tighter TTL than
+# the 5s-polled lists - long enough to collapse a burst of tabs onto one build,
+# short enough that the panel still ticks every second.
+_STATS_TTL = 1.0
 _snapshots = {}
 _snapshot_lock = threading.Lock()
 
@@ -754,6 +758,16 @@ def stats():
     if not uid:
         return jsonify({})
 
+    # This is the heaviest read-only payload the dashboard has - the battle team,
+    # the whole zoo, the quest card, every scheduled command and 200 log lines -
+    # and several open tabs all poll it once a second. Building it at most once per
+    # TTL per account is the same trick /api/accounts/list already uses. The owner
+    # must stay at index 1 of the key: _invalidate_snapshots matches on k[1].
+    return jsonify(_snapshot(('stats', g.owner, uid),
+                             lambda: _build_stats(uid, bot), ttl=_STATS_TTL))
+
+
+def _build_stats(uid, bot):
     st = state.account_stats.get(uid)
     if not st:
         if bot and bot.user:
@@ -761,7 +775,7 @@ def stats():
              st['username'] = bot.username
              state.account_stats[uid] = st
         else:
-             return jsonify({})
+             return {}
     
     uptime_start = st.get('uptime_start', time.time())
     elapsed = time.time() - uptime_start
@@ -817,7 +831,11 @@ def stats():
         'level_card_url': st.get('level_card_url'),
         'last_level_update': st.get('last_level_update'),
         'team': team_info,
-        'logs': [l for l in state.command_logs if str(l.get('bot_id')) == uid][:200],
+        # per-account ring buffer, not a filter over the shared 1000-entry deque:
+        # that scan was O(1000) on every poll of every open account panel, and once
+        # ~200 accounts shared those 1000 entries an account's own panel went blank
+        # because its lines had already been pushed out by its neighbours'.
+        'logs': state.logs_for_bot(uid, 200),
         'status': current_status,
         'security': {
              'captchas': st.get('captchas_solved', 0),
@@ -867,16 +885,24 @@ def stats():
         'cmd_states': {k: {**v, 'content': '[Dynamic function]' if callable(v.get('content')) else v.get('content')} for k, v in bot.cmd_states.items()} if bot else {},
         'gambling_stats': st.get('gambling_stats', {})
     }
-    
-    return jsonify(response_data)
+
+    return response_data
 
 @app.route('/api/stats/combined')
 @space_required
 def stats_combined():
     """Aggregate stats across every bot in the caller's space."""
-    bots = state.bots_for(g.owner)
+    # Walks every bot three times and filters the shared log deque, on the same 1s
+    # tick as /api/stats - so it gets the same per-space TTL rather than being
+    # rebuilt once per open tab per second.
+    return jsonify(_snapshot(('stats_combined', g.owner),
+                             lambda: _build_stats_combined(g.owner), ttl=_STATS_TTL))
+
+
+def _build_stats_combined(owner):
+    bots = state.bots_for(owner)
     if not bots:
-        return jsonify({})
+        return {}
 
     total_cash = 0
     total_hunt = 0
@@ -963,11 +989,14 @@ def stats_combined():
                 for b in bots if b.user
             )) / max(time_diff_hrs, 0.01))
 
-    # combined logs from all bots
+    # combined logs from all bots. The inner `any(...)` this replaces re-walked
+    # every bot for every one of the 1000 deque entries - O(1000 x accounts) on a
+    # route the dashboard polls every second.
+    space_uids = {str(b.user.id) for b in bots if b.user}
     combined_logs = [l for l in state.command_logs
-                     if any(b.user and str(l.get('bot_id')) == str(b.user.id) for b in bots)][:200]
+                     if str(l.get('bot_id')) in space_uids][:200]
 
-    return jsonify({
+    return {
         'uptime': utils.format_seconds(elapsed),
         'cash': total_cash,
         'status': combined_status,
@@ -1023,7 +1052,7 @@ def stats_combined():
         'next_quest_at': None,
         'cmd_states': {},
         'gambling_stats': {}
-    })
+    }
 
 @app.route('/api/debug')
 @admin_required
@@ -1221,6 +1250,15 @@ def accounts_config_api():
             proxy_manager.sync_proxy_assignments(g.owner)
             for bot in state.bots_for(g.owner):
                 bot.accounts = accounts
+            # An account removed from the list is gone for good, so drop its log ring
+            # buffer. Renames keep theirs: user_id is carried over from the prior row
+            # above, so it is still in `kept`. Stopping an account deliberately does
+            # not come through here - its history stays readable while it is down.
+            kept = {str(a.get('user_id')) for a in accounts if a.get('user_id')}
+            for prior in existing:
+                uid = str(prior.get('user_id') or '')
+                if uid and uid not in kept:
+                    state.forget_bot_logs(uid)
             state.log_command("SYS", f"Accounts config updated by {acting_label()}.", "success", owner=g.owner)
             _invalidate_snapshots(g.owner)
             return jsonify({"status": "success"})
@@ -1349,29 +1387,35 @@ def account_launch_all():
     if not pending:
         return jsonify({'success': False, 'error': 'No enabled accounts left to start'})
 
-    # Wait for start_all to actually spin every account up (with a generous
-    # timeout) so the response tells the truth. The old fire-and-forget version
-    # returned "Starting N accounts" while most were still queued behind the
-    # stagger sleep, so the dashboard's immediate re-fetch showed them all as
-    # stopped - which looked like "start doesn't start all of them".
-    timeout = 20 + 5 * len(pending)
-    result, error = _bot_loop_call(supervisor.start_all(pending, g.owner), timeout=timeout)
+    # start_all now only *creates* the instances - the login itself queues behind
+    # state.login_slot() - so this returns in well under a second even for 200
+    # accounts, and each one is immediately a "Connecting…" card in the list.
+    #
+    # The timeout used to be `20 + 5 * len(pending)`: 1020s at 200 accounts, far
+    # past waitress' 180s channel_timeout. The browser was handed a failed request
+    # while start_all kept bringing the farm up in the background, so the operator
+    # pressed Start again and two passes interleaved - which is the "keeps
+    # starting/restarting accounts" symptom. A flat, short ceiling cannot do that.
+    result, error = _bot_loop_call(supervisor.start_all(pending, g.owner), timeout=45)
     if error:
         return jsonify({'success': False, 'error': error}), 503
 
     started = result.get('started', 0) if isinstance(result, dict) else 0
     total = result.get('total', len(pending)) if isinstance(result, dict) else len(pending)
     # Start All is an explicit "bring the farm up", so it re-arms autostart for
-    # everything it managed to start - including accounts stopped earlier.
-    for account in pending:
-        if supervisor.find_bot(g.owner, account.get('name')):
-            proxy_manager.set_account_autostart(g.owner, account.get('name'), True)
+    # everything it managed to start - including accounts stopped earlier. One
+    # read-modify-write for the whole batch, not one per account.
+    proxy_manager.set_accounts_autostart(
+        g.owner,
+        [a.get('name') for a in pending if supervisor.find_bot(g.owner, a.get('name'))],
+        True,
+    )
     state.log_command("SYS", f"Started {started}/{total} accounts from dashboard",
                       "success" if started else "error", owner=g.owner)
     _invalidate_snapshots(g.owner)
     if started == 0:
         return jsonify({'success': False, 'error': 'No accounts could be started (check tokens/channels in the logs)'})
-    return jsonify({'success': True, 'message': f'Started {started}/{total} accounts'})
+    return jsonify({'success': True, 'message': f'Started {started}/{total} accounts, connecting now'})
 
 
 @app.route('/api/accounts/stop_all', methods=['POST'])
@@ -1383,18 +1427,24 @@ def account_stop_all():
     if not names:
         return jsonify({'success': False, 'error': 'No accounts are running'})
 
-    # same "stay stopped" contract as the single-account stop above
-    for name in names:
-        proxy_manager.set_account_autostart(g.owner, name, False)
-
-    # Await stop_all so the response only returns once every account has been
-    # torn down (runner cancelled, gateway closed, instance removed). The old
-    # fire-and-forget version replied instantly while bots were still shutting
-    # down, so a follow-up fetch still listed them as running.
-    result, error = _bot_loop_call(supervisor.stop_all(g.owner), timeout=30)
+    # Teardown is batched inside stop_all (STOP_CONCURRENCY at a time), so 200
+    # accounts finish in roughly the 10s a single hung runner is given rather than
+    # 200 x that serially. The old timeout=30 against serial teardown gave up on a
+    # farm of any size part-way through.
+    result, error = _bot_loop_call(supervisor.stop_all(g.owner), timeout=90)
     if error:
         return jsonify({'success': False, 'error': error}), 503
     stopped = sum(1 for ok, _msg in (result or []) if ok) if isinstance(result, list) else len(names)
+
+    # Same "stay stopped" contract as the single-account stop, but applied *after*
+    # the teardown and only to what is actually down. Clearing it up front meant a
+    # timed-out or partial stop left the whole space marked "do not autostart"
+    # while those accounts kept farming - the config and reality disagreed until
+    # the next restart silently shut the farm off.
+    still_running = set(supervisor.running_names(g.owner))
+    proxy_manager.set_accounts_autostart(
+        g.owner, [n for n in names if n not in still_running], False)
+
     state.log_command("SYS", f"Stopped {stopped}/{len(names)} accounts from dashboard", "success", owner=g.owner)
     _invalidate_snapshots(g.owner)
     return jsonify({'success': True, 'message': f'Stopped {stopped}/{len(names)} accounts'})
@@ -1594,7 +1644,16 @@ def proxies_test():
         results = await proxy_manager.test_all_proxies(owner)
         return {"results": results, "proxies": proxy_manager.load_proxies(owner)}
 
-    result = asyncio.run(_run())
+    # Must run on the bot's loop, like every other awaitable this file touches.
+    # asyncio.run() spins up a *second* loop on the waitress thread, and
+    # test_all_proxies builds aiohttp connectors - objects that bind themselves to
+    # the loop that created them. On the throwaway loop they are torn down with it,
+    # so a proxy that tested fine here could still fail when a bot used it, and a
+    # 200-proxy "Test All" pinned one of the sixteen web threads for the whole run.
+    timeout = 30 if proxy_id else max(60, 2 * len(proxy_manager.load_proxies(owner)))
+    result, error = _bot_loop_call(_run(), timeout=timeout)
+    if error:
+        return jsonify({"status": "error", "message": error}), 503
     return jsonify({"status": "success", **result})
 
 
@@ -1634,6 +1693,47 @@ def proxies_delete_failed():
     count = proxy_manager.remove_failed_proxies(g.owner)
     state.log_command("SYS", f"Deleted {count} failed proxies", "info", owner=g.owner)
     return jsonify({"status": "success", "count": count, "proxies": proxy_manager.load_proxies(g.owner)})
+
+
+@app.route('/api/security/summary')
+@space_required
+def security_summary():
+    """One row per account for the Security tab's card grid.
+
+    The tab used to build this client-side by calling /api/stats once per account,
+    serially, from the 1s dashboard tick. At 200 accounts that is 200 requests a
+    second against 16 web workers, each one serialising the full stats payload
+    (team + zoo + quest card + cmd_states + 200 log lines) to read three integers -
+    which is what saturated waitress and made the whole site, static files
+    included, stop answering. This is the same three integers for every account in
+    one cached response.
+    """
+    return jsonify({
+        'success': True,
+        'accounts': _snapshot(('security_summary', g.owner),
+                              lambda: _build_security_summary(g.owner)),
+    })
+
+
+def _build_security_summary(owner):
+    rows = []
+    for bot in state.bots_for(owner):
+        if not bot.user:
+            # still connecting - it has no stats row yet, and the card grid keys
+            # off the account list anyway
+            continue
+        uid = str(bot.user.id)
+        st = state.account_stats.get(uid, {})
+        rows.append({
+            'id': uid,
+            'username': bot.username,
+            'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
+            'status': 'PAUSED' if bot.paused else 'ONLINE',
+            'captchas': st.get('captchas_solved', 0),
+            'bans': st.get('bans_detected', 0),
+            'warnings': st.get('warnings_detected', 0),
+        })
+    return rows
 
 
 @app.route('/api/security/test', methods=['POST'])

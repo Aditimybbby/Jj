@@ -133,6 +133,19 @@ def _bind_dashboard(port):
     return sock
 
 
+def _env_int(name, default, low=None, high=None):
+    """Read an int from the environment, clamped, falling back on anything odd."""
+    try:
+        value = int(str(os.environ.get(name, '')).strip())
+    except (TypeError, ValueError):
+        return default
+    if low is not None:
+        value = max(low, value)
+    if high is not None:
+        value = min(high, value)
+    return value
+
+
 def _serve_dashboard(sock, port):
     """Serve Flask on an already-bound socket, on the best server available."""
     try:
@@ -143,9 +156,13 @@ def _serve_dashboard(sock, port):
     if waitress_serve is not None:
         # threads: the dashboard polls stats every second and several routes block
         # on the bot loop for up to a minute, so waitress' default of 4 would let
-        # one slow Start button freeze every other tab.
-        console.print("[green]Serving the dashboard with waitress.[/green]")
-        waitress_serve(flask_app, sockets=[sock], threads=16, channel_timeout=180)
+        # one slow Start button freeze every other tab. 32 leaves headroom for a
+        # 200-account farm with a few tabs open plus the static files those tabs
+        # ask for - a request queue that never drains is why the site could stop
+        # loading entirely while the bots kept farming.
+        threads = _env_int('LAZYFARMERS_WEB_THREADS', 32, low=4, high=128)
+        console.print(f"[green]Serving the dashboard with waitress ({threads} threads).[/green]")
+        waitress_serve(flask_app, sockets=[sock], threads=threads, channel_timeout=180)
         return
 
     from werkzeug.serving import make_server

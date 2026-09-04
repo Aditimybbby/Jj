@@ -163,7 +163,8 @@ class NeuraGems(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.id != 408785106942164992:
+        monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
+        if str(message.author.id) != monitor_id:
             return
         
         cfg = self.bot.config.get('commands', {}).get('gems', {})

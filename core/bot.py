@@ -999,6 +999,14 @@ class NeuraBot(commands.Bot):
             try:
                 if self.is_closed():
                     self.clear()
+                # Every login - first boot, Start All, or a reconnect after a blip -
+                # queues behind the same global gate, so a 200-account farm hands the
+                # gateway one IDENTIFY at a time instead of 200 TLS handshakes at once.
+                # Metering here rather than in the start path is the point: the
+                # reconnect below never went through supervisor.start_all.
+                await state.login_slot()
+                if not self.active:
+                    return
                 await self.start(self.token)
             except discord.LoginFailure as e:
                 self.log("ERROR", f"Login failed: {e}. Update the token in the dashboard.")
@@ -1023,7 +1031,13 @@ class NeuraBot(commands.Bot):
             # account vanish from the dashboard for ages on a flaky proxy. Keep
             # it short and gentle - Discord tolerates quick retries fine.
             attempt = 1 if time.time() - session_start > 300 else attempt + 1
-            delay = min(60, 5 * attempt) + random.uniform(0, 3)
+            # The jitter window grows with the farm. One dead proxy or one dropped
+            # uplink drops every account at the same instant, and a fixed 0-3s
+            # spread put 200 of them back on the gateway inside three seconds -
+            # they then all failed together and retried in lockstep forever.
+            # Spreading over roughly login_slot's own drain time breaks the lockstep.
+            spread = min(60.0, max(3.0, len(state.bot_instances) * state.LOGIN_MIN_GAP_S))
+            delay = min(60, 5 * attempt) + random.uniform(0, spread)
             self.log("WARN", f"Reconnecting in {round(delay)}s (attempt {attempt})...")
             try:
                 await asyncio.sleep(delay)
