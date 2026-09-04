@@ -115,6 +115,7 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
 
 const CONFIG_CATEGORY_HINTS = {
     core: 'Channels, prefix, and main bot switches',
+    pacing: 'Global send rate - raise slowdown_multiplier to slow every account down',
     stealth: 'Human-like delays and timing',
     security: 'Captcha handling and safety pauses',
     reactionBot: 'Auto-reactions and triggers',

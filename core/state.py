@@ -91,6 +91,21 @@ checking_gems = {}
 missing_gems_cache = {}
 STATS_FILE = os.path.join(DATA_DIR, 'stats.json')
 
+# Bumped every second by the heartbeat core.supervisor.bind_loop starts. The
+# dashboard runs on other threads and can only reach a bot by scheduling work on
+# this loop, so it needs a way to ask "is the loop keeping up?" before it parks a
+# web worker waiting for an answer.
+loop_heartbeat = 0.0
+
+
+def loop_lag():
+    """How many seconds behind the shared bot loop is (0.0 when healthy)."""
+    if not loop_heartbeat:
+        return 0.0
+    # the heartbeat ticks once a second, so up to a second of "lag" is just the gap
+    # between ticks
+    return max(0.0, time.time() - loop_heartbeat - 1.0)
+
 account_stats = {}
 
 

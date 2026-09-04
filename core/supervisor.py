@@ -20,6 +20,7 @@ account "acc1", so a bare name is never enough to find the right bot.
 
 
 import asyncio
+import time
 
 import core.state as state
 from core import spaces
@@ -27,11 +28,32 @@ from core.bot import NeuraBot
 from utils import proxy_manager
 
 _loop = None
+_heartbeat_task = None
 
 
 def bind_loop(loop):
-    global _loop
+    """Adopt the loop every bot shares, and start its heartbeat.
+
+    The heartbeat is what lets the dashboard tell "the loop is busy" from "the
+    loop is fine, this account is slow". Flask runs on other threads and every
+    call into the loop has to be scheduled onto it, so without a liveness signal
+    a blocked loop looked exactly like a hung web server: requests piled up on
+    the waitress thread pool until nothing was left to serve the page itself.
+    """
+    global _loop, _heartbeat_task
     _loop = loop
+    state.loop_heartbeat = time.time()
+    if _heartbeat_task is None or _heartbeat_task.done():
+        _heartbeat_task = loop.create_task(_heartbeat())
+
+
+async def _heartbeat():
+    while True:
+        state.loop_heartbeat = time.time()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            return
 
 
 def get_loop():

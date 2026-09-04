@@ -27,6 +27,7 @@ class NeuraCursePray(commands.Cog):
         # ephemeral repo copy and every account would overwrite the same key
         self.state_file = os.path.join(state.DATA_DIR, f"cp_state_{bot.user_id or 'default'}.json")
         self.last_run = self._load_last_run()
+        self._warned_targets = False
 
     def _load_last_run(self):
         if os.path.exists(self.state_file):
@@ -72,15 +73,25 @@ class NeuraCursePray(commands.Cog):
             raw_targets = cfg.get("targets", [])
             if not isinstance(raw_targets, list):
                 raw_targets = [raw_targets]
-                
-            targets = [str(t).strip() for t in raw_targets if t and str(t).strip()]
-                
+
+            # only real ids: the shipped settings.json carries
+            # `put-curse-target-id-here` as an example, and pasting a name in here
+            # produced `owo curse <@some-name>`, which OwO answers with a usage
+            # error every five minutes
+            targets = [str(t).strip() for t in raw_targets
+                       if t and re.fullmatch(r'<@!?\d{5,25}>|\d{5,25}', str(t).strip())]
+            ignored = len([t for t in raw_targets if t and str(t).strip()]) - len(targets)
+            if ignored and not self._warned_targets:
+                self._warned_targets = True
+                self.bot.log("WARN", f"Ignoring {ignored} {choice} target(s) that are not discord ids")
+
             if targets:
                 target = random.choice(targets)
+                digits = re.sub(r'\D', '', target)
                 if cfg.get("ping", True):
-                    full_cmd = f"{choice} <@{target}>"
+                    full_cmd = f"{choice} <@{digits}>"
                 else:
-                    full_cmd = f"{choice} {target}"
+                    full_cmd = f"{choice} {digits}"
             else:
                 full_cmd = choice
             

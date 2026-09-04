@@ -32,6 +32,7 @@ defaults stay admin-only.
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g
 from functools import wraps
 from concurrent.futures import TimeoutError as FuturesTimeout
+from itertools import islice
 import threading
 import time
 import json
@@ -484,6 +485,11 @@ def healthz():
     return jsonify({
         'ok': True,
         'accounts_running': len(state.bot_instances),
+        # how far behind the shared bot loop is. A number that keeps climbing here
+        # is the farm starving the loop, and it is the thing to look at when the
+        # dashboard feels slow - the web server itself is clearly answering, or
+        # this response would not exist.
+        'loop_lag': round(state.loop_lag(), 2),
         'uptime': int(time.time() - state.stats.get('uptime_start', time.time())),
     })
 
@@ -969,32 +975,46 @@ def _build_stats_combined(owner):
 
     combined_status = "ONLINE" if online_count > 0 else ("PAUSED" if paused_count > 0 else "OFFLINE")
 
-    # aggregate cowoncy history across all bots for CPH
+    # aggregate cowoncy history across all bots for CPH.
+    #
+    # Only the first and last timestamps are ever used, so the old version - copy
+    # every account's 100-point history into one list, then sort it - allocated and
+    # sorted 20k tuples per call on a route the dashboard polls every second, and
+    # threw all but two of them away. Track the span directly instead.
     cph = 0
-    all_histories = []
+    span_start = None
+    span_end = None
+    start_cash_total = 0
+    points = 0
     for bot in bots:
         uid = str(bot.user.id) if bot.user else None
-        if uid:
-            st = state.account_stats.get(uid, {})
-            all_histories.extend(st.get('cowoncy_history', []))
-    if len(all_histories) > 1:
-        all_histories.sort(key=lambda x: x[0])
-        first = all_histories[0]
-        last = all_histories[-1]
-        time_diff_hrs = (last[0] - first[0]) / 3600
+        if not uid:
+            continue
+        st = state.account_stats.get(uid, {})
+        start_cash_total += st.get('start_cash', 0)
+        history = st.get('cowoncy_history') or []
+        if not history:
+            continue
+        points += len(history)
+        # appended in time order by state.record_cash, so the ends are the extremes
+        first_ts, last_ts = history[0][0], history[-1][0]
+        if span_start is None or first_ts < span_start:
+            span_start = first_ts
+        if span_end is None or last_ts > span_end:
+            span_end = last_ts
+    if points > 1 and span_start is not None:
+        time_diff_hrs = (span_end - span_start) / 3600
         if time_diff_hrs > 0.01:
-            # sum cash diffs per account
-            cph = round((total_cash - sum(
-                state.account_stats.get(str(b.user.id), {}).get('start_cash', 0)
-                for b in bots if b.user
-            )) / max(time_diff_hrs, 0.01))
+            cph = round((total_cash - start_cash_total) / max(time_diff_hrs, 0.01))
 
     # combined logs from all bots. The inner `any(...)` this replaces re-walked
     # every bot for every one of the 1000 deque entries - O(1000 x accounts) on a
-    # route the dashboard polls every second.
+    # route the dashboard polls every second. It also built the whole filtered
+    # list before slicing off 200, so a busy farm paid for 800 entries it threw
+    # away; islice stops at the 200th match instead.
     space_uids = {str(b.user.id) for b in bots if b.user}
-    combined_logs = [l for l in state.command_logs
-                     if str(l.get('bot_id')) in space_uids][:200]
+    combined_logs = list(islice(
+        (l for l in state.command_logs if str(l.get('bot_id')) in space_uids), 200))
 
     return {
         'uptime': utils.format_seconds(elapsed),
@@ -1294,25 +1314,66 @@ def _build_accounts_config(owner):
         return {'accounts': []}
 
 
-def _bot_loop_call(coro, timeout=60):
-    """Run a coroutine on the bot's event loop and wait for its result."""
+# How many requests may be waiting on the bot loop at once, and how far behind the
+# loop may be before the answer is "busy" instead of a held thread. Both are env
+# tunable because the right numbers depend on the web thread count
+# (LAZYFARMERS_WEB_THREADS, 32 by default - keep this comfortably below it).
+def _env_int(name, default, low, high):
+    try:
+        return max(low, min(high, int(str(os.environ.get(name, '')).strip())))
+    except (TypeError, ValueError):
+        return default
+
+
+_LOOP_CALL_SLOTS = _env_int('LAZYFARMERS_LOOP_SLOTS', 8, 1, 64)
+_LOOP_LAG_LIMIT_S = float(_env_int('LAZYFARMERS_LOOP_LAG_LIMIT', 25, 5, 300))
+_loop_call_slots = threading.BoundedSemaphore(_LOOP_CALL_SLOTS)
+
+
+def _bot_loop_call(coro, timeout=45):
+    """Run a coroutine on the bot's event loop and wait for its result.
+
+    Two guards, both about the dashboard staying answerable rather than about the
+    call itself:
+
+    * a slot limit, so slow calls cannot occupy every web worker. Waitress serves
+      on a fixed thread pool; a handful of Start/Stop/Verify calls each parked
+      here for up to a minute used to be enough to leave nothing free for the
+      1 second stats poll, the page itself or its static files - the site stopped
+      loading while the farm kept running, which is exactly what "the website
+      stops working" looks like from outside.
+    * a liveness check, so when the bot loop is wedged the answer is immediate
+      instead of a held thread and a spinner.
+    """
     from core import supervisor
     loop = supervisor.get_loop()
     if loop is None:
         coro.close()
         return None, 'bot loop is not running'
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+    lag = state.loop_lag()
+    if lag > _LOOP_LAG_LIMIT_S:
+        coro.close()
+        return None, f'bot loop is busy (behind by {int(lag)}s) - try again shortly'
+
+    if not _loop_call_slots.acquire(timeout=5):
+        coro.close()
+        return None, 'too many bot operations in flight - try again shortly'
     try:
-        return future.result(timeout=timeout), None
-    except FuturesTimeout:
-        # Cancel it. Without this the coroutine kept running after the browser had
-        # been told the call failed, so Start reported an error and the account
-        # came up anyway a moment later - which read as "it stops accounts, then
-        # they start again on their own".
-        future.cancel()
-        return None, f'timed out after {timeout}s - cancelled'
-    except Exception as e:
-        return None, str(e)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout), None
+        except FuturesTimeout:
+            # Cancel it. Without this the coroutine kept running after the browser had
+            # been told the call failed, so Start reported an error and the account
+            # came up anyway a moment later - which read as "it stops accounts, then
+            # they start again on their own".
+            future.cancel()
+            return None, f'timed out after {timeout}s - cancelled'
+        except Exception as e:
+            return None, str(e)
+    finally:
+        _loop_call_slots.release()
 
 
 def _bot_loop_fire(coro):

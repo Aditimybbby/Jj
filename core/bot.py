@@ -35,8 +35,10 @@ from modules.web_solver import setup_web_solver
 from modules.browser_solver import setup_browser_solver
 import core.state as state
 from core import spaces
+from utils import daily_ledger
 import aiohttp
 import unicodedata
+import collections
 import copy
 import logging
 from rich.console import Console
@@ -45,6 +47,82 @@ from rich.align import Align
 _log = logging.getLogger(__name__)
 
 CURRENT_VERSION = "2.5.0"
+
+# ---------------------------------------------------------------- pacing floors
+#
+# The lowest delay a scheduler entry is allowed to hold, per cmd_id. Cogs write
+# cmd_states[...]['delay'] directly (grinding re-rolls it, rpp assigns its
+# interval, cookie/daily assign 86400), so a floor applied only where commands
+# are registered would not hold. `_effective_delay` applies these on every tick
+# instead, which is the one place every producer has to pass through.
+#
+# The daily entries are the important ones: they are what stopped `owo daily` and
+# `owo cookie` from being retried on a 10 second timer after OwO refused them.
+_MIN_DELAY = {
+    'daily': 120.0,
+    'cookie': 120.0,
+    'rpp': 45.0,
+    'hunt': 12.0,
+    'battle': 12.0,
+    'owo': 9.0,
+    'cursepray': 240.0,
+    'quest': 30.0,
+    'checklist': 60.0,
+    'huntbot': 60.0,
+    'level_sync': 300.0,
+}
+_MIN_DELAY_DEFAULT = 5.0
+
+# cmd_id -> daily_ledger key, for the commands OwO only grants once a day. These
+# are locked the moment one is *sent*, not when a reply is understood: a reply
+# that arrives as a components-v2 payload, or without this account's name in it,
+# used to leave the cog convinced the command was still available and it went out
+# again on the next tick. All day, in the case of `owo run`.
+_DAILY_LOCK_KEYS = {'daily': 'daily', 'cookie': 'cookie'}
+
+# a command whose argument is mandatory: sending the bare word is a malformed
+# command that OwO answers with a usage error, and the cog then waits for a reply
+# that never comes.
+_NEEDS_ARG = {
+    'cookie', 'rep', 'use', 'sell', 'buy', 'equip', 'unequip', 'upgrade', 'lvlup',
+    'autohunt', 'ah', 'cf', 'coinflip', 'slots', 's', 'bj', 'blackjack', 'give',
+    'send', 'pay', 'sacrifice', 'sac',
+}
+
+# tokens that mean "nobody filled this in". The shipped settings.json carries
+# `cookie-target-id` and `put-curse-target-id-here` as examples, and a template
+# that never got a value renders as the literal string None.
+_PLACEHOLDER_BITS = ('target-id', 'put-', '-here', 'your-', 'xxxxx', 'example')
+_PLACEHOLDER_WORDS = {'none', 'null', 'nil', 'undefined', 'nan', 'false', 'true', '0'}
+
+_priorities_cache = {'mtime': None, 'data': {}}
+
+
+def _load_cmd_priorities():
+    """cmd_priorities.json, re-read only when the file changes on disk.
+
+    This is called for every command a cog registers and re-registers - with a
+    few hundred accounts that was a few thousand synchronous opens of the same
+    small file per minute, on the one event loop every bot shares, which is felt
+    as the dashboard going quiet.
+    """
+    path = os.path.join(state.CONFIG_DIR, 'cmd_priorities.json')
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _priorities_cache['mtime'] = None
+        _priorities_cache['data'] = {}
+        return _priorities_cache['data']
+    if _priorities_cache['mtime'] != mtime:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            _priorities_cache['data'] = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _priorities_cache['data'] = {}
+        _priorities_cache['mtime'] = mtime
+    return _priorities_cache['data']
+
 
 class NeuraBot(commands.Bot):
     def __init__(self, token=None, channels=None, proxy_url=None, proxy_auth=None, proxy_label="direct",
@@ -131,6 +209,15 @@ class NeuraBot(commands.Bot):
         self.last_break_check = 0.0
         self.is_on_break = False
         self.break_lock = asyncio.Lock()
+
+        # --- pacing / anti-spam bookkeeping (see _pacing and _send_safe) ---
+        # every send timestamp inside the rolling minute, for the burst cap
+        self._send_window = collections.deque(maxlen=240)
+        # the last thing that actually went out, so the same command cannot be
+        # sent twice in a row inside the duplicate window
+        self._last_content = ""
+        self._last_content_at = 0.0
+        self._dropped_sends = 0
 
 
         self.is_mobile = "TERMUX_VERSION" in os.environ or "com.termux" in os.environ.get("PREFIX", "")
@@ -396,11 +483,116 @@ class NeuraBot(commands.Bot):
             self.note_send_failure(e)
             return False
 
+    def _pacing(self):
+        """The `pacing` config section, with every value sane and in range.
+
+        One place to slow the whole farm down. Everything here is read live, so
+        raising min_gap_s on the dashboard takes effect on the next send instead
+        of on the next restart.
+        """
+        cfg = self.config.get('pacing') or {}
+
+        def num(key, default, low, high):
+            try:
+                value = float(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return max(low, min(high, value))
+
+        return {
+            'min_gap_s': num('min_gap_s', 3.5, 0.0, 120.0),
+            'priority_min_gap_s': num('priority_min_gap_s', 1.5, 0.0, 120.0),
+            'jitter_s': num('jitter_s', 1.2, 0.0, 60.0),
+            'max_sends_per_min': int(num('max_sends_per_min', 12, 1, 240)),
+            'duplicate_window_s': num('duplicate_window_s', 8.0, 0.0, 600.0),
+            'slowdown_multiplier': num('slowdown_multiplier', 1.0, 0.5, 10.0),
+        }
+
+    def _effective_delay(self, cmd_id, delay):
+        """The delay a scheduler entry is really held to.
+
+        Applies the per-command floor and the global slowdown multiplier. Cogs
+        assign cmd_states[...]['delay'] directly all over the codebase, so this
+        has to be applied where the delay is *read* - the scheduler tick and the
+        queue worker's re-check - rather than where it is written.
+        """
+        try:
+            delay = float(delay)
+        except (TypeError, ValueError):
+            delay = _MIN_DELAY.get(cmd_id, _MIN_DELAY_DEFAULT)
+        floor = _MIN_DELAY.get(cmd_id, _MIN_DELAY_DEFAULT)
+        return max(floor, delay) * self._pacing()['slowdown_multiplier']
+
+    def _daily_key_for(self, cmd_id, content):
+        """The daily_ledger key a command spends, or None if it is not a daily."""
+        if cmd_id in _DAILY_LOCK_KEYS:
+            return _DAILY_LOCK_KEYS[cmd_id]
+        if cmd_id == 'rpp' or not cmd_id:
+            parts = (content or '').lower().split()
+            if parts:
+                return daily_ledger.RPP_KEYS.get(parts[-1])
+        return None
+
+    def _reject_reason(self, content):
+        """Why this command must not be sent, or None when it is fine.
+
+        Commands are assembled from config and from numbers scraped out of OwO's
+        replies - `autohunt {cash} {answer}`, `upgrade {trait} {amount}`,
+        `team add {animal} {pos}`, `cookie {id}`, `curse <@{target}>`. When a
+        value is missing the send used to go out anyway, as `owo upgrade None`,
+        `owo cookie cookie-target-id`, or a bare `owo use` - OwO answers with a
+        usage error, the cog waits for a reply that never comes, and the channel
+        fills with malformed commands, which is its own captcha risk.
+
+        One gate for every producer beats trusting each of them.
+        """
+        text = (content or '').strip()
+        if not text:
+            return 'empty'
+        low = text.lower()
+
+        # not a command, so none of the argument rules apply: captcha answers and
+        # the level-quote chatter are ordinary chat by design
+        prefix = (self.prefix or 'owo ').lower().strip()
+        parts = low.split()
+        base = parts[0]
+        if base not in (prefix, 'owo', 'uwu'):
+            if not (prefix and base.startswith(prefix)):
+                return None
+            args = parts[1:]
+            verb = base[len(prefix):]
+        else:
+            args = parts[2:]
+            verb = parts[1] if len(parts) > 1 else ''
+
+        if '{' in text or '}' in text:
+            return 'unfilled template placeholder'
+        if '<@' in text and not re.search(r'<@!?\d{5,25}>', text):
+            return 'malformed mention'
+        for arg in args:
+            bare = arg.strip('<@!>')
+            if bare in _PLACEHOLDER_WORDS:
+                return f'placeholder argument {arg!r}'
+            if any(bit in arg for bit in _PLACEHOLDER_BITS):
+                return f'unconfigured argument {arg!r}'
+        if verb in _NEEDS_ARG and not args:
+            return f'{verb!r} needs an argument'
+        return None
+
     async def _send_safe(self, content, skip_typing=False, target_channel_id=None, priority=False, force=False):
         if not content or not self.is_ready:
             return False
 
         content = self._fix_command(content)
+        # collapse the whitespace a template left behind ("owo  upgrade 1") before
+        # anything looks at the arguments
+        content = re.sub(r'\s+', ' ', content).strip()
+
+        reason = self._reject_reason(content)
+        if reason:
+            self._dropped_sends += 1
+            self.log("WARN", f"Dropped incomplete command '{content}' ({reason})")
+            return False
 
         # a captcha answer has to reach OwO *while* the account is paused, and it cannot
         # wait for command_lock either: the send that tripped the captcha is usually still
@@ -435,10 +627,15 @@ class NeuraBot(commands.Bot):
             if not self.active or self.paused:
                 return False
 
-            stealth_cfg = self.config.get('stealth', {})
-            typing_enabled = stealth_cfg.get('typing_enabled', False)
-            wait_limit = 0.0 if not typing_enabled else (1.2 if priority else self.min_command_interval)
-            
+            pacing = self._pacing()
+            # A minimum gap between any two sends, always - it used to be applied
+            # only when stealth typing was switched on, so turning typing off
+            # removed the last thing standing between the scheduler and a burst of
+            # commands in the same second. That burst is what earns the captcha.
+            base_gap = pacing['priority_min_gap_s'] if priority else max(
+                pacing['min_gap_s'], self.min_command_interval)
+            wait_limit = base_gap + random.uniform(0, pacing['jitter_s'])
+
             now = time.time()
             elapsed = now - self.last_sent_time
             if elapsed < wait_limit:
@@ -448,7 +645,23 @@ class NeuraBot(commands.Bot):
                     await asyncio.sleep(sleep_dur)
                     rem_wait -= sleep_dur
 
+            # Rolling per-minute cap. The gap above spaces sends out; this bounds
+            # how many can happen at all, so a pile-up in the queue (a reconnect
+            # draining several due commands at once, the quest engine and the
+            # scheduler both firing) leaks out slowly instead of all at once.
+            if not await self._await_burst_slot(pacing):
+                return False
+
             if not self.active or self.paused:
+                return False
+
+            # the same command twice in a row inside a few seconds is never
+            # intentional: two producers raced (a cog hook plus the scheduler, or a
+            # double click on the dashboard's send box)
+            window = pacing['duplicate_window_s']
+            if window and content == self._last_content and time.time() - self._last_content_at < window:
+                self._dropped_sends += 1
+                self.log("WARN", f"Dropped duplicate '{content}' (repeat within {round(window, 1)}s)")
                 return False
 
             c_id = target_channel_id or self.channel_id
@@ -457,7 +670,36 @@ class NeuraBot(commands.Bot):
             if not channel or not self.active or self.paused:
                 return False
 
-            return await self._raw_send(content, channel, skip_typing=skip_typing)
+            sent = await self._raw_send(content, channel, skip_typing=skip_typing)
+            if sent:
+                self._last_content = content
+                self._last_content_at = time.time()
+                self._send_window.append(self._last_content_at)
+            return sent
+
+    async def _await_burst_slot(self, pacing):
+        """Hold until this account is under its sends-per-minute cap."""
+        cap = pacing['max_sends_per_min']
+        deadline = time.time() + 120
+        while self.active and not self.paused:
+            cutoff = time.time() - 60.0
+            while self._send_window and self._send_window[0] < cutoff:
+                self._send_window.popleft()
+            if len(self._send_window) < cap:
+                return True
+            wait = max(0.5, (self._send_window[0] + 60.0) - time.time())
+            if time.time() > deadline:
+                # never wait forever: the queue would stop draining and every cog
+                # waiting on a reply would stall behind it
+                self.log("WARN", f"Send rate cap ({cap}/min) held a command for 120s - letting it through")
+                return True
+            self.log("COOLDOWN", f"Send rate cap ({cap}/min) reached - waiting {round(wait, 1)}s")
+            slept = 0.0
+            while slept < wait and self.active and not self.paused:
+                step = min(1.0, wait - slept)
+                await asyncio.sleep(step)
+                slept += step
+        return False
 
     def _fix_command(self, command):
         cmd = command.strip()
@@ -666,6 +908,10 @@ class NeuraBot(commands.Bot):
             "level_grind": ["LevelQuotes"],
             "coop": ["Coop", "Quest"],
             "owner": ["Owner"],
+            # deliberately no cogs: _pacing() re-reads self.config on every send, so a
+            # new min_gap_s or slowdown_multiplier is live on the next command without
+            # re-registering anything. Listed so it is clear this was decided, not missed.
+            "pacing": [],
             # the overlay turns an `earning` change into `commands.*` changes as well,
             # so the grinding cogs are refreshed by cmd_to_cog above - this is only
             # about the ledger cog noticing that the mode itself flipped
@@ -1054,14 +1300,9 @@ class NeuraBot(commands.Bot):
     def get_cmd_priority(self, cmd_id, default=3):
         """load priority from cmd_priorities.json, fallback to default."""
         try:
-            prio_file = os.path.join(state.CONFIG_DIR, 'cmd_priorities.json')
-            if os.path.exists(prio_file):
-                with open(prio_file, 'r') as f:
-                    priorities = json.load(f)
-                return priorities.get(cmd_id, default)
+            return _load_cmd_priorities().get(cmd_id, default)
         except Exception:
-            pass
-        return default
+            return default
 
     def get_command_id_from_content(self, content):
         if not content:
@@ -1177,8 +1418,9 @@ class NeuraBot(commands.Bot):
                     if cmd_id and cmd_id in self.cmd_states:
                         state_info = self.cmd_states[cmd_id]
                         elapsed = time.time() - state_info['last_ran']
-                        if elapsed < state_info['delay']:
-                            remaining = state_info['delay'] - elapsed
+                        cmd_delay = self._effective_delay(cmd_id, state_info['delay'])
+                        if elapsed < cmd_delay:
+                            remaining = cmd_delay - elapsed
                             if priority >= 4 and remaining > 60:
                                 self.log("WARN", f"Quest Engine: Skipping '{content}' because '{cmd_id}' has a long remaining cooldown of {round(remaining, 1)}s")
                                 continue
@@ -1186,14 +1428,40 @@ class NeuraBot(commands.Bot):
                                 self.log("INFO", f"Quest Engine: Deferring '{content}' for {round(remaining, 1)}s (Waiting for '{cmd_id}' cooldown)")
                                 await asyncio.sleep(remaining + 0.5)
 
+                    # A daily command that the ledger says is spent never goes out,
+                    # whatever asked for it. The ledger survives restarts, so this is
+                    # also what stops a redeploy from handing every account a fresh
+                    # round of `owo daily` / `owo cookie` / `owo run`.
+                    daily_key = self._daily_key_for(cmd_id, content)
+                    if daily_key and daily_ledger.is_locked(self.user_id, daily_key):
+                        rem = daily_ledger.remaining(self.user_id, daily_key)
+                        self.log("INFO", f"Skipping '{content}' - already used today "
+                                         f"(available in {round(rem / 3600.0, 1)}h)")
+                        if cmd_id and cmd_id in self.cmd_states:
+                            self.cmd_states[cmd_id]['last_ran'] = time.time()
+                        continue
+
                     self.last_sent_command = content
-                    await self._send_safe(content, skip_typing=skip_typing, target_channel_id=target_channel_id, priority=(priority <= 1))
-                    ran_successfully = True
-                    
+                    sent = await self._send_safe(content, skip_typing=skip_typing, target_channel_id=target_channel_id, priority=(priority <= 1))
+                    ran_successfully = bool(sent)
+
+                    # last_ran is stamped either way: a send that was refused must
+                    # not come straight back round the scheduler on the next tick,
+                    # which is how one malformed command became a flood.
                     if cmd_id and cmd_id in self.cmd_states:
                         self.cmd_states[cmd_id]['last_ran'] = time.time()
-                    
-                    if cmd_id and cmd_id in self.cmd_states:
+
+                    if sent and daily_key:
+                        # locked on the way out, not when a reply is parsed. Every
+                        # reply-reading path can fail (components v2, a nickname the
+                        # identity matcher does not know) and the cost of that used
+                        # to be the command repeating on its timer for the rest of
+                        # the day.
+                        until = (time.time() + 86400.0 if daily_key == 'cookie'
+                                 else daily_ledger.next_daily_reset())
+                        daily_ledger.lock(self.user_id, daily_key, until=until)
+
+                    if sent and cmd_id and cmd_id in self.cmd_states:
                         # post-send recompute hooks. One map, not a list plus a map that
                         # could drift apart. Gambling is deliberately absent: its content
                         # is a scheduler callable now, so the next wager is computed at
@@ -1256,7 +1524,14 @@ class NeuraBot(commands.Bot):
                 for cmd_id, cmd_state in list(self.cmd_states.items()):
                     if cmd_state["in_queue"]: continue
 
-                    if now - cmd_state["last_ran"] >= cmd_state["delay"]:
+                    if now - cmd_state["last_ran"] >= self._effective_delay(cmd_id, cmd_state["delay"]):
+                        # a daily that is already spent is not even worth building the
+                        # content for, and re-stamping last_ran keeps the tick cheap
+                        # instead of re-testing it every second for the next 20 hours
+                        lock_key = _DAILY_LOCK_KEYS.get(cmd_id)
+                        if lock_key and daily_ledger.is_locked(self.user_id, lock_key):
+                            cmd_state["last_ran"] = now
+                            continue
                         cmd_state["in_queue"] = True
                         actual_content = cmd_state["content"]
                         if callable(actual_content):

@@ -3,6 +3,14 @@
         "monitor_bot_id": "408785106942164992",
         "prefix": "owo "
     },
+    "pacing": {
+        "min_gap_s": 3.5,
+        "priority_min_gap_s": 1.5,
+        "jitter_s": 1.2,
+        "max_sends_per_min": 12,
+        "duplicate_window_s": 8,
+        "slowdown_multiplier": 1
+    },
     "owner": {
         "enabled": false,
         "user_id": "put-owner-user-id-here",
@@ -36,24 +44,24 @@
         "owo": {
             "enabled": true,
             "cooldown": [
-                10,
-                13
+                12,
+                16
             ]
         },
         "hunt": {
             "enabled": true,
             "use_shortform": true,
             "cooldown": [
-                15,
-                18
+                17,
+                22
             ]
         },
         "battle": {
             "enabled": true,
             "use_shortform": true,
             "cooldown": [
-                15,
-                18
+                17,
+                22
             ]
         },
         "curse": {
@@ -189,7 +197,7 @@
                 "pup",
                 "piku"
             ],
-            "interval_s": 60
+            "interval_s": 90
         },
         "shop": {
             "enabled": true,
