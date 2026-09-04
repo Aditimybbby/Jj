@@ -20,7 +20,6 @@ account "acc1", so a bare name is never enough to find the right bot.
 
 
 import asyncio
-import random
 
 import core.state as state
 from core import spaces
@@ -81,7 +80,7 @@ def is_placeholder(value):
     return not text or "YOUR_TOKEN_HERE" in text or "YOUR_CHANNEL_ID_HERE" in text or "PLACEHOLDER" in text
 
 
-async def start_account(account, owner=spaces.ADMIN_SPACE):
+async def start_account(account, owner=spaces.ADMIN_SPACE, proxies=None):
     owner = spaces.normalise_owner(owner)
     name = account.get('name') or 'unnamed'
     if find_bot(owner, name):
@@ -95,7 +94,8 @@ async def start_account(account, owner=spaces.ADMIN_SPACE):
     if not channels:
         return False, f"{name} has no channel id"
 
-    proxy_url, proxy_auth, proxy_label = proxy_manager.resolve_account_proxy(owner, account)
+    proxy_url, proxy_auth, proxy_label = proxy_manager.resolve_account_proxy(
+        owner, account, proxies=proxies)
     bot = NeuraBot(
         token=token,
         channels=channels,
@@ -200,22 +200,46 @@ async def stop_account(owner, name):
 
 
 async def start_all(accounts, owner=spaces.ADMIN_SPACE):
+    """Bring a whole space up.
+
+    There is deliberately no sleep between accounts any more. The old
+    2.5-4.5s (later 1-2s) stagger existed to keep Discord from seeing a burst of
+    logins, but it only ever slowed down *this* path - the reconnect loop in
+    run_bot never passed through here, so one network blip still threw the whole
+    farm at the gateway at once. Metering moved into `state.login_slot()`, which
+    every login goes through, so this function's only job is to create the tasks.
+
+    That matters for more than speed: 200 accounts x 1-2s is 200-400s, longer
+    than waitress' channel_timeout, so the dashboard's Start All returned an
+    error to a browser whose accounts were in fact still coming up - the operator
+    would press it again and two passes would interleave.
+    """
     results = []
     started = 0
+    # read the proxy pool once instead of once per account (each read is a full
+    # json.load of proxies.json, on the loop, before the first login)
+    proxies = proxy_manager.load_proxies(owner)
     for i, account in enumerate(accounts):
-        # A short stagger keeps Discord from seeing a burst of logins, but the old
-        # 2.5-4.5s gap meant a 10-account farm took ~40s to even begin - and the
-        # dashboard, re-fetching immediately, listed them all as "stopped".
-        if i > 0:
-            await asyncio.sleep(random.uniform(1.0, 2.0))
         try:
-            ok, message = await start_account(account, owner)
+            ok, message = await start_account(account, owner, proxies=proxies)
             results.append((ok, message))
             if ok:
                 started += 1
         except Exception as e:
             results.append((False, f"{account.get('name', 'unnamed')}: {e}"))
+        # NeuraBot.__init__ arms cogs and builds a session; 200 of those back to
+        # back would hold the loop long enough for the dashboard's own calls into
+        # it to time out. Yield often enough that it stays answerable.
+        if i % 20 == 19:
+            await asyncio.sleep(0)
     return {'results': results, 'started': started, 'total': len(accounts)}
+
+
+# Teardown is bounded rather than unbounded: each stop_account may wait up to 10s
+# on a runner task and then close a gateway connection, so serial teardown of 200
+# accounts could not finish inside any sane HTTP timeout - which is what left the
+# farm half-stopped with autostart already cleared for everything.
+STOP_CONCURRENCY = 16
 
 
 async def stop_all(owner=None):
@@ -223,10 +247,15 @@ async def stop_all(owner=None):
         bot for bot in list(state.bot_instances)
         if account_name(bot) and (owner is None or bot_owner(bot) == owner)
     ]
-    results = []
-    for bot in targets:
+
+    async def _stop(bot):
         try:
-            results.append(await stop_account(bot_owner(bot), account_name(bot)))
+            return await stop_account(bot_owner(bot), account_name(bot))
         except Exception as e:
-            results.append((False, f"{account_name(bot)}: {e}"))
+            return (False, f"{account_name(bot)}: {e}")
+
+    results = []
+    for i in range(0, len(targets), STOP_CONCURRENCY):
+        batch = targets[i:i + STOP_CONCURRENCY]
+        results.extend(await asyncio.gather(*(_stop(bot) for bot in batch)))
     return results

@@ -68,7 +68,8 @@ class SellSac(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.id != 408785106942164992 or not self.bot.is_message_for_me(message):
+        monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
+        if str(message.author.id) != monitor_id or not self.bot.is_message_for_me(message):
             return
         
         if str(message.channel.id) not in [str(c) for c in self.bot.channels]:

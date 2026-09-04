@@ -98,19 +98,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     scheduleFarmPoll(fetchAccountConfig, 5000);
     scheduleFarmPoll(window.fetchAccounts, 5000);
-    let statsTimer = setInterval(update, 1000);
+
+    // /api/stats is the heaviest payload the dashboard reads, and it used to run on
+    // a fixed 1s setInterval that neither waited for the previous response nor cared
+    // how big the farm was. Reuse the same self-rescheduling shape as the farm polls
+    // so the next tick is only queued once this one has finished - a slow server
+    // stretches the cadence instead of being buried under overlapping requests.
+    function statsPollDelay() {
+        const n = farmSize();
+        if (document.hidden) return 10000;
+        if (n > 200) return 3000;
+        if (n > 100) return 2000;
+        return 1000;
+    }
+
+    (function pollStats() {
+        setTimeout(async function run() {
+            try {
+                await update();
+            } finally {
+                setTimeout(run, statsPollDelay());
+            }
+        }, statsPollDelay());
+    })();
+
     let captchaTimer = setInterval(window.pollForCaptchas, 2000);
 
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            // slow down while hidden - keep a heartbeat so the session stays
-            // warm but stop refreshing charts every second
-            clearInterval(statsTimer);
-            statsTimer = setInterval(update, 10000);
-        } else {
-            // back to active: refresh now and restore the fast cadence
-            clearInterval(statsTimer);
-            statsTimer = setInterval(update, 1000);
+        if (!document.hidden) {
+            // back to active: refresh now, and the next statsPollDelay() read picks
+            // the fast cadence back up on its own
             window.fetchAccounts();
             fetchAccountConfig();
             update();

@@ -20,9 +20,11 @@ import time
 import json
 import os
 import re
+import asyncio
 import datetime
 import threading
 from collections import deque
+from itertools import islice
 import utils.history_tracker as ht
 
 from core import spaces
@@ -318,6 +320,54 @@ def load_account_stats():
 command_logs = deque(maxlen=1000)
 full_session_history = []
 
+# The same lines again, split per account. /api/stats used to filter the global
+# deque for one account on every poll - O(1000) per request - and, worse, 1000
+# shared entries is about a minute of history once 200 accounts are farming, so
+# an account's own log panel went blank while the deque was full of its
+# neighbours. Each account keeps its own tail instead.
+BOT_LOG_LIMIT = 200
+bot_logs = {}
+
+
+def logs_for_bot(bot_id, limit=BOT_LOG_LIMIT):
+    """Newest-first log lines for one account."""
+    buf = bot_logs.get(str(bot_id or ''))
+    if not buf:
+        return []
+    if limit is None or limit >= len(buf):
+        return list(buf)
+    return list(islice(buf, limit))
+
+
+def forget_bot_logs(bot_id):
+    """Drop an account's buffer once it is gone for good (deleted, not stopped)."""
+    bot_logs.pop(str(bot_id or ''), None)
+
+
+# Every login is a TLS handshake, an IDENTIFY and a burst of cog arming. Two
+# hundred of them at once - a Start All, or one network blip that drops the whole
+# farm at the same instant - is a thundering herd: the loop spends minutes
+# handshaking, the dashboard's calls into the loop time out, and Discord sees a
+# rate-limit-shaped spike. So logins are metered globally, in the one place every
+# account passes through, rather than by sleeping in the start path (which the
+# reconnect path never touched).
+LOGIN_MIN_GAP_S = 0.35
+_login_lock = None
+_login_last = 0.0
+
+
+async def login_slot():
+    """Wait for this account's turn to talk to the gateway."""
+    global _login_lock, _login_last
+    if _login_lock is None:
+        # created lazily: every bot shares one loop, so this is race-free
+        _login_lock = asyncio.Lock()
+    async with _login_lock:
+        wait = LOGIN_MIN_GAP_S - (time.monotonic() - _login_last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _login_last = time.monotonic()
+
 # _raw_send appends " (1.2s)" to the log line when stealth typing timed the send,
 # so the raw text is not a clean command string
 _TYPING_SUFFIX_RE = re.compile(r'\s*\(\d+(?:\.\d+)?s\)\s*$')
@@ -358,6 +408,11 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=
     }
     
     command_logs.appendleft(entry)
+    if bot_id:
+        buf = bot_logs.get(str(bot_id))
+        if buf is None:
+            buf = bot_logs[str(bot_id)] = deque(maxlen=BOT_LOG_LIMIT)
+        buf.appendleft(entry)
     if len(full_session_history) >= 500:
         full_session_history.pop(0)
     full_session_history.append(entry)

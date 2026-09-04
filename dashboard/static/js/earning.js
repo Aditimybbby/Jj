@@ -238,7 +238,7 @@ function earningRow(a) {
             <td class="earn-num ${earnCls(a.per_hour)}">${earnSigned(a.per_hour)}</td>
             <td class="earn-dim">${escHtml(earnDuration(a.hours))}</td>
             <td><div class="earn-event" title="${escAttr(a.last_event || '')}">${escHtml(a.last_event || '—')}</div></td>
-            <td><button class="btn-proxy-sm" onclick="resetEarning('${escAttr(a.id)}', this)">Reset</button></td>
+            <td><button class="btn-proxy-sm" onclick="resetEarning('${jsArg(a.id)}', this)">Reset</button></td>
         </tr>`;
 }
 
@@ -281,7 +281,9 @@ window.saveEarningField = async function (key, value, btn) {
     loadEarning();
 };
 
-window.resetEarning = async function (id, btn) {
+// id arrives jsArg-encoded from the onclick above (see core.js) - undo that here
+window.resetEarning = async function (rawId, btn) {
+    const id = rawId ? decodeURIComponent(rawId) : rawId;
     const d = await earningPost('/api/earning/reset', id ? { id: id } : {}, btn);
     if (!d) return;
     showToast(`Ledger reset for ${d.reset} account(s)`, 'success');

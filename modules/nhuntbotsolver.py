@@ -10,6 +10,7 @@
 # along with LazyFarmers. If not, see <https://www.gnu.org/licenses/>.
 
 
+import asyncio
 import numpy as np
 import io
 from PIL import Image
@@ -65,8 +66,61 @@ class NeuraSolver:
             for char in group:
                 if char in self.MASKS:
                     img = Image.open(io.BytesIO(base64.b64decode(self.MASKS[char])))
-                    mask = np.array(img)
-                    self.check_data.append((mask, mask.shape[:2], char))
+                    mask = np.array(img.convert("RGBA"))
+                    h, w = mask.shape[:2]
+                    # Only the opaque pixels of a glyph identify it; the transparent
+                    # ones sit over whatever the captcha painted there. Precompute
+                    # their coordinates and colours once instead of re-deriving the
+                    # alpha mask on every scan.
+                    ys, xs = np.nonzero(mask[:, :, 3] > 0)
+                    coords = list(zip(ys.tolist(), xs.tolist()))
+                    colours = mask[ys, xs]
+                    self.check_data.append((coords, colours, h, w, char))
+
+    @staticmethod
+    def _match_offsets(large, coords, colours, h, w):
+        """Window origins (x, y) where every opaque mask pixel equals the image.
+
+        The obvious way to write this is two Python loops over y and x with a numpy
+        compare inside, which is what this used to be: ~7k fancy-index compares per
+        glyph, 26 glyphs, all of it on the shared event loop. Instead, walk the
+        glyph's opaque pixels and AND together one full-plane compare each - the same
+        predicate, a few hundred vectorised ops instead of a few hundred thousand
+        scalar ones, and it bails the moment no candidate origin survives.
+        """
+        rows = large.shape[0] - h + 1
+        cols = large.shape[1] - w + 1
+        if rows <= 0 or cols <= 0:
+            return []
+
+        hits = np.ones((rows, cols), dtype=bool)
+        for (dy, dx), rgba in zip(coords, colours):
+            hits &= (large[dy:dy + rows, dx:dx + cols] == rgba).all(axis=2)
+            if not hits.any():
+                return []
+
+        ys, xs = np.nonzero(hits)
+        # nonzero walks row-major, so this is y-ascending then x-ascending - the
+        # order the nested loops produced, which is what the overlap filter below
+        # depends on to keep choosing the same glyph out of two that collide.
+        return list(zip(xs.tolist(), ys.tolist()))
+
+    def _scan(self, large_array):
+        """Blocking pixel scan. Runs on a worker thread - see solve()."""
+        matches = []
+        for coords, colours, h, w, char in self.check_data:
+            for x, y in self._match_offsets(large_array, coords, colours, h, w):
+                # matches carries across glyphs on purpose: PRIORITY_LEVELS orders
+                # them so a glyph that contains a smaller one (l inside k) is
+                # accepted first and the smaller one is then rejected as overlapping.
+                if not any(
+                    (m[0] - w < x < m[0] + w) and (m[1] - h < y < m[1] + h)
+                    for m in matches
+                ):
+                    matches.append((x, y, char))
+
+        matches.sort(key=lambda m: m[0])
+        return "".join([m[2] for m in matches])
 
     async def solve(self, image_input, session=None, confidence=0.95):
         try:
@@ -80,31 +134,31 @@ class NeuraSolver:
             else:
                 captcha_img = image_input if isinstance(image_input, Image.Image) else Image.open(image_input)
 
-            captcha_img = captcha_img.convert("RGBA")
-            large_array = np.array(captcha_img)
-            matches = []
-
-            for mask_array, (h, w), char in self.check_data:
-
-                alpha_mask = mask_array[:, :, 3] > 0
-                for y in range(large_array.shape[0] - h + 1):
-                    for x in range(large_array.shape[1] - w + 1):
-                        segment = large_array[y : y + h, x : x + w]
-
-                        if np.array_equal(segment[alpha_mask], mask_array[alpha_mask]):
-
-                            if not any(
-                                (m[0] - w < x < m[0] + w) and (m[1] - h < y < m[1] + h)
-                                for m in matches
-                            ):
-                                matches.append((x, y, char))
-
-            matches.sort(key=lambda m: m[0])
-            return "".join([m[2] for m in matches])
-
+            large_array = np.array(captcha_img.convert("RGBA"))
         except Exception:
             return ""
 
+        try:
+            # Hundreds of milliseconds of pure CPU. Awaiting it inline froze the one
+            # loop every account shares, so a single huntbot captcha stalled every
+            # other account's sends and heartbeats - same reason
+            # modules/captcha_solver.py runs its inference on a thread.
+            return await asyncio.to_thread(self._scan, large_array)
+        except Exception:
+            return ""
+
+
+# The masks are constant, so decoding 26 PNGs per captcha was pure waste on the loop.
+# Built lazily on first use and only ever from the shared loop, so no lock is needed.
+_solver = None
+
+
+def _get_solver():
+    global _solver
+    if _solver is None:
+        _solver = NeuraSolver()
+    return _solver
+
+
 async def solveHbCaptcha(captcha_url, session):
-    solver = NeuraSolver()
-    return await solver.solve(captcha_url, session)
+    return await _get_solver().solve(captcha_url, session)
