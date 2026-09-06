@@ -93,6 +93,19 @@ def _write_json(path, payload):
 
     The temp name carries pid+thread id so two writers can never share it, and the
     backup is what makes a torn or truncated file recoverable instead of fatal.
+
+    Everything inside the lock is deliberately cheap. `flag_account`/`_persist_user_id`
+    call this from the asyncio loop (once per READY), and the dashboard's waitress
+    threads call it too, so the loop thread has to be able to take `_FILE_LOCK` and
+    get out fast. An earlier version fsync'd the temp file and copied the whole old
+    file byte-for-byte into `.bak`, both while holding the lock - on a network-backed
+    volume that is tens to hundreds of ms of blocking disk I/O, and when a web thread
+    held the lock across it the loop thread stalled behind it: heartbeats stopped,
+    accounts dropped and reconnected with a cold channel cache (the fetch_channel
+    "Missing Access" flood), and every loop-bound dashboard route hung with them.
+    Two atomic renames give the same crash-safety - `path` is always either the old
+    file or the new one, never a half-written one - without reading or fsyncing a
+    single byte under the lock.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -100,14 +113,11 @@ def _write_json(path, payload):
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
             if os.path.exists(path):
                 try:
-                    # copy, not rename: os.replace below wants the original still
-                    # in place on the platforms where that is cheaper
-                    with open(path, "rb") as src, open(path + ".bak", "wb") as dst:
-                        dst.write(src.read())
+                    # a rename, not a byte copy: promoting the current file to .bak
+                    # is a metadata op, so the lock is held for microseconds
+                    os.replace(path, path + ".bak")
                 except OSError:
                     pass
             os.replace(tmp, path)
@@ -137,6 +147,12 @@ def load_proxies(owner):
     path = spaces.proxies_path(owner)
     with _FILE_LOCK:
         if not os.path.exists(path):
+            # missing-with-a-backup is a crash in _write_json's rename window, not a
+            # fresh space: recover the list rather than seeding (and then saving) empty
+            if os.path.exists(path + ".bak"):
+                data, ok = _read_json(path + ".bak")
+                if ok:
+                    return data.get("proxies", [])
             save_proxies(owner, [])
             return []
         data, ok = _read_json(path)
@@ -162,17 +178,22 @@ def load_accounts(owner):
     """
     path = spaces.accounts_path(owner)
     with _FILE_LOCK:
-        if not os.path.exists(path):
+        if os.path.exists(path):
+            data, ok = _read_json(path)
+            if ok:
+                return data.get("accounts", [])
+        elif not os.path.exists(path + ".bak"):
+            # a brand-new space has neither file: that is a real empty, not a loss
             return []
-        data, ok = _read_json(path)
-        if ok:
-            return data.get("accounts", [])
-
+        # Reaching here means the file is missing-but-a-backup-exists (a crash in the
+        # rename window of _write_json) or present-but-unparseable. Both recover from
+        # .bak rather than reporting empty - an empty here is what a save would then
+        # persist over the real tokens.
         backup, ok = _read_json(path + ".bak")
         if ok:
             recovered = backup.get("accounts", [])
-            print(f"[!] {path} was unreadable - recovered {len(recovered)} account(s) "
-                  f"from accounts.json.bak", flush=True)
+            print(f"[!] {path} was missing or unreadable - recovered {len(recovered)} "
+                  f"account(s) from accounts.json.bak", flush=True)
             _write_json(path, {"accounts": recovered})
             return recovered
 
