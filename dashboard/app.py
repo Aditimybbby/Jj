@@ -1273,7 +1273,7 @@ def _build_accounts_config(owner):
     from utils import proxy_manager
     from core import supervisor
     try:
-        accounts = proxy_manager.load_accounts_or_empty(owner)
+        accounts = proxy_manager.load_accounts(owner)
         running = supervisor.running_states(owner)
         out = []
         for acc in accounts:

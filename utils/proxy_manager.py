@@ -80,32 +80,18 @@ def valid_account_name(name):
 _FILE_LOCK = threading.RLock()
 
 
-class AccountsUnreadable(RuntimeError):
-    """accounts.json exists but neither it nor its backup could be parsed.
-
-    Deliberately loud. Returning an empty list here is what let a damaged file be
-    laundered into a permanent wipe of the whole farm.
-    """
-
-
 def _write_json(path, payload):
-    """Atomically replace `path`, keeping the previous contents as `path.bak`.
+    """Write `path` atomically: dump to a private temp file, then rename over it.
 
-    The temp name carries pid+thread id so two writers can never share it, and the
-    backup is what makes a torn or truncated file recoverable instead of fatal.
+    The temp name carries pid+thread id. That is the whole fix for the torn file
+    above - with a shared `accounts.json.tmp` two writers opened, truncated and
+    interleaved the same file before one of them promoted it. With a private name
+    each writer's temp is its own, and `os.replace` is atomic, so `path` is always
+    either the complete old file or the complete new one.
 
-    Everything inside the lock is deliberately cheap. `flag_account`/`_persist_user_id`
-    call this from the asyncio loop (once per READY), and the dashboard's waitress
-    threads call it too, so the loop thread has to be able to take `_FILE_LOCK` and
-    get out fast. An earlier version fsync'd the temp file and copied the whole old
-    file byte-for-byte into `.bak`, both while holding the lock - on a network-backed
-    volume that is tens to hundreds of ms of blocking disk I/O, and when a web thread
-    held the lock across it the loop thread stalled behind it: heartbeats stopped,
-    accounts dropped and reconnected with a cold channel cache (the fetch_channel
-    "Missing Access" flood), and every loop-bound dashboard route hung with them.
-    Two atomic renames give the same crash-safety - `path` is always either the old
-    file or the new one, never a half-written one - without reading or fsyncing a
-    single byte under the lock.
+    Nothing expensive happens under the lock: no fsync, no reading the old file.
+    `flag_account`/`_persist_user_id` call this from the asyncio loop, so a web
+    thread holding the lock across slow disk I/O would stall every bot behind it.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -113,13 +99,6 @@ def _write_json(path, payload):
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=4)
-            if os.path.exists(path):
-                try:
-                    # a rename, not a byte copy: promoting the current file to .bak
-                    # is a metadata op, so the lock is held for microseconds
-                    os.replace(path, path + ".bak")
-                except OSError:
-                    pass
             os.replace(tmp, path)
         finally:
             if os.path.exists(tmp):
@@ -129,39 +108,18 @@ def _write_json(path, payload):
                     pass
 
 
-def _read_json(path):
-    """(payload, ok). ok is False when the file is there but unparseable."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return None, False
-        return data, True
-    except (json.JSONDecodeError, ValueError):
-        return None, False
-    except OSError:
-        return None, False
-
-
 def load_proxies(owner):
     path = spaces.proxies_path(owner)
     with _FILE_LOCK:
         if not os.path.exists(path):
-            # missing-with-a-backup is a crash in _write_json's rename window, not a
-            # fresh space: recover the list rather than seeding (and then saving) empty
-            if os.path.exists(path + ".bak"):
-                data, ok = _read_json(path + ".bak")
-                if ok:
-                    return data.get("proxies", [])
             save_proxies(owner, [])
             return []
-        data, ok = _read_json(path)
-        if ok:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
             return data.get("proxies", [])
-        # the pool is re-derivable by re-importing, so a bad read is not fatal
-        # here - but prefer the backup over losing the whole list
-        data, ok = _read_json(path + ".bak")
-        return data.get("proxies", []) if ok else []
+        except (json.JSONDecodeError, OSError):
+            return []
 
 
 def save_proxies(owner, proxies):
@@ -170,47 +128,15 @@ def save_proxies(owner, proxies):
 
 
 def load_accounts(owner):
-    """The space's accounts, or the last good backup if the file is damaged.
-
-    Raises AccountsUnreadable when both copies are unparseable. Every caller that
-    might then write the result back has to see the failure rather than a plausible
-    empty list.
-    """
     path = spaces.accounts_path(owner)
     with _FILE_LOCK:
-        if os.path.exists(path):
-            data, ok = _read_json(path)
-            if ok:
-                return data.get("accounts", [])
-        elif not os.path.exists(path + ".bak"):
-            # a brand-new space has neither file: that is a real empty, not a loss
+        if not os.path.exists(path):
             return []
-        # Reaching here means the file is missing-but-a-backup-exists (a crash in the
-        # rename window of _write_json) or present-but-unparseable. Both recover from
-        # .bak rather than reporting empty - an empty here is what a save would then
-        # persist over the real tokens.
-        backup, ok = _read_json(path + ".bak")
-        if ok:
-            recovered = backup.get("accounts", [])
-            print(f"[!] {path} was missing or unreadable - recovered {len(recovered)} "
-                  f"account(s) from accounts.json.bak", flush=True)
-            _write_json(path, {"accounts": recovered})
-            return recovered
-
-        raise AccountsUnreadable(f"{path} is corrupt and accounts.json.bak cannot be read")
-
-
-def load_accounts_or_empty(owner):
-    """load_accounts for read-only callers that must not crash on a bad file.
-
-    Only for paths that display or count accounts. Never use it as the read half of
-    a read-modify-write - that is exactly how a corrupt file becomes a real wipe.
-    """
-    try:
-        return load_accounts(owner)
-    except AccountsUnreadable as exc:
-        print(f"[!] {exc}", flush=True)
-        return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f).get("accounts", [])
+        except (json.JSONDecodeError, OSError):
+            return []
 
 
 def save_accounts(owner, accounts):
