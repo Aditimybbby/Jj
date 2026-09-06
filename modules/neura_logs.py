@@ -32,23 +32,30 @@ def _plain_logs_wanted():
 
 
 def _console_levels():
-    """Which log types are allowed onto the host console.
+    """Which per-account log types are allowed onto the host console.
 
-    On a host (Railway) the per-account farming chatter - every hunt, gamble,
-    cooldown and stealth-typing line - is just noise in the provider's log
-    viewer, and the dashboard already keeps all of it. So the host console is
-    held to problems and security events; everything else is dropped from stdout
-    but still recorded for the website. LAZYFARMERS_CONSOLE_LEVELS overrides with
-    a comma list of types, or the word 'all' to restore the full firehose. Only
-    applies in plain/host mode - a human watching a real terminal still sees
-    every line in colour.
+    None of them, by default, when running on a host. The provider's log viewer
+    is for the *service* - it should show whether the web server came up, whether
+    it is still listening, and what killed it. Per-account bot output is a
+    different thing with a different audience: it belongs to whoever owns that
+    account, it is already kept in full for the dashboard's log view, and there
+    is a lot of it. Sixteen accounts arming their cogs at once was enough to trip
+    Railway's 500-lines-per-second limit, at which point the messages that
+    actually mattered were the ones being dropped.
+
+    Even bot ERROR lines stay off: a dead proxy or a rejected token is an account
+    problem, shown on that account's card, not a fault in the website.
+
+    LAZYFARMERS_CONSOLE_LEVELS puts some back - a comma list of types
+    ('ERROR,SECURITY'), or 'all' for the full firehose. Only applies in
+    plain/host mode; a human watching a real terminal still sees every line.
     """
     raw = os.environ.get('LAZYFARMERS_CONSOLE_LEVELS', '').strip()
     if raw:
         if raw.lower() == 'all':
             return None
         return {part.strip().upper() for part in raw.split(',') if part.strip()}
-    return {'ERROR', 'WARN', 'SECURITY', 'ALARM'}
+    return frozenset()
 
 
 class NeuraLogs:
@@ -90,9 +97,9 @@ class NeuraLogs:
 
         username = bot.username if hasattr(bot, 'username') else "Bot"
 
-        # Host console stays clean: routine per-account chatter never reaches the
-        # provider's log viewer, but the dashboard log view still gets every line
-        # through _record. Errors, warnings and security events always pass.
+        # Host console stays clean: per-account output never reaches the
+        # provider's log viewer, which is left for the web server's own errors.
+        # The dashboard log view still gets every line through _record.
         if self.plain and self.console_levels is not None and log_type not in self.console_levels:
             self._record(bot, log_type, message, username)
             return

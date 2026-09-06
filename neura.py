@@ -228,21 +228,6 @@ def start_dashboard():
                                         name='dashboard', daemon=True)
     _dashboard_thread.start()
 
-def load_enabled_accounts(owner):
-    """Accounts this space wants running right now.
-
-    `enabled` is "this account is part of my farm"; `autostart` is "and it should
-    be up". The dashboard's Stop button clears autostart, so an account the
-    operator stopped stays stopped through a restart or a redeploy instead of
-    quietly coming back and farming behind their back.
-    """
-    return [
-        a for a in proxy_manager.load_accounts(owner)
-        if a.get('enabled', True) and proxy_manager.wants_autostart(a)
-    ]
-
-
-_started_spaces = set()
 _shutdown_done = threading.Event()
 
 
@@ -253,7 +238,8 @@ def _shutdown():
     _shutdown_done.set()
     try:
         import utils.history_tracker as ht
-        for owner in list(_started_spaces):
+        # only spaces that actually started something this run have an open db
+        for owner in list(supervisor.started_spaces):
             ht.end_session(owner=owner)
         # force: the debounced write would otherwise be scheduled on a timer that
         # never gets to run, losing everything since the last flush
@@ -262,23 +248,8 @@ def _shutdown():
     except Exception as e:
         console.print(f"[red]Shutdown bookkeeping failed: {e}[/red]")
 
-def spaces_with_accounts():
-    """(owner, accounts) for every space that has something to start.
-
-    The admin space comes first so the operator's own farm is up before any
-    dashboard user's, and it is always listed even when empty - the menu below
-    reports on it.
-    """
-    out = []
-    for owner in spaces.list_owners():
-        accounts = load_enabled_accounts(owner)
-        if accounts or owner == spaces.ADMIN_SPACE:
-            out.append((owner, accounts))
-    return out
-
-
 def configured_account_count():
-    """How many accounts exist across every space, autostart or not."""
+    """How many accounts exist across every space."""
     return sum(len(proxy_manager.load_accounts(owner)) for owner in spaces.list_owners())
 
 
@@ -295,7 +266,7 @@ def _menu_choice():
     try:
         return Prompt.ask("\nSelect option", choices=["1", "2", "3"], default="1")
     except EOFError:
-        console.print("\n[yellow]No console input - starting the enabled accounts.[/yellow]")
+        console.print("\n[yellow]No console input - handing over to the dashboard.[/yellow]")
         return "1"
 
 
@@ -322,7 +293,7 @@ async def main():
         console.print(f"[cyan]Config Directory:[/cyan] {state.CONFIG_DIR}")
         console.print(f"[cyan]Accounts File:[/cyan] {spaces.accounts_path(spaces.ADMIN_SPACE)}\n")
         if not HEADLESS:
-            console.print("\n[bold cyan]1.[/bold cyan] Start Lazy Farmers")
+            console.print("\n[bold cyan]1.[/bold cyan] Hand over to the dashboard")
             console.print("[bold cyan]2.[/bold cyan] Manage Accounts")
             console.print("[bold cyan]3.[/bold cyan] Exit")
             choice = await asyncio.to_thread(_menu_choice)
@@ -332,38 +303,18 @@ async def main():
             elif choice == "3":
                 console.print("\n[yellow]Shutting down. See you next time![/yellow]")
                 sys.exit(0)
-        # every dashboard user has their own space, so boot them all - not just the
-        # operator's (see core/spaces.py)
-        pending = spaces_with_accounts()
-        total = sum(len(accounts) for _owner, accounts in pending)
-        # Only re-prompt when there is genuinely nothing configured. Accounts that
-        # exist but were stopped from the dashboard must not send us back around
-        # the menu loop - that would keep the process from ever reaching the idle
-        # state where the dashboard can start them again.
-        if not total and not configured_account_count() and not HEADLESS:
-            console.print("[bold red]No active accounts? Add some in the Account Manager (Option 2).[/bold red]")
-            time.sleep(2)
-            continue
-        import utils.history_tracker as ht
-        for owner, accounts in pending:
-            if not accounts:
-                continue
-            # opens the space's history db (and migrates an old schema) off the loop
-            await asyncio.to_thread(ht.start_session, owner=owner)
-            _started_spaces.add(owner)
-            label = "operator" if owner == spaces.ADMIN_SPACE else owner
-            console.print(f"[bold yellow]Initializing {len(accounts)} accounts for {label}...[/bold yellow]")
-            start_result = await supervisor.start_all(accounts, owner)
-            # start_all now returns {'results': [(ok,msg),...], 'started': n, 'total': m}
-            for ok, message in start_result.get('results', start_result if isinstance(start_result, list) else []):
-                console.print(f"[green]{message}[/green]" if ok else f"[bold red]{message}[/bold red]")
-        if not total:
-            configured = configured_account_count()
-            if configured:
-                console.print(f"[bold yellow]{configured} account(s) configured, none set to autostart - "
-                              f"start them from the dashboard Accounts page.[/bold yellow]")
-            else:
-                console.print("[bold yellow]No enabled accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
+        # Nothing is started here, deliberately. Bringing the farm up on boot meant
+        # a redeploy, a crash-restart or a host moving the container silently put
+        # every account back on Discord with nobody watching - and all at once,
+        # which is what tripped the host's log rate limit and then killed the
+        # process on thread exhaustion. An account runs because someone pressed
+        # Start; a restart leaves the farm exactly as stopped as it found it.
+        configured = configured_account_count()
+        if configured:
+            console.print(f"[bold yellow]{configured} account(s) configured, none started - "
+                          f"start the ones you want on the dashboard Accounts page.[/bold yellow]")
+        else:
+            console.print("[bold yellow]No accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
         console.print("[bold green]Dashboard is in control. Start, stop and verify accounts from the Accounts page.[/bold green]")
         while True:
             await asyncio.sleep(60)

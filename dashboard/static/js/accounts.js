@@ -228,6 +228,7 @@ const ACCOUNT_STATUS_LABELS = {
     invalid_token: 'TOKEN DEAD',
     needs_verification: 'NEEDS VERIFICATION',
     cannot_send: "CAN'T SEND",
+    duplicate: 'DUPLICATE',
 };
 
 function accountConfigCard(acc) {
@@ -243,10 +244,6 @@ function accountConfigCard(acc) {
             ? '<span class="acct-state running">RUNNING</span>'
             : '<span class="acct-state connecting">CONNECTING</span>')
         : '<span class="acct-state stopped">STOPPED</span>';
-    // an account stopped from here stays stopped through a restart, so say so
-    const autostartState = (!acc.running && acc.autostart === false)
-        ? '<span class="acct-state stopped" title="Stopped on purpose - it will not come back on its own when the process restarts">NO AUTOSTART</span>'
-        : '';
     const healthState = health === 'ok' ? '' :
         `<span class="acct-state problem">${escHtml(ACCOUNT_STATUS_LABELS[health] || String(health).toUpperCase())}</span>`;
     const reason = health === 'ok' || !acc.status_reason ? '' :
@@ -254,10 +251,19 @@ function accountConfigCard(acc) {
     const runBtn = acc.running
         ? `<button class="btn-proxy-sm danger" onclick="stopAccount('${jsArg(name)}')">Stop</button>`
         : `<button class="btn-proxy-sm" onclick="launchAccount('${jsArg(name)}')">Start</button>`;
+    // Name, token and channels are what the live bot was built from, so the
+    // server refuses to change them under a running account (409). Grey the
+    // buttons out rather than letting the form collect an edit it will reject.
+    const lockedTitle = 'Stop this account first — its name, token and channel IDs are locked while it runs';
+    const editBtns = acc.running
+        ? `<button class="btn-proxy-sm" disabled title="${lockedTitle}">Edit</button>
+           <button class="btn-proxy-sm danger" disabled title="${lockedTitle}">Del</button>`
+        : `<button class="btn-proxy-sm" onclick="editAccountConfig(${i})">Edit</button>
+           <button class="btn-proxy-sm danger" onclick="deleteAccountConfig(${i})">Del</button>`;
     return `
         <div class="account-config-card">
             <div class="account-config-info">
-                <strong>${escHtml(name)} ${runState}${autostartState}${healthState}</strong>
+                <strong>${escHtml(name)} ${runState}${healthState}</strong>
                 <span class="mono">${escHtml(token)}</span>
                 <span class="dim">${escHtml(proxy)} · ${status} · Channels: ${escHtml(channels)}</span>
                 ${reason}
@@ -265,8 +271,7 @@ function accountConfigCard(acc) {
             <div class="account-config-actions">
                 ${runBtn}
                 <button class="btn-proxy-sm" onclick="verifyAccounts(['${jsArg(name)}'])">Verify</button>
-                <button class="btn-proxy-sm" onclick="editAccountConfig(${i})">Edit</button>
-                <button class="btn-proxy-sm danger" onclick="deleteAccountConfig(${i})">Del</button>
+                ${editBtns}
             </div>
         </div>
     `;
@@ -331,14 +336,10 @@ window.stopAccount = function(name) {
     return accountAction('/api/accounts/stop', { name: decodeURIComponent(name) }, 'Stopping account');
 };
 
-window.launchAllAccounts = function() {
-    return accountAction('/api/accounts/launch_all', {}, 'Starting accounts');
-};
-
-window.stopAllAccounts = function() {
-    if (!confirm('Disconnect every running account?')) return;
-    return accountAction('/api/accounts/stop_all', {}, 'Stopping accounts');
-};
+// No launchAllAccounts / stopAllAccounts. Starting the whole farm with one press
+// is what put every account on the gateway inside a few seconds and took the
+// process down with it; a second press while the first was still working ran two
+// passes over the same accounts. One account, one click.
 
 window.verifyAccounts = async function(names) {
     const payload = names ? { names: names.map(decodeURIComponent) } : {};
@@ -408,10 +409,20 @@ window.hideAccountForm = function() {
 };
 
 window.editAccountConfig = function(index) {
+    const acc = accountConfigList[index];
+    if (acc && acc.running) {
+        showToast('Stop this account before editing it', 'error');
+        return;
+    }
     showAccountForm(index);
 };
 
 window.deleteAccountConfig = async function(index) {
+    const acc = accountConfigList[index];
+    if (acc && acc.running) {
+        showToast('Stop this account before removing it', 'error');
+        return;
+    }
     if (!confirm('Remove this account from config?')) return;
     accountConfigList.splice(index, 1);
     await saveAccountConfigList();
@@ -434,7 +445,7 @@ window.saveAccountForm = async function() {
         return;
     }
     if (index >= 0 && accountConfigList[index]) {
-        // Keep every field the server tracks (health status, autostart) and only
+        // Keep every field the server tracks (health status, user_id) and only
         // overwrite what this form owns. The real token never reaches the browser,
         // so a blank token box means "keep the stored one"; orig_name lets the
         // server still find that row after a rename.
@@ -448,7 +459,7 @@ window.saveAccountForm = async function() {
             showToast('Token is required', 'error');
             return;
         }
-        accountConfigList.push({ name, channels, enabled, proxy_id, token, autostart: true });
+        accountConfigList.push({ name, channels, enabled, proxy_id, token });
     }
     await saveAccountConfigList();
     hideAccountForm();
@@ -476,8 +487,14 @@ async function saveAccountConfigList() {
             await fetchAccountConfig();
         } else {
             showToast(data.message || 'Save failed', 'error');
+            // The list was already edited in place (a delete splices before it
+            // saves), so a rejected save - "that account is running" - has to put
+            // the server's version back or the card stays gone on screen while
+            // the account is still farming.
+            await fetchAccountConfig();
         }
     } catch (e) {
         showToast('Save failed', 'error');
+        await fetchAccountConfig();
     }
 }

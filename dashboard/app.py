@@ -1180,6 +1180,26 @@ def settings():
         except Exception:
             return jsonify({})
 
+def _frozen_field_changed(prior, account):
+    """Which identity field an edit tried to change, or None.
+
+    Token, name and channels are what a live NeuraBot was constructed from, so
+    they may only move while the account is stopped. Everything else on the card
+    (enabled, proxy, health) is either advisory or picked up on the next start.
+    """
+    if not prior:
+        # no row on disk to compare against - a brand new account is not running
+        return None
+    if str(prior.get('name') or '') != str(account.get('name') or ''):
+        return 'name'
+    if str(prior.get('token') or '') != str(account.get('token') or ''):
+        return 'token'
+    if [str(c) for c in (prior.get('channels') or [])] != \
+       [str(c) for c in (account.get('channels') or [])]:
+        return 'channel ids'
+    return None
+
+
 @app.route('/api/accounts/config', methods=['GET', 'POST'])
 @space_required
 def accounts_config_api():
@@ -1210,10 +1230,18 @@ def accounts_config_api():
         # over from disk rather than dropped.
         existing = proxy_manager.load_accounts(g.owner)
         by_name = {str(a.get('name')): a for a in existing}
+        # A running account's identity is frozen. The live NeuraBot holds the token
+        # it logged in with and re-reads accounts.json on every config change, so a
+        # token/name/channel edit underneath it produced a bot whose config row no
+        # longer describes it: flag_account wrote health to a name that had moved,
+        # channels rotated mid-session, and a swapped token was farmed by the old
+        # one until something happened to restart it. Stop the account, edit, start.
+        running = set(supervisor.running_names(g.owner))
 
         # an account name reaches the admin's browser inside an account card, and
         # it is also matched against by supervisor - so keep it boring
         seen = set()
+        submitted_prior_names = set()
         for account in accounts:
             if not isinstance(account, dict):
                 return jsonify({"status": "error", "message": "Malformed account entry"}), 400
@@ -1231,7 +1259,10 @@ def accounts_config_api():
 
             # orig_name lets a rename still find its old row, so editing the name
             # of an account does not lose its token or its health history
-            prior = by_name.get(str(account.pop('orig_name', '') or '')) or by_name.get(name)
+            orig_name = str(account.pop('orig_name', '') or '')
+            prior = by_name.get(orig_name) or by_name.get(name)
+            prior_name = str(prior.get('name')) if prior else name
+            submitted_prior_names.add(prior_name)
             # display-only fields the GET adds; they are not configuration
             for transient in ('token_masked', 'running', 'ready'):
                 account.pop(transient, None)
@@ -1240,10 +1271,27 @@ def accounts_config_api():
                     return jsonify({"status": "error",
                                     "message": f"Token is required for {name!r}"}), 400
                 account['token'] = prior['token']
+
+            if prior_name in running:
+                frozen = _frozen_field_changed(prior, account)
+                if frozen:
+                    return jsonify({"status": "error",
+                                    "message": f"{prior_name} is running - stop it before "
+                                               f"changing its {frozen}"}), 409
+
             if prior:
-                for carried in ('status', 'status_reason', 'status_at', 'autostart', 'user_id'):
+                for carried in ('status', 'status_reason', 'status_at', 'user_id'):
                     if carried not in account and carried in prior:
                         account[carried] = prior[carried]
+
+        # Deleting a row out from under a live bot is the same problem, minus the
+        # config row: the account would keep farming with nothing on disk to stop
+        # it from, or report health into.
+        orphaned = sorted(running - submitted_prior_names)
+        if orphaned:
+            return jsonify({"status": "error",
+                            "message": f"{', '.join(orphaned)} is running - stop it before "
+                                       f"removing it"}), 409
 
         try:
             proxy_manager.save_accounts(g.owner, accounts)
@@ -1284,7 +1332,6 @@ def _build_accounts_config(owner):
             safe = {k: v for k, v in acc.items() if k != 'token'}
             if acc.get('token'):
                 safe['token_masked'] = proxy_manager.mask_token(acc['token'])
-            safe['autostart'] = proxy_manager.wants_autostart(acc)
             safe['running'] = acc.get('name') in running
             # False while the instance exists but has not logged in yet
             safe['ready'] = bool(running.get(acc.get('name')))
@@ -1346,9 +1393,6 @@ def account_launch():
     if error:
         return jsonify({'success': False, 'error': error}), 503
     ok, message = result
-    if ok:
-        # remember the operator wants this one up, so a restart brings it back
-        proxy_manager.set_account_autostart(g.owner, name, True)
     state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
     _invalidate_snapshots(g.owner)
     return jsonify({'success': ok, 'message': message})
@@ -1357,15 +1401,11 @@ def account_launch():
 @app.route('/api/accounts/stop', methods=['POST'])
 @space_required
 def account_stop():
-    from utils import proxy_manager
     from core import supervisor
     name = _payload().get('name')
-    # Clear autostart first, and whether or not a live instance was found. The
-    # point of Stop is "stay stopped": if this only cancelled the running task,
-    # the next process start (redeploy, crash, plain restart) would bring the
-    # account straight back and it would keep farming.
-    if _find_account(proxy_manager.load_accounts(g.owner), name):
-        proxy_manager.set_account_autostart(g.owner, name, False)
+    # Nothing to persist: "stay stopped" is now the only behaviour there is. The
+    # process never starts an account by itself, so a stop lasts until someone
+    # clicks Start again.
     result, error = _bot_loop_call(supervisor.stop_account(g.owner, name))
     if error:
         return jsonify({'success': False, 'error': error}), 503
@@ -1375,87 +1415,29 @@ def account_stop():
     return jsonify({'success': ok, 'message': message})
 
 
-@app.route('/api/accounts/launch_all', methods=['POST'])
-@space_required
-def account_launch_all():
-    from utils import proxy_manager
-    from core import supervisor
-    pending = [
-        a for a in proxy_manager.load_accounts(g.owner)
-        if a.get('enabled', True) and not supervisor.find_bot(g.owner, a.get('name'))
-    ]
-    if not pending:
-        return jsonify({'success': False, 'error': 'No enabled accounts left to start'})
-
-    # start_all now only *creates* the instances - the login itself queues behind
-    # state.login_slot() - so this returns in well under a second even for 200
-    # accounts, and each one is immediately a "Connecting…" card in the list.
-    #
-    # The timeout used to be `20 + 5 * len(pending)`: 1020s at 200 accounts, far
-    # past waitress' 180s channel_timeout. The browser was handed a failed request
-    # while start_all kept bringing the farm up in the background, so the operator
-    # pressed Start again and two passes interleaved - which is the "keeps
-    # starting/restarting accounts" symptom. A flat, short ceiling cannot do that.
-    result, error = _bot_loop_call(supervisor.start_all(pending, g.owner), timeout=45)
-    if error:
-        return jsonify({'success': False, 'error': error}), 503
-
-    started = result.get('started', 0) if isinstance(result, dict) else 0
-    total = result.get('total', len(pending)) if isinstance(result, dict) else len(pending)
-    # Start All is an explicit "bring the farm up", so it re-arms autostart for
-    # everything it managed to start - including accounts stopped earlier. One
-    # read-modify-write for the whole batch, not one per account.
-    proxy_manager.set_accounts_autostart(
-        g.owner,
-        [a.get('name') for a in pending if supervisor.find_bot(g.owner, a.get('name'))],
-        True,
-    )
-    state.log_command("SYS", f"Started {started}/{total} accounts from dashboard",
-                      "success" if started else "error", owner=g.owner)
-    _invalidate_snapshots(g.owner)
-    if started == 0:
-        return jsonify({'success': False, 'error': 'No accounts could be started (check tokens/channels in the logs)'})
-    return jsonify({'success': True, 'message': f'Started {started}/{total} accounts, connecting now'})
-
-
-@app.route('/api/accounts/stop_all', methods=['POST'])
-@space_required
-def account_stop_all():
-    from utils import proxy_manager
-    from core import supervisor
-    names = supervisor.running_names(g.owner)
-    if not names:
-        return jsonify({'success': False, 'error': 'No accounts are running'})
-
-    # Teardown is batched inside stop_all (STOP_CONCURRENCY at a time), so 200
-    # accounts finish in roughly the 10s a single hung runner is given rather than
-    # 200 x that serially. The old timeout=30 against serial teardown gave up on a
-    # farm of any size part-way through.
-    result, error = _bot_loop_call(supervisor.stop_all(g.owner), timeout=90)
-    if error:
-        return jsonify({'success': False, 'error': error}), 503
-    stopped = sum(1 for ok, _msg in (result or []) if ok) if isinstance(result, list) else len(names)
-
-    # Same "stay stopped" contract as the single-account stop, but applied *after*
-    # the teardown and only to what is actually down. Clearing it up front meant a
-    # timed-out or partial stop left the whole space marked "do not autostart"
-    # while those accounts kept farming - the config and reality disagreed until
-    # the next restart silently shut the farm off.
-    still_running = set(supervisor.running_names(g.owner))
-    proxy_manager.set_accounts_autostart(
-        g.owner, [n for n in names if n not in still_running], False)
-
-    state.log_command("SYS", f"Stopped {stopped}/{len(names)} accounts from dashboard", "success", owner=g.owner)
-    _invalidate_snapshots(g.owner)
-    return jsonify({'success': True, 'message': f'Stopped {stopped}/{len(names)} accounts'})
+# There is no launch_all / stop_all route on purpose. One button that puts every
+# account on the gateway at once is what a redeploy did to this process: ~16
+# logins inside eight seconds, the host's log rate limit tripped, then death by
+# thread exhaustion - and a second press while the first was still working
+# interleaved two passes over the same farm. Accounts are started and stopped one
+# click at a time, through /api/accounts/launch and /api/accounts/stop.
+#
+# supervisor.stop_all is still used for teardown that is not an operator action
+# (process shutdown, deleting a dashboard user), just not from a route.
 
 
 async def _verify_accounts(owner, accounts, targets):
     from lazy_engines.setup_engine import LazySetupEngine
+    from core import supervisor
     from utils import proxy_manager
     engine = LazySetupEngine()
     results = []
     channels_changed = False
+    # Verify is read-only for a running account. It normally writes back the
+    # channels it found reachable, and doing that under a live bot is the same
+    # edit the config route refuses: the bot re-reads accounts.json and rotates
+    # itself onto a channel nobody chose, mid-session.
+    running = set(supervisor.running_names(owner))
 
     for account in targets:
         proxy_url, proxy_auth, _label = proxy_manager.resolve_account_proxy(owner, account)
@@ -1466,7 +1448,8 @@ async def _verify_accounts(owner, accounts, targets):
         except Exception as e:
             valid, user, channels = False, str(e), []
 
-        if valid and channels and channels != account.get('channels'):
+        locked = account.get('name') in running
+        if valid and channels and channels != account.get('channels') and not locked:
             account['channels'] = channels
             channels_changed = True
 
@@ -1559,8 +1542,18 @@ def account_bulk_import():
                         'error': f'That would exceed the {MAX_ACCOUNTS_PER_SPACE} account limit'}), 400
 
     used_names = {a.get('name') for a in accounts}
+    # A token already in the space is the same Discord account. Importing it again
+    # only creates a second row that can never be started (the supervisor refuses
+    # a token that is already live) while looking like a real account on the page.
+    known_tokens = {str(a.get('token') or '').strip() for a in accounts if a.get('token')}
     counter = 1
+    imported = 0
+    skipped = 0
     for token in tokens:
+        if token in known_tokens:
+            skipped += 1
+            continue
+        known_tokens.add(token)
         while f"{prefix}{counter}" in used_names:
             counter += 1
         name = f"{prefix}{counter}"
@@ -1572,12 +1565,20 @@ def account_bulk_import():
             'enabled': True,
             'proxy_id': proxy_id,
         })
+        imported += 1
+
+    if not imported:
+        return jsonify({'success': False,
+                        'error': f'Every token pasted is already in this space ({skipped} duplicates)'})
 
     proxy_manager.save_accounts(g.owner, accounts)
     proxy_manager.sync_proxy_assignments(g.owner)
-    state.log_command("SYS", f"Imported {len(tokens)} accounts ({acting_label()})", "success", owner=g.owner)
+    state.log_command("SYS", f"Imported {imported} accounts ({acting_label()})", "success", owner=g.owner)
     _invalidate_snapshots(g.owner)
-    return jsonify({'success': True, 'message': f'Imported {len(tokens)} accounts'})
+    message = f'Imported {imported} accounts'
+    if skipped:
+        message += f', skipped {skipped} already in this space'
+    return jsonify({'success': True, 'message': message})
 
 
 @app.route('/api/proxies', methods=['GET', 'POST'])

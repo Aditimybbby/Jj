@@ -144,46 +144,11 @@ def save_accounts(owner, accounts):
         _write_json(spaces.accounts_path(owner), {"accounts": accounts})
 
 
-def wants_autostart(account):
-    """True when this account should come up by itself when the process starts.
-
-    A missing flag means yes: configs written before autostart existed, and every
-    freshly added account, are expected to farm without being told twice.
-    """
-    return bool(account.get("autostart", True))
-
-
-def set_account_autostart(owner, name, autostart):
-    """Persist whether an account comes back up on the next process start.
-
-    The dashboard's Start/Stop buttons are the operator stating intent, not just
-    poking the current process - so an account they stopped has to stay stopped
-    across a redeploy, a crash or a plain restart.
-    """
-    return set_accounts_autostart(owner, [name], autostart)
-
-
-def set_accounts_autostart(owner, names, autostart):
-    """Same, for many accounts in one read-modify-write.
-
-    Start All / Stop All used to call the single-name version once per account:
-    200 accounts meant 200 full reads and up to 200 fsync'd rewrites of
-    accounts.json, all inside one web request, while the browser waited.
-    """
-    wanted = {str(n) for n in (names or []) if n}
-    if not wanted:
-        return 0
-    accounts = load_accounts(owner)
-    changed = 0
-    for account in accounts:
-        if str(account.get("name")) not in wanted:
-            continue
-        if wants_autostart(account) != bool(autostart):
-            account["autostart"] = bool(autostart)
-            changed += 1
-    if changed:
-        save_accounts(owner, accounts)
-    return changed
+# There is no autostart flag any more. It existed to answer "should this account
+# come back by itself after a restart", and the answer is now always no: nothing
+# starts an account except a Start click, so a stopped account stays stopped
+# without needing anything on disk to say so. Old entries may still carry the
+# key; it is ignored.
 
 
 def set_account_status(owner, name, status, reason=None):

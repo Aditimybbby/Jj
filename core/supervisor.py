@@ -16,15 +16,24 @@ process keeps running.
 
 Accounts are addressed by (owner, name) - two dashboard users may both call an
 account "acc1", so a bare name is never enough to find the right bot.
+
+Nothing in here starts an account on its own. Every bot that exists was asked
+for by an explicit click on the dashboard's Start button; a restart, a redeploy
+or a crash brings the process back with an empty farm.
 """
 
 
 import asyncio
 
 import core.state as state
+import utils.history_tracker as ht
 from core import spaces
 from core.bot import NeuraBot
 from utils import proxy_manager
+
+# Spaces whose history db has been opened this run. Boot used to do this for
+# every space up front; now the first Start in a space opens it.
+started_spaces = set()
 
 _loop = None
 
@@ -80,6 +89,47 @@ def is_placeholder(value):
     return not text or "YOUR_TOKEN_HERE" in text or "YOUR_CHANNEL_ID_HERE" in text or "PLACEHOLDER" in text
 
 
+def running_duplicate(token, user_id=None, ignore=None):
+    """The live bot already using this token or discord id, in *any* space.
+
+    The only guard used to be (owner, name), which answers "is this config row
+    running" - not "is this Discord account running". The same token pasted
+    under a second name, or added by two dashboard users, sailed straight past
+    it and logged in twice: two gateway sessions farming one account, sending
+    every command twice. That is the shape of a selfbot ban.
+
+    Token is the pre-login identity (it is all we have before READY); user_id
+    catches the case where two config rows hold different tokens for the same
+    Discord account.
+    """
+    token = str(token or '').strip()
+    uid = str(user_id or '').strip()
+    for bot in state.bot_instances:
+        if bot is ignore:
+            continue
+        if token and str(getattr(bot, 'token', '') or '').strip() == token:
+            return bot
+        if uid and str(getattr(bot, 'user_id', '') or '').strip() == uid:
+            return bot
+    return None
+
+
+def _open_space_history(owner):
+    """Open this space's history db the first time it starts something.
+
+    Boot used to do this for every space before starting its accounts. With
+    nothing auto-starting, the first Start click is the moment a space becomes
+    active, so that is where the db is opened. start_session is idempotent.
+    """
+    if owner in started_spaces:
+        return
+    try:
+        ht.start_session(owner=owner)
+    except Exception:
+        return
+    started_spaces.add(owner)
+
+
 async def start_account(account, owner=spaces.ADMIN_SPACE, proxies=None):
     owner = spaces.normalise_owner(owner)
     name = account.get('name') or 'unnamed'
@@ -93,6 +143,19 @@ async def start_account(account, owner=spaces.ADMIN_SPACE, proxies=None):
     channels = [c for c in (account.get('channels') or []) if not is_placeholder(c)]
     if not channels:
         return False, f"{name} has no channel id"
+
+    # No await between here and the append below, and every caller is on the one
+    # shared loop - so a double-clicked Start cannot slip a second instance in
+    # between the check and the registration.
+    twin = running_duplicate(token, account.get('user_id'))
+    if twin:
+        twin_name = account_name(twin) or 'another entry'
+        if bot_owner(twin) != owner:
+            return False, (f"{name} is the same Discord account as one already "
+                           f"running in another space")
+        return False, f"{name} is the same Discord account as {twin_name}, already running"
+
+    _open_space_history(owner)
 
     proxy_url, proxy_auth, proxy_label = proxy_manager.resolve_account_proxy(
         owner, account, proxies=proxies)
@@ -199,46 +262,19 @@ async def stop_account(owner, name):
     return True, f"{name} stopped"
 
 
-async def start_all(accounts, owner=spaces.ADMIN_SPACE):
-    """Bring a whole space up.
-
-    There is deliberately no sleep between accounts any more. The old
-    2.5-4.5s (later 1-2s) stagger existed to keep Discord from seeing a burst of
-    logins, but it only ever slowed down *this* path - the reconnect loop in
-    run_bot never passed through here, so one network blip still threw the whole
-    farm at the gateway at once. Metering moved into `state.login_slot()`, which
-    every login goes through, so this function's only job is to create the tasks.
-
-    That matters for more than speed: 200 accounts x 1-2s is 200-400s, longer
-    than waitress' channel_timeout, so the dashboard's Start All returned an
-    error to a browser whose accounts were in fact still coming up - the operator
-    would press it again and two passes would interleave.
-    """
-    results = []
-    started = 0
-    # read the proxy pool once instead of once per account (each read is a full
-    # json.load of proxies.json, on the loop, before the first login)
-    proxies = proxy_manager.load_proxies(owner)
-    for i, account in enumerate(accounts):
-        try:
-            ok, message = await start_account(account, owner, proxies=proxies)
-            results.append((ok, message))
-            if ok:
-                started += 1
-        except Exception as e:
-            results.append((False, f"{account.get('name', 'unnamed')}: {e}"))
-        # NeuraBot.__init__ arms cogs and builds a session; 200 of those back to
-        # back would hold the loop long enough for the dashboard's own calls into
-        # it to time out. Yield often enough that it stays answerable.
-        if i % 20 == 19:
-            await asyncio.sleep(0)
-    return {'results': results, 'started': started, 'total': len(accounts)}
-
-
+# There is deliberately no start_all. A mass start is how a redeploy put ~16
+# accounts on the gateway inside eight seconds, buried the host's log viewer and
+# took the process out on thread exhaustion; it is also how a double-pressed
+# button interleaved two passes over the same farm. Accounts come up one click at
+# a time, through start_account.
+#
+# stop_all survives because teardown has callers that are not the operator: the
+# process is shutting down, or a dashboard user was deleted and their accounts
+# must not outlive their accounts.json. It is not reachable from the UI.
+#
 # Teardown is bounded rather than unbounded: each stop_account may wait up to 10s
 # on a runner task and then close a gateway connection, so serial teardown of 200
-# accounts could not finish inside any sane HTTP timeout - which is what left the
-# farm half-stopped with autostart already cleared for everything.
+# accounts could not finish inside any sane HTTP timeout.
 STOP_CONCURRENCY = 16
 
 

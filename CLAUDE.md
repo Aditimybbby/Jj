@@ -43,13 +43,36 @@ auto-set by Railway), `LAZYFARMERS_HEADLESS`, `LAZYFARMERS_DASHBOARD_USER`,
 ### Process shape
 
 `neura.py` → runs `LazySetupEngine.environment_healthy()` (self-installs deps and re-execs if not) →
-starts Flask in a **daemon thread** → optional interactive menu → `supervisor.start_all(...)` → idles
-forever. Headless is auto-detected (`LAZYFARMERS_HEADLESS`, any `RAILWAY_*` env var, or no tty) because
-a blocked console prompt would otherwise keep the dashboard from ever serving.
+starts Flask in a **daemon thread** → optional interactive menu → idles forever. Headless is
+auto-detected (`LAZYFARMERS_HEADLESS`, any `RAILWAY_*` env var, or no tty) because a blocked console
+prompt would otherwise keep the dashboard from ever serving.
+
+**Nothing starts an account on its own.** The process comes up with an empty farm every time — a
+redeploy, a crash-restart or a host migration leaves the farm exactly as stopped as it found it, and
+there is no autostart flag. An account runs because someone pressed Start on its card. There is
+deliberately no Start All / Stop All and no `supervisor.start_all`: bringing ~16 accounts up at once is
+what tripped Railway's 500-lines/sec log limit and then killed the process with
+`std::system_error: Resource temporarily unavailable` (thread exhaustion). `supervisor.stop_all`
+survives for teardown that is not an operator action (process shutdown, deleting a dashboard user) and
+is not reachable from a route.
 
 One `NeuraBot` (`core/bot.py`, a `commands.Bot` with `self_bot=True`) per Discord account. All live
 instances are in `core.state.bot_instances`. `core/supervisor.py` is the only place bots are created or
 destroyed; the dashboard drives it so accounts can be started/stopped without restarting the process.
+The first Start in a space is also what opens its history db (`supervisor._open_space_history`, tracked
+in `supervisor.started_spaces`, closed by `neura._shutdown`).
+
+**One Discord account, one instance.** `supervisor.running_duplicate(token, user_id)` checks *every*
+space before creating a bot, and `NeuraBot.on_ready` repeats the check on `user_id` once login reveals
+it (two config rows can hold different tokens for the same account) — the later instance flags itself
+`duplicate` and closes. Two gateways on one account double every command it sends.
+
+**A running account's identity is frozen.** Name, token and channel ids may only change while the
+account is stopped; `_frozen_field_changed` in `dashboard/app.py` rejects the edit with 409, deleting a
+running row is rejected the same way, and `_verify_accounts` skips its channel write-back for a running
+account. The live bot was constructed from those three fields and re-reads `accounts.json` on every
+config change, so editing them underneath it rotates channels mid-session or leaves a swapped token
+unused until something restarts.
 
 **Threading rule:** Flask handlers run on a different thread than the asyncio loop. Anything awaitable
 must be scheduled with `asyncio.run_coroutine_threadsafe(coro, bot.loop)` or the `_bot_loop_call` /
@@ -78,7 +101,7 @@ Everything downstream carries the owner explicitly:
 
 - `utils/proxy_manager.py` — owner is the **first argument** of every stateful function.
 - `core/supervisor.py` — `find_bot(owner, name)`, `start_account(account, owner)`,
-  `stop_account(owner, name)`, `start_all(accounts, owner)`, `stop_all(owner=None)`,
+  `stop_account(owner, name)`, `stop_all(owner=None)`,
   `running_names(owner=None)`. Keying on `(owner, name)` is what stops two tenants who both named an
   account `acc1` from stopping each other's bot.
 - `NeuraBot` — `self.space_owner`, set from the supervisor; `bot.log`/`flag_account`/`_load_config` all
@@ -297,7 +320,14 @@ new settings key appears without frontend work; only its hint text (`CONFIG_CATE
   ready and on relevant config changes, so it must be idempotent).
 - Log through `bot.log(TYPE, message)`, not `print`. Types in use: `SYS`, `CMD`, `INFO`, `SUCCESS`,
   `COOLDOWN`, `STEALTH`, `GAMBLING`, `SECURITY`, `ALARM`, `WARN`, `ERROR`, `DEBUG`; colors come from
-  `config/logmisc.json`.
+  `config/logmisc.json`. **On a host, `bot.log` writes nothing to stdout at all** — `_console_levels`
+  in `modules/neura_logs.py` returns an empty set when any `RAILWAY_*` env var is set, so the
+  provider's log viewer is left for the web server's own output (the `console.print` calls in
+  `neura.py`, waitress errors, tracebacks) and per-account output goes only to the dashboard via
+  `_record` → `state.log_command`. `LAZYFARMERS_CONSOLE_LEVELS=ERROR,SECURITY` (or `all`) puts some
+  back; `LAZYFARMERS_PLAIN_LOGS` forces host/colour mode either way. A human on a real terminal still
+  sees every line. So: **do not use `print` for a bot-side diagnostic expecting to see it on Railway,
+  and do not "fix" the quiet console by widening the default set.**
 - `CURRENT_VERSION` in `core/bot.py` is a display string only. `check_version` used to fetch a remote
   `version.json` and `sys.exit(0)` on mismatch — a kill-switch pointed at someone else's repo. It is
   gone; do not reintroduce a remote version gate.

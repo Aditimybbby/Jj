@@ -256,6 +256,27 @@ class NeuraBot(commands.Bot):
         self.display_name = self.user.display_name
         self.user_display_name = self.display_name
 
+        # The start path already refuses a token that is live somewhere else, but
+        # two *different* tokens can belong to one Discord account (a re-login
+        # mints a new one, and the old entry keeps the stale string). Until READY
+        # there is no way to know that, so this is the second half of the same
+        # guard: whoever got here first keeps the session, the newcomer leaves.
+        # Two gateways farming one account double every command it sends.
+        twin = next((b for b in state.bot_instances
+                     if b is not self and str(getattr(b, 'user_id', '') or '') == self.user_id), None)
+        if twin:
+            other = getattr(twin, 'account_name', None) or 'another entry'
+            self.log("ERROR", f"{self.username} is already running as '{other}' - "
+                              f"stopping this duplicate instead of farming it twice")
+            self.flag_account("duplicate", f"same Discord account as '{other}'")
+            self.active = False
+            self.is_ready = False
+            try:
+                await self.close()
+            except Exception:
+                pass
+            return
+
         # so the dashboard can tell which space a running account belongs to
         state.account_owners[self.user_id] = self.space_owner
         self._persist_user_id()
@@ -1019,11 +1040,11 @@ class NeuraBot(commands.Bot):
             try:
                 if self.is_closed():
                     self.clear()
-                # Every login - first boot, Start All, or a reconnect after a blip -
-                # queues behind the same global gate, so a 200-account farm hands the
-                # gateway one IDENTIFY at a time instead of 200 TLS handshakes at once.
-                # Metering here rather than in the start path is the point: the
-                # reconnect below never went through supervisor.start_all.
+                # Every login - a Start click or a reconnect after a blip - queues
+                # behind the same global gate, so a farm coming back from one
+                # dropped uplink hands the gateway one IDENTIFY at a time instead
+                # of 200 TLS handshakes at once. Metering here rather than in the
+                # start path is the point: the reconnect below is not a start.
                 await state.login_slot()
                 if not self.active:
                     return
