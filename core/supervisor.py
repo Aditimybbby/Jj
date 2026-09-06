@@ -18,12 +18,15 @@ Accounts are addressed by (owner, name) - two dashboard users may both call an
 account "acc1", so a bare name is never enough to find the right bot.
 
 Nothing in here starts an account on its own. Every bot that exists was asked
-for by an explicit click on the dashboard's Start button; a restart, a redeploy
-or a crash brings the process back with an empty farm.
+for by an explicit click on the dashboard; a restart, a redeploy or a crash
+brings the process back with an empty farm.
+
+Starting many accounts is a queue, never a fan-out - see start_sequence.
 """
 
 
 import asyncio
+import os
 
 import core.state as state
 import utils.history_tracker as ht
@@ -262,23 +265,157 @@ async def stop_account(owner, name):
     return True, f"{name} stopped"
 
 
-# There is deliberately no start_all. A mass start is how a redeploy put ~16
-# accounts on the gateway inside eight seconds, buried the host's log viewer and
-# took the process out on thread exhaustion; it is also how a double-pressed
-# button interleaved two passes over the same farm. Accounts come up one click at
-# a time, through start_account.
+# ── starting a whole space, one account at a time ───────────────────────────
 #
-# stop_all survives because teardown has callers that are not the operator: the
-# process is shutting down, or a dashboard user was deleted and their accounts
-# must not outlive their accounts.json. It is not reachable from the UI.
+# There is no *simultaneous* start. Firing every account at once is what put ~16
+# of them on the gateway inside eight seconds, buried the host's log viewer under
+# the resulting cog-loading spam and took the process out. So a "start
+# everything" is a queue, not a fan-out: one account is started, waited on until
+# it is actually READY, then a gap, then the next.
 #
+# The gap is the point. state.login_slot only spaces the gateway handshakes
+# 0.35s apart, which is a rate limit for Discord, not a budget for the ~26 cogs
+# and the config load each account does behind it.
+START_GAP_S = 8.0            # LAZYFARMERS_START_GAP_S
+START_READY_TIMEOUT_S = 60.0  # give up waiting for READY and move on
+
+# One sequence per space, and a second click while one is running is refused
+# rather than queued - that is what "don't start them again and again" means. A
+# second pass over a farm that is already coming up does nothing but re-check
+# accounts the first pass has not reached yet.
+_sequences = {}
+
+
+def _env_float(name, default, low, high):
+    try:
+        value = float(os.environ.get(name, '').strip())
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def sequence_status(owner):
+    """What the Start-all queue for this space is doing, for the UI to poll."""
+    seq = _sequences.get(owner)
+    if not seq:
+        return {'active': False}
+    return dict(seq['progress'], active=not seq['task'].done())
+
+
+def cancel_sequence(owner):
+    seq = _sequences.get(owner)
+    if not seq or seq['task'].done():
+        return False
+    seq['progress']['cancelled'] = True
+    seq['task'].cancel()
+    return True
+
+
+async def _wait_ready(bot, timeout):
+    """Block until the account is logged in, gave up, or ran out of patience."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if getattr(bot, 'is_ready', False):
+            return 'ready'
+        if bot not in state.bot_instances:
+            # _run removed it: the login failed or the token was rejected
+            return 'gone'
+        await asyncio.sleep(0.5)
+    return 'timeout'
+
+
+async def _run_sequence(owner, accounts, gap):
+    progress = _sequences[owner]['progress']
+    proxies = proxy_manager.load_proxies(owner)
+    try:
+        for i, account in enumerate(accounts):
+            name = account.get('name') or 'unnamed'
+            progress['current'] = name
+            # One account must not be able to take the queue down with it. Without
+            # this, a single raising start_account left the remaining accounts
+            # never started and nothing said why - the progress line simply froze.
+            try:
+                ok, message = await start_account(account, owner, proxies=proxies)
+                if not ok:
+                    progress['skipped'].append(message)
+                else:
+                    bot = find_bot(owner, name)
+                    outcome = await _wait_ready(bot, START_READY_TIMEOUT_S) if bot else 'gone'
+                    if outcome == 'ready':
+                        progress['started'].append(name)
+                    elif outcome == 'gone':
+                        progress['failed'].append(f"{name} could not log in")
+                    else:
+                        # still connecting - a slow proxy, not a failure. Leave it
+                        # to the reconnect loop and carry on rather than stalling
+                        # the rest of the farm behind it.
+                        progress['started'].append(f"{name} (still connecting)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                progress['failed'].append(f"{name}: {e}")
+            progress['done'] = i + 1
+
+            if i + 1 < len(accounts):
+                await asyncio.sleep(gap)
+    except asyncio.CancelledError:
+        progress['cancelled'] = True
+        raise
+    except Exception as e:
+        # asyncio swallows a task exception until the task is garbage collected,
+        # so without this the queue would just stop with no explanation anywhere.
+        progress['failed'].append(f"start queue stopped: {e}")
+        state.log_command("ERROR", f"Start-all queue stopped: {e}", "error", owner=owner)
+    finally:
+        progress['current'] = None
+        state.log_command(
+            "SYS",
+            f"Start-all finished: {len(progress['started'])} started, "
+            f"{len(progress['skipped'])} skipped, {len(progress['failed'])} failed"
+            + (" (cancelled)" if progress['cancelled'] else ""),
+            "info", owner=owner)
+
+
+def start_sequence(owner, accounts):
+    """Queue every account in `accounts` to start one at a time.
+
+    Returns (started, message). Does not wait for the queue to drain: sixteen
+    accounts at an eight second gap is over two minutes, and no HTTP request
+    should be held open for that.
+    """
+    owner = spaces.normalise_owner(owner)
+    seq = _sequences.get(owner)
+    if seq and not seq['task'].done():
+        return False, "this space is already starting accounts - let it finish"
+
+    pending = [a for a in accounts if not find_bot(owner, a.get('name'))]
+    if not pending:
+        return False, "every account is already running"
+
+    gap = _env_float('LAZYFARMERS_START_GAP_S', START_GAP_S, low=1.0, high=120.0)
+    progress = {'total': len(pending), 'done': 0, 'current': None,
+                'started': [], 'skipped': [], 'failed': [], 'cancelled': False,
+                'gap': gap}
+    _sequences[owner] = {'progress': progress, 'task': None}
+    _sequences[owner]['task'] = asyncio.ensure_future(_run_sequence(owner, pending, gap))
+
+    minutes = (len(pending) - 1) * gap / 60.0
+    return True, (f"starting {len(pending)} account(s), one every {gap:.0f}s "
+                  f"(about {minutes:.0f} min)")
+
+
 # Teardown is bounded rather than unbounded: each stop_account may wait up to 10s
 # on a runner task and then close a gateway connection, so serial teardown of 200
-# accounts could not finish inside any sane HTTP timeout.
+# accounts could not finish inside any sane HTTP timeout. Stopping is cheap in a
+# way starting is not - no logins, no cog loading - so it may go wide.
 STOP_CONCURRENCY = 16
 
 
 async def stop_all(owner=None):
+    # A queue still feeding accounts in would undo this as fast as it works.
+    for space in ([owner] if owner is not None else list(_sequences)):
+        cancel_sequence(space)
+
     targets = [
         bot for bot in list(state.bot_instances)
         if account_name(bot) and (owner is None or bot_owner(bot) == owner)

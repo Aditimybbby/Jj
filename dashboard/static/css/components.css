@@ -68,6 +68,28 @@
     border-color: transparent;
     box-shadow: 0 6px 24px var(--accent-glow);
 }
+
+.btn-control.danger {
+    border-color: rgba(251, 113, 133, 0.4);
+    color: var(--danger);
+    background: rgba(251, 113, 133, 0.08);
+}
+.btn-control.danger::before { background: linear-gradient(135deg, #fb7185 0%, #f43f5e 100%); }
+.btn-control.danger:hover {
+    color: #2a0710;
+    border-color: transparent;
+    box-shadow: 0 6px 24px rgba(251, 113, 133, 0.35);
+}
+
+/* A queue is running, or the farm is already stopped - the press would do nothing */
+.btn-control:disabled,
+.btn-control:disabled:hover {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+.btn-control:disabled::before { opacity: 0; }
 .btn-control.green:hover::before { opacity: 1; }
 
 .btn-control.red {

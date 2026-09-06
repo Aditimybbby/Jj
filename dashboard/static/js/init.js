@@ -99,6 +99,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     scheduleFarmPoll(fetchAccountConfig, 5000);
     scheduleFarmPoll(window.fetchAccounts, 5000);
 
+    // A start queue outlives the page that armed it - it runs in the server
+    // process, so a reload or a second tab must pick the progress line back up
+    // rather than showing a farm that appears to be starting itself. This polls
+    // once and only keeps going if a queue is actually live.
+    if (window.pollStartAll) window.pollStartAll();
+
     // /api/stats is the heaviest payload the dashboard reads, and it used to run on
     // a fixed 1s setInterval that neither waited for the previous response nor cared
     // how big the farm was. Reuse the same self-rescheduling shape as the farm polls

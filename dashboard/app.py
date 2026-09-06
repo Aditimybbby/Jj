@@ -1415,15 +1415,75 @@ def account_stop():
     return jsonify({'success': ok, 'message': message})
 
 
-# There is no launch_all / stop_all route on purpose. One button that puts every
-# account on the gateway at once is what a redeploy did to this process: ~16
-# logins inside eight seconds, the host's log rate limit tripped, then death by
-# thread exhaustion - and a second press while the first was still working
-# interleaved two passes over the same farm. Accounts are started and stopped one
-# click at a time, through /api/accounts/launch and /api/accounts/stop.
-#
-# supervisor.stop_all is still used for teardown that is not an operator action
-# (process shutdown, deleting a dashboard user), just not from a route.
+# Start All is a queue, never a fan-out. The route returns as soon as the queue is
+# armed - one account every LAZYFARMERS_START_GAP_S seconds is minutes of work for
+# a real farm, and holding a request open that long just means a proxy timeout
+# halfway through with no idea what got started.
+@app.route('/api/accounts/launch_all', methods=['POST'])
+@space_required
+def account_launch_all():
+    from utils import proxy_manager
+    accounts = [a for a in proxy_manager.load_accounts(g.owner) if a.get('enabled', True)]
+    if not accounts:
+        return jsonify({'success': False, 'error': 'No enabled accounts to start'}), 400
+
+    # start_sequence only arms a task; it does not await the accounts, so it is
+    # safe to call it and return. It refuses a second arming while one is live.
+    result, error = _bot_loop_call(_arm_sequence(g.owner, accounts))
+    if error:
+        return jsonify({'success': False, 'error': error}), 503
+    ok, message = result
+    state.log_command("SYS", message, "success" if ok else "error", owner=g.owner)
+    if not ok:
+        return jsonify({'success': False, 'error': message}), 409
+    return jsonify({'success': True, 'message': message})
+
+
+async def _arm_sequence(owner, accounts):
+    """start_sequence is sync but must run on the loop - it creates a task."""
+    from core import supervisor
+    return supervisor.start_sequence(owner, accounts)
+
+
+async def _cancel_sequence(owner):
+    from core import supervisor
+    return supervisor.cancel_sequence(owner)
+
+
+@app.route('/api/accounts/launch_all', methods=['GET'])
+@space_required
+def account_launch_all_status():
+    from core import supervisor
+    return jsonify({'success': True, 'progress': supervisor.sequence_status(g.owner)})
+
+
+@app.route('/api/accounts/launch_all/cancel', methods=['POST'])
+@space_required
+def account_launch_all_cancel():
+    # task.cancel() is not thread-safe, and this handler is on a waitress thread
+    result, error = _bot_loop_call(_cancel_sequence(g.owner), timeout=15)
+    if error:
+        return jsonify({'success': False, 'error': error}), 503
+    cancelled = result
+    if cancelled:
+        state.log_command("SYS", "Start-all queue cancelled - already started "
+                                 "accounts keep running", "info", owner=g.owner)
+    return jsonify({'success': True, 'cancelled': cancelled})
+
+
+@app.route('/api/accounts/stop_all', methods=['POST'])
+@space_required
+def account_stop_all():
+    # Stopping may go wide: no logins, no cog loading, nothing that made the mass
+    # *start* dangerous. It also cancels a start queue that is still feeding.
+    from core import supervisor
+    result, error = _bot_loop_call(supervisor.stop_all(g.owner), timeout=180)
+    if error:
+        return jsonify({'success': False, 'error': error}), 503
+    stopped = sum(1 for ok, _ in result if ok)
+    state.log_command("SYS", f"Stopped {stopped} account(s)", "success", owner=g.owner)
+    _invalidate_snapshots(g.owner)
+    return jsonify({'success': True, 'message': f'Stopped {stopped} account(s)'})
 
 
 async def _verify_accounts(owner, accounts, targets):

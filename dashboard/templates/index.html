@@ -155,11 +155,18 @@
 
                 <div>
                     <h3 class="section-subtitle" style="margin-top: 32px;">Manage Accounts</h3>
-                    <p class="accounts-page-hint">Every account needs a name, a token and at least one channel ID. Proxy is optional — leave as direct if not needed. Start each account you want running with its own Start button; nothing starts on its own, so a restart or redeploy leaves the farm stopped. A running account's name, token and channel IDs are locked — stop it first to edit them.</p>
+                    <p class="accounts-page-hint">Every account needs a name, a token and at least one channel ID. Proxy is optional — leave as direct if not needed. START ALL queues every enabled account and brings them up <em>one at a time</em>, not all at once; you can keep using the dashboard while it works. Nothing starts on its own, so a restart or redeploy leaves the farm stopped. A running account's name, token and channel IDs are locked — stop it first to edit them.</p>
+                    <div id="start-all-progress" class="start-all-progress" style="display:none;"></div>
                     <div class="account-manage-toolbar">
                         <button class="btn-control green" onclick="showAccountForm()"><span class="icon-svg"
                                 style="--icon: url('/static/assets/neura_icons/plus.svg');"></span> <span
                                 class="btn-text">ADD ACCOUNT</span></button>
+                        <button id="btn-start-all" class="btn-control green" onclick="launchAllAccounts()"><span
+                                class="icon-svg" style="--icon: url('/static/assets/neura_icons/play.svg');"></span>
+                            <span class="btn-text">START ALL</span></button>
+                        <button id="btn-stop-all" class="btn-control danger" onclick="stopAllAccounts()"><span
+                                class="icon-svg" style="--icon: url('/static/assets/neura_icons/stop.svg');"></span>
+                            <span class="btn-text">STOP ALL</span></button>
                         <button class="btn-control" onclick="showBulkImport()"><span class="icon-svg"
                                 style="--icon: url('/static/assets/neura_icons/layers.svg');"></span> <span
                                 class="btn-text">BULK IMPORT</span></button>

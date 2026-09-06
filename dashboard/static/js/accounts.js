@@ -336,10 +336,91 @@ window.stopAccount = function(name) {
     return accountAction('/api/accounts/stop', { name: decodeURIComponent(name) }, 'Stopping account');
 };
 
-// No launchAllAccounts / stopAllAccounts. Starting the whole farm with one press
-// is what put every account on the gateway inside a few seconds and took the
-// process down with it; a second press while the first was still working ran two
-// passes over the same accounts. One account, one click.
+// START ALL queues the farm; it does not fan out. The server brings accounts up
+// one at a time with a gap between them, so this call returns immediately and the
+// progress line below is how you watch it. Pressing it again while a queue is
+// live is refused by the server (409), not queued behind the first.
+window.startAllPolling = null;
+
+window.launchAllAccounts = async function() {
+    const btn = document.getElementById('btn-start-all');
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/accounts/launch_all', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || data.error || 'Start-all failed',
+                  data.success ? 'info' : 'error');
+    } catch (e) {
+        showToast('Request failed', 'error');
+    }
+    pollStartAll();
+};
+
+window.cancelStartAll = async function() {
+    try {
+        await fetch('/api/accounts/launch_all/cancel', { method: 'POST' });
+        showToast('Queue cancelled — accounts already started keep running', 'info');
+    } catch (e) {
+        showToast('Request failed', 'error');
+    }
+    pollStartAll();
+};
+
+window.stopAllAccounts = async function() {
+    if (!confirm('Stop every running account in this space?')) return;
+    const btn = document.getElementById('btn-stop-all');
+    if (btn) btn.disabled = true;
+    await accountAction('/api/accounts/stop_all', {}, 'Stopping all accounts');
+    if (btn) btn.disabled = false;
+    pollStartAll();
+};
+
+function renderStartAll(p) {
+    const box = document.getElementById('start-all-progress');
+    const startBtn = document.getElementById('btn-start-all');
+    if (!box) return false;
+
+    if (!p || !p.active) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+        if (startBtn) startBtn.disabled = false;
+        return false;
+    }
+
+    if (startBtn) startBtn.disabled = true;
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    const now = p.current ? `starting <strong>${escHtml(p.current)}</strong>` : 'waiting';
+    box.style.display = '';
+    box.innerHTML = `
+        <div class="start-all-row">
+            <span>Starting accounts one at a time — ${p.done}/${p.total} done, ${now}
+                  (one every ${Math.round(p.gap)}s)</span>
+            <button class="btn-proxy-sm danger" onclick="cancelStartAll()">Cancel queue</button>
+        </div>
+        <div class="start-all-bar"><span style="width:${pct}%"></span></div>`;
+    return true;
+}
+
+// Only polls while a queue is live, and stops itself the moment it is not - the
+// accounts page already refreshes on its own timer and does not need a second one
+// running forever.
+window.pollStartAll = async function() {
+    if (window.startAllPolling) {
+        clearTimeout(window.startAllPolling);
+        window.startAllPolling = null;
+    }
+    let active = false;
+    try {
+        const res = await fetch('/api/accounts/launch_all');
+        const data = await res.json();
+        active = renderStartAll(data.progress);
+    } catch (e) {
+        renderStartAll(null);
+    }
+    if (active) {
+        window.startAllPolling = setTimeout(window.pollStartAll, 2000);
+    }
+};
 
 window.verifyAccounts = async function(names) {
     const payload = names ? { names: names.map(decodeURIComponent) } : {};

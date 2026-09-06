@@ -49,12 +49,22 @@ prompt would otherwise keep the dashboard from ever serving.
 
 **Nothing starts an account on its own.** The process comes up with an empty farm every time — a
 redeploy, a crash-restart or a host migration leaves the farm exactly as stopped as it found it, and
-there is no autostart flag. An account runs because someone pressed Start on its card. There is
-deliberately no Start All / Stop All and no `supervisor.start_all`: bringing ~16 accounts up at once is
-what tripped Railway's 500-lines/sec log limit and then killed the process with
-`std::system_error: Resource temporarily unavailable` (thread exhaustion). `supervisor.stop_all`
-survives for teardown that is not an operator action (process shutdown, deleting a dashboard user) and
-is not reachable from a route.
+there is no autostart flag. An account runs because someone asked for it on the dashboard.
+
+**Starting many accounts is a queue, never a fan-out.** Start All (`/api/accounts/launch_all` →
+`supervisor.start_sequence`) walks the space's enabled accounts *one at a time*: start it, wait for
+READY (60 s cap, then move on rather than stall the farm behind a slow proxy), sleep
+`LAZYFARMERS_START_GAP_S` (default 8 s), next. Do **not** replace this with `asyncio.gather` — putting
+~16 accounts on the gateway inside eight seconds is what tripped Railway's 500-lines/sec log limit and
+then killed the process with `std::system_error: Resource temporarily unavailable`. `state.login_slot`
+(0.35 s) is a Discord rate limit, not a budget for the ~26 cogs each account loads behind it.
+
+One sequence per space, held in `supervisor._sequences`. Arming a second while one is live is refused
+(409), not queued — a second pass over a farm that is already coming up does nothing. The route returns
+as soon as the queue is armed; the UI polls `GET /api/accounts/launch_all` for progress and can
+`POST /api/accounts/launch_all/cancel`. `stop_all` cancels any live sequence first, or the queue would
+undo the stop as fast as it worked. Stopping may go wide (`STOP_CONCURRENCY = 16`) — no logins, no cog
+loading, none of what made a mass *start* dangerous.
 
 One `NeuraBot` (`core/bot.py`, a `commands.Bot` with `self_bot=True`) per Discord account. All live
 instances are in `core.state.bot_instances`. `core/supervisor.py` is the only place bots are created or
