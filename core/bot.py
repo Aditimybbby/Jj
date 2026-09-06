@@ -323,11 +323,13 @@ class NeuraBot(commands.Bot):
         active_cmds = [f"{k}({v['delay']}s)" for k, v in self.cmd_states.items()]
         self.log("DEBUG", f"Active Scheduler: {', '.join(active_cmds) if active_cmds else 'None'}")
         
+        # The solvers were already rebuilt above, right after _load_config, which
+        # is the only thing that changes what they read. Building them a second
+        # time here re-ran that work on every ready *and* every reconnect, and
+        # threw away any WebSolver state - a queued manual solve, for one - that
+        # had been created in between.
         self.interactions = setup_interactions(self)
-        self.captcha_solver = setup_solver(self)
-        self.web_solver = setup_web_solver(self)
-        self.browser_solver = setup_browser_solver(self)
-        
+
         self.log("INFO", f"Channel: {self.channel_id}")
         
         self.is_ready = True

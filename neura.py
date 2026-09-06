@@ -316,6 +316,16 @@ async def main():
         else:
             console.print("[bold yellow]No accounts yet - add them on the dashboard Accounts page.[/bold yellow]")
         console.print("[bold green]Dashboard is in control. Start, stop and verify accounts from the Accounts page.[/bold green]")
+
+        # Leave a marker in the dashboard's log view. That view is an in-memory
+        # deque, so a restart empties it - and with nothing starting on boot the
+        # farm is empty too. "Every account stopped and the log is blank" is
+        # therefore what a crash-restart looks like from the dashboard, and it is
+        # indistinguishable from someone having stopped them by hand unless the
+        # process says so on the way up.
+        state.log_command("SYS", f"Process started - {configured} account(s) configured, "
+                                 f"none running yet", "info")
+
         while True:
             await asyncio.sleep(60)
 

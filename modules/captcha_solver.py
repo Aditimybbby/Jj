@@ -13,6 +13,7 @@
 import os
 import io
 import asyncio
+import threading
 import aiohttp
 import numpy as np
 from PIL import Image
@@ -24,6 +25,58 @@ except ImportError:
 
 
 # Credit to Owo-Dusk for onnxmodel https://github.com/owo-dusk/owo-dusk/blob/main/utils/captcha_solver/best.onnx
+
+
+# One InferenceSession for the whole process, not one per account.
+#
+# It used to be per account, and on_ready built a second one for the same bot -
+# and on_ready fires again on every reconnect, so the count only ever grew. Each
+# session is 12MB of weights plus, with default SessionOptions, a native thread
+# pool sized to the *host's* core count rather than the container's share. A farm
+# of sixteen accounts was therefore carrying a few hundred megabytes of duplicate
+# model and several hundred threads it never used, and eventually died either on
+# the memory limit (SIGKILL - no traceback, nothing in the log) or inside
+# onnxruntime's own thread creation (terminate called after throwing an instance
+# of 'std::system_error': Resource temporarily unavailable).
+#
+# Nothing about the session is per-account: same file, same weights, and
+# Session.run is thread-safe. A shared one costs 12MB no matter how many accounts
+# are up. The thread caps are deliberate - a captcha is one 384px image every few
+# hours, run on a worker thread already, so intra-op parallelism buys nothing and
+# the pool is pure overhead.
+_SESSION_LOCK = threading.Lock()
+_SESSION = None
+_SESSION_TRIED = False
+_SESSION_ERROR = None
+
+
+def _shared_session(model_path):
+    """Load the model once. Returns (session, error_message)."""
+    global _SESSION, _SESSION_TRIED, _SESSION_ERROR
+    with _SESSION_LOCK:
+        if _SESSION_TRIED:
+            return _SESSION, _SESSION_ERROR
+        _SESSION_TRIED = True
+
+        if onnxruntime is None:
+            _SESSION_ERROR = "onnxruntime not installed. AI Solver disabled."
+            return None, _SESSION_ERROR
+        if not os.path.exists(model_path):
+            _SESSION_ERROR = f"AI Model not found at {model_path}"
+            return None, _SESSION_ERROR
+
+        try:
+            opts = onnxruntime.SessionOptions()
+            opts.intra_op_num_threads = 1
+            opts.inter_op_num_threads = 1
+            _SESSION = onnxruntime.InferenceSession(
+                model_path,
+                sess_options=opts,
+                providers=["CPUExecutionProvider"]
+            )
+        except Exception as e:
+            _SESSION_ERROR = f"Failed to load AI model: {e}"
+        return _SESSION, _SESSION_ERROR
 
 
 class CaptchaSolver:
@@ -41,24 +94,15 @@ class CaptchaSolver:
         self.min_answer_conf = 0.5
         self.img_size = 384
         
-        if onnxruntime:
-            self._load_model()
-        else:
-            self.bot.log("SYS", "onnxruntime not installed. AI Solver disabled.")
+        self._load_model()
 
     def _load_model(self):
-        if not os.path.exists(self.model_path):
-            self.bot.log("ERROR", f"AI Model not found at {self.model_path}")
-            return
-
-        try:
-            self.onnx_session = onnxruntime.InferenceSession(
-                self.model_path,
-                providers=["CPUExecutionProvider"]
-            )
+        """Attach to the process-wide session; the first caller pays for the load."""
+        self.onnx_session, error = _shared_session(self.model_path)
+        if self.onnx_session is not None:
             self.bot.log("SYS", "AI Captcha Solver initialized.")
-        except Exception as e:
-            self.bot.log("ERROR", f"Failed to load AI model: {e}")
+        elif error:
+            self.bot.log("ERROR" if "not installed" not in error else "SYS", error)
 
     def _letterbox(self, img_array, new_size=384, color=(114, 114, 114)):
         """resize image with padding to maintain aspect ratio."""
