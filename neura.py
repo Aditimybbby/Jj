@@ -237,7 +237,7 @@ def load_enabled_accounts(owner):
     quietly coming back and farming behind their back.
     """
     return [
-        a for a in proxy_manager.load_accounts(owner)
+        a for a in proxy_manager.load_accounts_or_empty(owner)
         if a.get('enabled', True) and proxy_manager.wants_autostart(a)
     ]
 
@@ -279,7 +279,7 @@ def spaces_with_accounts():
 
 def configured_account_count():
     """How many accounts exist across every space, autostart or not."""
-    return sum(len(proxy_manager.load_accounts(owner)) for owner in spaces.list_owners())
+    return sum(len(proxy_manager.load_accounts_or_empty(owner)) for owner in spaces.list_owners())
 
 
 def _menu_choice():
