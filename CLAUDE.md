@@ -208,6 +208,19 @@ function takes `owner=None` (None means the admin space, which keeps the legacy
 *message text* (`"Sent: owo hunt"`, `"captcha solved"`, `"ban detected"`, …) to increment counters and
 write history rows. Rewording a `bot.log(...)` string can silently break dashboard stats.
 
+**The only log that survives the process is `data/neura.log`.** `modules/log_file.py` mirrors every
+`state.log_command` line onto the volume from a writer thread (batched, never fsynced, never blocking
+the loop — a full queue drops lines and reports the count rather than stalling the farm). Start of run
+rolls the old file to `neura.log.1`, so a crash-restart cannot bury the evidence of what caused it.
+`neura.main()` calls `log_file.start()`, which returns `(clean, previous)` — `True` if the last run set
+the `data/clean_shutdown` marker, `False` if it vanished without one, `None` on a first boot with
+nothing to judge. `_shutdown(clean=…)` writes that marker, a SIGTERM/SIGINT handler turns the host's
+redeploy signal into a `SystemExit` so a deploy is not filed as a crash, and faulthandler dumps native
+aborts into its own `neura_crash.log` (its own file because an open handle makes rotation fail on
+Windows). Read it with `GET /api/debug/logfile?previous=1&lines=N` (admin only). When something stops
+and "the log shows nothing", `neura.log.1` is the thing to read — the dashboard log view is a deque and
+comes back empty with the farm.
+
 ### Message handling
 
 Every cog filters `on_message` the same way: author id == `core.monitor_bot_id` (the OwO bot,

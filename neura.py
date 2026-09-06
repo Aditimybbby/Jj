@@ -22,9 +22,11 @@ import subprocess
 import asyncio
 import random
 import json
+import signal
 import socket
 import threading
 import time
+import traceback
 from rich.console import Console
 from rich.align import Align
 
@@ -35,6 +37,7 @@ from core.bot import NeuraBot
 from core import spaces, supervisor
 from dashboard.app import app as flask_app
 import core.state as state
+from modules import log_file
 from utils import proxy_manager
 
 console = Console()
@@ -231,7 +234,7 @@ def start_dashboard():
 _shutdown_done = threading.Event()
 
 
-def _shutdown():
+def _shutdown(clean=True):
     """Close history sessions and flush stats. Safe to call from any thread, once."""
     if _shutdown_done.is_set():
         return
@@ -247,6 +250,19 @@ def _shutdown():
         console.print("\n[bold yellow][!] Systems shut down. History saved.[/bold yellow]")
     except Exception as e:
         console.print(f"[red]Shutdown bookkeeping failed: {e}[/red]")
+
+    # Last, and outside the try: reaching here at all means this exit was ours.
+    # Anything that skips it - a kill, an abort - leaves the marker absent and the
+    # next boot reports the previous run as having died.
+    try:
+        if clean:
+            log_file.write("SYS", "LazyFarmers", "Shutting down cleanly")
+            log_file.mark_clean_shutdown()
+        else:
+            log_file.write("ERROR", "LazyFarmers", "Shutting down after a crash")
+        log_file.flush()
+    except Exception:
+        pass
 
 def configured_account_count():
     """How many accounts exist across every space."""
@@ -284,6 +300,19 @@ def _run_account_manager():
 async def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     supervisor.bind_loop(asyncio.get_running_loop())
+
+    # First, before anything can fail: the on-disk log is the only record that
+    # outlives this process, and a crash during startup is exactly the case where
+    # there is otherwise nothing to read afterwards.
+    clean, previous = log_file.start()
+    if clean is False:
+        console.print("[bold red]The previous run did not shut down cleanly - it was "
+                      "killed or it crashed.[/bold red]")
+        if previous:
+            console.print(f"[bold red]Its last lines are in {previous}[/bold red]")
+            for line in log_file.tail(25, previous=True):
+                console.print(f"[dim]  {line.rstrip()}[/dim]")
+
     # before the banner and the menu, so a blocked console can never hide the dashboard
     start_dashboard()
     while True:
@@ -329,8 +358,28 @@ async def main():
         while True:
             await asyncio.sleep(60)
 
+def _handle_signal(signum, _frame):
+    """Turn the host's shutdown signal into an ordinary exit.
+
+    Railway sends SIGTERM to redeploy. Python's default action for it is to die on
+    the spot - no finally blocks, no _shutdown - so history was left unclosed and,
+    now that we record how the process ended, every redeploy would have been filed
+    as a crash. Raising SystemExit sends it down the same path as Ctrl-C.
+    """
+    console.print(f"\n[yellow]Received signal {signum} - shutting down.[/yellow]")
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
+    for _sig in ('SIGTERM', 'SIGINT'):
+        try:
+            signal.signal(getattr(signal, _sig), _handle_signal)
+        except (AttributeError, ValueError, OSError):
+            # not every platform has both, and signal() only works on the main thread
+            pass
+
     exit_code = 0
+    crashed = False
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -340,6 +389,18 @@ if __name__ == "__main__":
         # 0 and a restart-on-failure policy had nothing to react to
         code = e.code
         exit_code = code if isinstance(code, int) else (0 if code is None else 1)
+    except BaseException:
+        # Record it before unwinding: this is the shape of death that used to leave
+        # nothing behind, and the traceback belongs in the file that survives.
+        crashed = True
+        exit_code = 1
+        try:
+            log_file.write("ERROR", "LazyFarmers",
+                           "Unhandled exception - " + traceback.format_exc())
+        except Exception:
+            pass
+        console.print_exception(show_locals=False)
     finally:
-        _shutdown()
+        # A crash is not a clean shutdown, so the next boot must still say so.
+        _shutdown(clean=not crashed)
     sys.exit(exit_code)

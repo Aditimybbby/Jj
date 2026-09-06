@@ -1064,6 +1064,26 @@ def debug():
         'full_history_count': len(state.full_session_history)
     })
 
+@app.route('/api/debug/logfile')
+@admin_required
+def debug_logfile():
+    """The on-disk log, which is the only copy that survives the process dying.
+
+    `?previous=1` reads the run before this one - after a crash-restart that is
+    the file with the answer in it, since the in-memory log view came back empty
+    along with the farm.
+    """
+    from modules import log_file
+    previous = request.args.get('previous') in ('1', 'true', 'yes')
+    try:
+        lines = int(request.args.get('lines', 300))
+    except (TypeError, ValueError):
+        lines = 300
+    lines = max(1, min(5000, lines))
+    return jsonify({'success': True, 'previous': previous,
+                    'lines': log_file.tail(lines, previous=previous)})
+
+
 @app.route('/api/debug_status')
 @admin_required
 def debug_status():

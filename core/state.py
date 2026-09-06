@@ -407,6 +407,16 @@ def log_command(type, message, status="info", bot_name=None, bot_id=None, owner=
         "owner": owner or (owner_of(bot_id) if bot_id else None),
     }
     
+    # Everything in this function is in memory, so a restart erases it. Mirror the
+    # line to the volume first - that copy is the only one that can explain why a
+    # process died, and it has to be written before the deque it would otherwise
+    # be the only record in.
+    try:
+        from modules import log_file
+        log_file.write(type, bot_name or "system", message)
+    except Exception:
+        pass
+
     command_logs.appendleft(entry)
     if bot_id:
         buf = bot_logs.get(str(bot_id))

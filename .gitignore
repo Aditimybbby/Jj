@@ -65,6 +65,12 @@ data/giveaway_db*.json
 data/history.json
 data/neura_history.db
 data/setup.log
+# the runtime log and its rotation - carries account names and everything the
+# dashboard log view shows, so it is generated output, not something to commit
+data/neura.log
+data/neura.log.*
+data/clean_shutdown
+data/neura_crash.log
 
 # ===============================
 # Virtual environments
