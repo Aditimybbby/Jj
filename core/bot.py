@@ -77,7 +77,14 @@ class NeuraBot(commands.Bot):
                 self.channels = self.channels or primary.get('channels', [])
         
         self.channel_id = int(self.channels[0]) if self.channels else None
-        
+
+        # channel id -> time after which we may try fetch_channel again. A channel
+        # the account cannot see (Missing Access) fails permanently, but every
+        # scheduled command re-resolves it, so without this each dead channel meant
+        # one Discord REST call and one ERROR line per command per tick - a flood
+        # that rate-limits the account and drowns the log. See _resolve_channel.
+        self._channel_block = {}
+
         core_cfg = self.config.get('core', {})
         self.prefix = core_cfg.get('prefix', 'owo ')
         self.user_id = core_cfg.get('user_id')
@@ -354,15 +361,44 @@ class NeuraBot(commands.Bot):
         _log.error("Ignoring exception in command %s", getattr(context, 'command', None),
                    exc_info=exception)
 
+    # Discord error codes that will not change on a retry: the account is simply not
+    # in the channel (or the channel is gone). Anything else - a network blip, a proxy
+    # hiccup, a 5xx - is worth trying again next tick.
+    _PERMANENT_CHANNEL_ERRORS = frozenset({50001, 10003, 50013})
+    _CHANNEL_BLOCK_TTL = 300
+
     async def _resolve_channel(self, c_id):
         channel = self.get_channel(c_id)
-        if not channel:
-            try:
-                channel = await self.fetch_channel(c_id)
-            except Exception as e:
+        if channel:
+            # cache hit means access is (back), so stop suppressing this channel
+            self._channel_block.pop(c_id, None)
+            return channel
+
+        blocked_until = self._channel_block.get(c_id)
+        if blocked_until and time.time() < blocked_until:
+            # already known unreachable and still inside the cooldown: no REST call,
+            # no log line - just skip this send silently
+            return None
+
+        try:
+            channel = await self.fetch_channel(c_id)
+            self._channel_block.pop(c_id, None)
+            return channel
+        except Exception as e:
+            code = getattr(e, 'code', None)
+            if code in self._PERMANENT_CHANNEL_ERRORS:
+                first = c_id not in self._channel_block
+                self._channel_block[c_id] = time.time() + self._CHANNEL_BLOCK_TTL
+                # log the problem once per cooldown, not once per command, and say what
+                # to actually do about it
+                if first:
+                    self.log("ERROR", f"Cannot reach channel {c_id} ({e}) - this account "
+                                      f"is not in it. Pausing retries for "
+                                      f"{self._CHANNEL_BLOCK_TTL}s; fix its channels list "
+                                      f"or the account's server access.")
+            else:
                 self.log("ERROR", f"Failed to fetch channel {c_id}: {e}")
-                return None
-        return channel
+            return None
 
     async def _raw_send(self, content, channel, skip_typing=False):
         """Put a message on the wire. Every safety gate is the caller's job."""
