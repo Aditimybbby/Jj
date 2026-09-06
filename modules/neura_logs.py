@@ -31,10 +31,31 @@ def _plain_logs_wanted():
     return any(key.startswith('RAILWAY_') for key in os.environ)
 
 
+def _console_levels():
+    """Which log types are allowed onto the host console.
+
+    On a host (Railway) the per-account farming chatter - every hunt, gamble,
+    cooldown and stealth-typing line - is just noise in the provider's log
+    viewer, and the dashboard already keeps all of it. So the host console is
+    held to problems and security events; everything else is dropped from stdout
+    but still recorded for the website. LAZYFARMERS_CONSOLE_LEVELS overrides with
+    a comma list of types, or the word 'all' to restore the full firehose. Only
+    applies in plain/host mode - a human watching a real terminal still sees
+    every line in colour.
+    """
+    raw = os.environ.get('LAZYFARMERS_CONSOLE_LEVELS', '').strip()
+    if raw:
+        if raw.lower() == 'all':
+            return None
+        return {part.strip().upper() for part in raw.split(',') if part.strip()}
+    return {'ERROR', 'WARN', 'SECURITY', 'ALARM'}
+
+
 class NeuraLogs:
     def __init__(self):
         self.console = Console()
         self.plain = _plain_logs_wanted()
+        self.console_levels = _console_levels()
         self.log_config = {}
         self.last_logs = {}
         self._load_config()
@@ -68,6 +89,14 @@ class NeuraLogs:
         self.last_logs[dedup_key] = now
 
         username = bot.username if hasattr(bot, 'username') else "Bot"
+
+        # Host console stays clean: routine per-account chatter never reaches the
+        # provider's log viewer, but the dashboard log view still gets every line
+        # through _record. Errors, warnings and security events always pass.
+        if self.plain and self.console_levels is not None and log_type not in self.console_levels:
+            self._record(bot, log_type, message, username)
+            return
+
         if self.plain:
             # one write, no markup parsing, no shared console lock
             print(f"[{username}] {time.strftime('%I:%M:%S %p')} [{log_type}]  {message}", flush=True)
